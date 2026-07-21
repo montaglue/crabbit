@@ -1,0 +1,19 @@
+[package]
+name = "crabbit-inspect-driver"
+description = "pliron-inspect driver for the crabbit dialects and passes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "crabbit-inspect-driver"
+path = "src/main.rs"
+
+[dependencies]
+pliron.workspace = true
+llvm-compat.workspace = true
+pliron-ll.workspace = true
+crabbit-mir.workspace = true
+pliron-inspect-driver = { path = "../../../pliron-inspect/crates/driver" }
+anyhow.workspace = true
+clap.workspace = true

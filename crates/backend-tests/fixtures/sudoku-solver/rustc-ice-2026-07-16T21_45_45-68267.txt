@@ -1,0 +1,109 @@
+thread 'rustc' panicked at crates/stair/src/ir/value.rs:213:23:
+Dangling Ptr deref
+stack backtrace:
+   0:        0x10f9291a8 - <std[31b301d8cbc0d3bd]::backtrace::Backtrace>::create
+   1:        0x10d60f930 - std[31b301d8cbc0d3bd]::panicking::update_hook::<alloc[6c9f40a3385bb0]::boxed::Box<rustc_driver_impl[2877084a87e0f82b]::install_ice_hook::{closure#1}>>::{closure#0}
+   2:        0x10f93a8bc - std[31b301d8cbc0d3bd]::panicking::panic_with_hook
+   3:        0x10f91e6ec - std[31b301d8cbc0d3bd]::panicking::panic_handler::{closure#0}
+   4:        0x10f9130b8 - std[31b301d8cbc0d3bd]::sys::backtrace::__rust_end_short_backtrace::<std[31b301d8cbc0d3bd]::panicking::panic_handler::{closure#0}, !>
+   5:        0x10f91fcc0 - __rustc[a9245c5a415be692]::rust_begin_unwind
+   6:        0x11295bf80 - core[96053d400e81178e]::panicking::panic_fmt
+   7:        0x11295bc84 - core[96053d400e81178e]::option::expect_failed
+   8:        0x1235c73b8 - <core[96053d400e81178e]::option::Option<&core[96053d400e81178e]::cell::RefCell<stair[a19fd706731b08d3]::ir::basic_block::BasicBlock>>>::expect
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:968:21
+   9:        0x12303ddf0 - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::basic_block::BasicBlock>>::deref
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:198:14
+  10:        0x123216088 - <stair[a19fd706731b08d3]::ir::value::Value as stair[a19fd706731b08d3]::common_traits::Named>::given_name
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/value.rs:213:23
+  11:        0x1230ae1ec - <stair[a19fd706731b08d3]::ir::value::Value as stair[a19fd706731b08d3]::common_traits::Named>::unique_name
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/common_traits.rs:43:20
+  12:        0x123216354 - <stair[a19fd706731b08d3]::ir::value::Value as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/value.rs:235:30
+  13:        0x122c101bc - <stair[a19fd706731b08d3]::dialects::llvm::ops::CallOp as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/dialects/llvm/ops.rs:1799:17
+  14:        0x122c1c3b8 - <stair[a19fd706731b08d3]::ir::operation::Operation as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/operation.rs:663:42
+  15:        0x12303ec60 - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  16:        0x122f8610c - <stair[a19fd706731b08d3]::printable::Displayable<stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation>> as core[96053d400e81178e]::fmt::Display>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/printable.rs:122:16
+  17:        0x123579c64 - <alloc[6c9f40a3385bb0]::boxed::Box<dyn core[96053d400e81178e]::fmt::Display> as core[96053d400e81178e]::fmt::Display>::fmt
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2227:9
+  18:        0x10c99ebf4 - core[96053d400e81178e]::fmt::write
+  19:        0x122bc102c - <core[96053d400e81178e]::fmt::Formatter>::write_fmt
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:2132:13
+  20:        0x123340014 - <stair[a19fd706731b08d3]::ir::basic_block::BasicBlock as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/basic_block.rs:423:17
+  21:        0x12303eaf8 - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::basic_block::BasicBlock> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  22:        0x122f84008 - stair[a19fd706731b08d3]::printable::fmt_iter::<stair[a19fd706731b08d3]::linked_list::Iter<stair[a19fd706731b08d3]::ir::basic_block::BasicBlock>>
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/printable.rs:269:14
+  23:        0x1232a9754 - <stair[a19fd706731b08d3]::ir::region::Region as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/region.rs:136:13
+  24:        0x12303ebac - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::region::Region> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  25:        0x1231fda38 - stair[a19fd706731b08d3]::ir::irfmt::printers::op::region::<stair[a19fd706731b08d3]::dialects::llvm::ops::FuncOp>::{closure#0}
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/irfmt/printers/op.rs:44:32
+  26:        0x123550090 - <stair[a19fd706731b08d3]::ir::irfmt::printers::PrinterFn<stair[a19fd706731b08d3]::ir::irfmt::printers::op::region<stair[a19fd706731b08d3]::dialects::llvm::ops::FuncOp>::{closure#0}> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/irfmt/printers/mod.rs:23:9
+  27:        0x122c05b8c - <stair[a19fd706731b08d3]::dialects::llvm::ops::FuncOp as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/dialects/llvm/ops.rs:2329:22
+  28:        0x122c1c3b8 - <stair[a19fd706731b08d3]::ir::operation::Operation as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/operation.rs:663:42
+  29:        0x12303ec60 - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  30:        0x122f8610c - <stair[a19fd706731b08d3]::printable::Displayable<stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation>> as core[96053d400e81178e]::fmt::Display>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/printable.rs:122:16
+  31:        0x123579c64 - <alloc[6c9f40a3385bb0]::boxed::Box<dyn core[96053d400e81178e]::fmt::Display> as core[96053d400e81178e]::fmt::Display>::fmt
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2227:9
+  32:        0x10c99ebf4 - core[96053d400e81178e]::fmt::write
+  33:        0x122bc102c - <core[96053d400e81178e]::fmt::Formatter>::write_fmt
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:2132:13
+  34:        0x123340014 - <stair[a19fd706731b08d3]::ir::basic_block::BasicBlock as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/basic_block.rs:423:17
+  35:        0x12303eaf8 - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::basic_block::BasicBlock> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  36:        0x122f83e64 - stair[a19fd706731b08d3]::printable::fmt_iter::<stair[a19fd706731b08d3]::linked_list::Iter<stair[a19fd706731b08d3]::ir::basic_block::BasicBlock>>
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/printable.rs:265:15
+  37:        0x1232a9754 - <stair[a19fd706731b08d3]::ir::region::Region as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/region.rs:136:13
+  38:        0x12303ebac - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::region::Region> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  39:        0x1231fdbd8 - stair[a19fd706731b08d3]::ir::irfmt::printers::op::region::<stair[a19fd706731b08d3]::dialects::builtin::ops::ModuleOp>::{closure#0}
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/irfmt/printers/op.rs:44:32
+  40:        0x1235501e0 - <stair[a19fd706731b08d3]::ir::irfmt::printers::PrinterFn<stair[a19fd706731b08d3]::ir::irfmt::printers::op::region<stair[a19fd706731b08d3]::dialects::builtin::ops::ModuleOp>::{closure#0}> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/irfmt/printers/mod.rs:23:9
+  41:        0x1233981dc - <stair[a19fd706731b08d3]::dialects::builtin::ops::ModuleOp as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/dialects/builtin/ops.rs:72:22
+  42:        0x122c1c3b8 - <stair[a19fd706731b08d3]::ir::operation::Operation as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/ir/operation.rs:663:42
+  43:        0x12303ec60 - <stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation> as stair[a19fd706731b08d3]::printable::Printable>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/context.rs:274:25
+  44:        0x122f8610c - <stair[a19fd706731b08d3]::printable::Displayable<stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation>> as core[96053d400e81178e]::fmt::Display>::fmt
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/printable.rs:122:16
+  45:        0x123579c64 - <alloc[6c9f40a3385bb0]::boxed::Box<dyn core[96053d400e81178e]::fmt::Display> as core[96053d400e81178e]::fmt::Display>::fmt
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2227:9
+  46:        0x123577a88 - <alloc[6c9f40a3385bb0]::boxed::Box<dyn core[96053d400e81178e]::fmt::Display> as alloc[6c9f40a3385bb0]::string::SpecToString>::spec_to_string
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/string.rs:2915:9
+  47:        0x1235779fc - <alloc[6c9f40a3385bb0]::boxed::Box<dyn core[96053d400e81178e]::fmt::Display> as alloc[6c9f40a3385bb0]::string::ToString>::to_string
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/string.rs:2894:9
+  48:        0x122b8ad80 - stair_rust[2804d9e75381c99d]::emit_object::{closure#0}
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair-rust/src/lib.rs:197:50
+  49:        0x12357a010 - <alloc[6c9f40a3385bb0]::boxed::Box<dyn for<'a, 'b> core[96053d400e81178e]::ops::function::FnMut<(&'a stair[a19fd706731b08d3]::context::Context, stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation>, &'b str), Output = ()>> as core[96053d400e81178e]::ops::function::FnMut<(&stair[a19fd706731b08d3]::context::Context, stair[a19fd706731b08d3]::context::Ptr<stair[a19fd706731b08d3]::ir::operation::Operation>, &str)>>::call_mut
+                               at /Users/montaglue/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2282:9
+  50:        0x122fb2bb4 - <stair[a19fd706731b08d3]::pass::pass_manager::PassManager>::run
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair/src/pass/pass_manager.rs:87:17
+  51:        0x122ac85b0 - stair_rust[2804d9e75381c99d]::emit_object
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair-rust/src/lib.rs:200:40
+  52:        0x122ac925c - <stair_rust[2804d9e75381c99d]::StairBackend as rustc_codegen_ssa[eed52cef76468eb4]::traits::backend::CodegenBackend>::join_codegen
+                               at /Users/montaglue/projects/montaglue/stair/crates/stair-rust/src/lib.rs:85:22
+  53:        0x10df931d4 - <rustc_interface[e1e158f8f5d02d96]::queries::Linker>::link
+  54:        0x10d612b34 - rustc_interface[e1e158f8f5d02d96]::interface::run_compiler::<(), rustc_driver_impl[2877084a87e0f82b]::run_compiler::{closure#0}>::{closure#1}
+  55:        0x10d607de4 - std[31b301d8cbc0d3bd]::sys::backtrace::__rust_begin_short_backtrace::<rustc_interface[e1e158f8f5d02d96]::util::run_in_thread_with_globals<rustc_interface[e1e158f8f5d02d96]::util::run_in_thread_pool_with_globals<rustc_interface[e1e158f8f5d02d96]::interface::run_compiler<(), rustc_driver_impl[2877084a87e0f82b]::run_compiler::{closure#0}>::{closure#1}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>
+  56:        0x10d618830 - <std[31b301d8cbc0d3bd]::thread::lifecycle::spawn_unchecked<rustc_interface[e1e158f8f5d02d96]::util::run_in_thread_with_globals<rustc_interface[e1e158f8f5d02d96]::util::run_in_thread_pool_with_globals<rustc_interface[e1e158f8f5d02d96]::interface::run_compiler<(), rustc_driver_impl[2877084a87e0f82b]::run_compiler::{closure#0}>::{closure#1}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>::{closure#1} as core[96053d400e81178e]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  57:        0x10f9450d8 - <std[31b301d8cbc0d3bd]::sys::thread::unix::Thread>::new::thread_start
+  58:        0x180ce3c58 - __pthread_cond_wait
+
+
+rustc version: 1.97.0-nightly (82bee9650 2026-05-09)
+platform: aarch64-apple-darwin

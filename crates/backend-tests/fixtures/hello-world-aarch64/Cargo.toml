@@ -1,0 +1,11 @@
+[package]
+name = "hello-world-aarch64"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "hello-world-aarch64"
+path = "src/main.rs"
+
+[workspace]

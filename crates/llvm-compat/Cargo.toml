@@ -1,0 +1,18 @@
+[package]
+name = "llvm-compat"
+description = "Transitional: STAIR llvm dialect + conversion framework on pliron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pliron.workspace = true
+pliron-inspect-driver.workspace = true
+awint.workspace = true
+combine.workspace = true
+thiserror.workspace = true
+rustc-hash.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true

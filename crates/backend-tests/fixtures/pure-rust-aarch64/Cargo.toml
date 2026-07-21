@@ -1,0 +1,11 @@
+[package]
+name = "pure-rust-aarch64"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "pure-rust-aarch64"
+path = "src/main.rs"
+
+[workspace]

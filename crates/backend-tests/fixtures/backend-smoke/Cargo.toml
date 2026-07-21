@@ -1,0 +1,21 @@
+[package]
+name = "stair-backend-smoke"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+stair-device = { path = "../../../crates/stair-device" }
+stair-kernel = { path = "../../../crates/stair-kernel" }
+
+[[bin]]
+name = "stair-backend-smoke"
+path = "src/main.rs"
+
+# Keep this fixture out of the parent workspace. It is compiled explicitly by
+# the stair-rust backend smoke test/script with RUSTFLAGS pointing at the
+# backend dylib.
+[workspace]

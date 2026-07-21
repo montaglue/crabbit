@@ -1,0 +1,16 @@
+[package]
+name = "stair-llama-rms-norm"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+stair-device = { path = "../../../crates/stair-device" }
+
+[[bin]]
+name = "stair-llama-rms-norm"
+path = "src/main.rs"
+
+# Keep this fixture out of the parent workspace. It is compiled explicitly by
+# stair-rust backend tests once the GPU frontend supports the required MIR.
+[workspace]

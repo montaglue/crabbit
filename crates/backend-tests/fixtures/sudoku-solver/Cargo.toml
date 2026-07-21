@@ -1,0 +1,13 @@
+[package]
+name = "stair-sudoku-solver"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "stair-sudoku-solver"
+path = "src/main.rs"
+
+# Keep this fixture out of the parent workspace. It is compiled explicitly with
+# RUSTFLAGS pointing at the stair-rust codegen backend.
+[workspace]

@@ -1,0 +1,19 @@
+[package]
+name = "crabbit-mir"
+description = "crabbit mir dialect + mir-to-llvm lowering on pliron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pliron.workspace = true
+llvm-compat.workspace = true
+pliron-ll.workspace = true
+combine.workspace = true
+thiserror.workspace = true
+rustc-hash.workspace = true
+awint.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+pliron = { path = "../pliron-master" }
+pliron-inspect-driver = { path = "../pliron-inspect/crates/driver" }
+llvm-compat = { path = "crates/llvm-compat" }
+pliron-ll = { path = "crates/pliron-ll" }
+crabbit = { path = "crates/crabbit" }
+crabbit-mir = { path = "crates/mir" }
+awint = "0"
+combine = "4"
+thiserror = "2"
+rustc-hash = "2"
+log = "0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+expect-test = "1"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+assert_cmd = "2"

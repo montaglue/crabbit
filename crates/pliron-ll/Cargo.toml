@@ -1,0 +1,19 @@
+[package]
+name = "pliron-ll"
+description = "Native machine backends (aarch64/x86_64 darwin) for pliron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pliron.workspace = true
+llvm-compat.workspace = true
+awint.workspace = true
+combine.workspace = true
+thiserror.workspace = true
+rustc-hash.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+tempfile.workspace = true
