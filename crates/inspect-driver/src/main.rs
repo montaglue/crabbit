@@ -8,7 +8,8 @@ use clap::Parser;
 use pliron::pass::{AnalysisManager, Pass, PassManager, Passes};
 use pliron::opts::mem2reg::Mem2RegPass;
 use pliron_ll::passes::llvm::{
-    inline::LLVMInlinePass, simplify::LLVMSimplifyPass, simplify_cfg::LLVMSimplifyCfgPass,
+    inline::LLVMInlinePass, pin_type_punned_slots::LLVMPinTypePunnedSlotsPass,
+    simplify::LLVMSimplifyPass, simplify_cfg::LLVMSimplifyCfgPass,
     sroa::LLVMSroaPass,
 };
 use pliron_ll::passes::verify::VerifyPass;
@@ -38,6 +39,7 @@ impl CrabbitHooks {
         let passes: Vec<Box<dyn Pass>> = vec![
             Box::new(VerifyPass::new()),
             Box::new(convert_mir_to_llvm_pass()),
+            Box::new(LLVMPinTypePunnedSlotsPass),
             Box::new(Mem2RegPass),
             Box::new(LLVMInlinePass::default()),
             Box::new(LLVMSimplifyPass),

@@ -13,15 +13,18 @@ repository = "https://github.com/montaglue/crabbit"
 # `version` is required alongside `path` so that `cargo publish` can resolve
 # this dependency against crates.io once the local path is stripped from the
 # packaged manifest. Locally, cargo still prefers the path.
-pliron = { path = "../pliron-master", version = "0.16.0" }
+# Upstream pliron, unpatched, pinned to the commit this workspace is
+# verified against. `version` is kept so `cargo publish` can resolve the
+# dependency against crates.io once a release containing this API exists.
+pliron = { git = "https://github.com/pliron-org/pliron.git", rev = "4750abfdc8823b30baffaf505ae7201a58522d34", version = "0.16.0" }
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
-pliron-llvm = { path = "../pliron-master/pliron-llvm", version = "0.16.0", default-features = false }
+pliron-llvm = { git = "https://github.com/pliron-org/pliron.git", rev = "4750abfdc8823b30baffaf505ae7201a58522d34", version = "0.16.0", default-features = false }
 # NOT YET PUBLISHED to crates.io (lives in the sibling `pliron-inspect` repo).
 # Every crate that depends on `pliron-ll` transitively depends on this, so
 # `cargo publish` will fail for the whole workspace until it has a published
 # version to pin here.
-pliron-inspect-driver = { path = "../pliron-inspect/crates/driver" }
+pliron-inspect-driver = { path = "../pliron-inspect/crates/driver", version = "0.1.0" }
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }

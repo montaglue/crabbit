@@ -26,6 +26,7 @@ use pliron::opts::mem2reg::Mem2RegPass;
 use crate::{
     conversion::pass::{AnalysisManager, PMConfig, Pass, Passes},
     passes::llvm::inline::LLVMInlinePass,
+    passes::llvm::pin_type_punned_slots::LLVMPinTypePunnedSlotsPass,
     passes::llvm::simplify::LLVMSimplifyPass,
     passes::llvm::simplify_cfg::LLVMSimplifyCfgPass,
     passes::llvm::sroa::LLVMSroaPass,
@@ -164,6 +165,7 @@ fn pipeline(target: ObjectTarget) -> Passes {
     // pieces, then promote and clean up.
     passes.add_pass(LLVMSroaPass);
     passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LLVMPinTypePunnedSlotsPass);
     passes.add_pass(Mem2RegPass);
     passes.add_pass(LLVMSimplifyPass);
     passes.add_pass(LLVMSimplifyCfgPass);
@@ -174,6 +176,7 @@ fn pipeline(target: ObjectTarget) -> Passes {
     // once more.
     passes.add_pass(LLVMSroaPass);
     passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LLVMPinTypePunnedSlotsPass);
     passes.add_pass(Mem2RegPass);
     passes.add_pass(LLVMSimplifyPass);
     passes.add_pass(LLVMSimplifyCfgPass);

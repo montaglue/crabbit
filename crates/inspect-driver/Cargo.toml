@@ -1,5 +1,7 @@
 [package]
 name = "crabbit-inspect-driver"
+# Depends on the unpublished pliron-inspect-driver; local tooling only.
+publish = false
 description = "pliron-inspect driver for the crabbit dialects and passes"
 version.workspace = true
 edition.workspace = true
