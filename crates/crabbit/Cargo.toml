@@ -23,7 +23,7 @@ targets = []
 [dependencies]
 pliron.workspace = true
 crabbit-mir.workspace = true
-llvm-compat.workspace = true
+pliron-llvm.workspace = true
 pliron-ll.workspace = true
 anyhow.workspace = true
 serde.workspace = true

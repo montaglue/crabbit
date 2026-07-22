@@ -16,7 +16,7 @@ use super::{
     frontend::module_op,
     util::{cast_operation, darwin_symbol, get_bytes_attr, get_fixups_attr, identifier, module_body},
 };
-use llvm_compat::ll::LinkageAttr;
+use crate::ll::LinkageAttr;
 
 const MACHO_X86_64_RELOC_BRANCH: u8 = 2;
 
@@ -95,7 +95,7 @@ fn external_branch_relocations(
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
         dialects::{

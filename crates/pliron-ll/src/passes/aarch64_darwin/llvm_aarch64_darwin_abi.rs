@@ -48,7 +48,7 @@ impl Pass for LlvmAarch64DarwinAbiPass {
 
 fn assign_function_abi(ctx: &mut Context, func: FuncOp) -> STAIRResult<()> {
     let name = func.get_symbol_name(ctx).to_string();
-    let (args, result) = function_abi_classes(ctx, func.get_func_type(ctx))?;
+    let (args, result) = function_abi_classes(ctx, func.get_type(ctx).into())?;
     let abi = assign_darwin_abi(&name, &args, result)?;
     func.get_operation()
         .deref_mut(ctx)

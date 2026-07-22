@@ -2,19 +2,18 @@
 //! fold constant conditional branches, remove unreachable blocks, merge
 //! straight-line block pairs and bypass empty forwarding blocks.
 //!
-//! The rewrites change CFG edges without updating `llvm.phi` incoming
-//! lists, so functions containing phi ops are skipped.
 
+use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     context::{Context, Ptr},
     dialects::{
-        builtin::{op_interfaces::OneRegionInterface, types::IntegerType},
+        builtin::types::IntegerType,
         llvm::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
-            ops::{BrOp, CondBrOp, FuncOp, ICmpOp, PhiOp},
+            ops::{BrOp, CondBrOp, ICmpOp},
         },
     },
     ir::{
@@ -38,10 +37,10 @@ impl Pass for LLVMSimplifyCfgPass {
 
     fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
-            if func.is_declaration(ctx) || contains_phi(ctx, func) {
+            if func.is_declaration(ctx) {
                 continue;
             }
-            let region = func.get_region(ctx);
+            let region = func.get_region(ctx).expect("llvm.func definition must have a body");
             for _ in 0..MAX_ITERATIONS {
                 let mut changed = fold_constant_branches(ctx, region);
                 changed |= remove_unreachable_blocks(ctx, region);
@@ -56,16 +55,6 @@ impl Pass for LLVMSimplifyCfgPass {
     }
 }
 
-fn contains_phi(ctx: &Context, func: FuncOp) -> bool {
-    for block in func.get_region(ctx).deref(ctx).iter(ctx) {
-        for op in block.deref(ctx).iter(ctx) {
-            if Operation::get_opid(op, ctx) == PhiOp::get_opid_static() {
-                return true;
-            }
-        }
-    }
-    false
-}
 
 /// `llvm.cond_br` on a constant condition, or with identical destinations
 /// and operands on both edges, becomes `llvm.br`.
@@ -83,21 +72,21 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
 
         // cond_br (icmp eq/ne %c, const-i1) — branch on %c directly,
         // swapping the destinations when the comparison negates it.
-        if let Some((direct_cond, negated)) = negated_i1_condition(ctx, cond_br.get_condition(ctx))
+        if let Some((direct_cond, negated)) = negated_i1_condition(ctx, cond_br.get_operand_condition(ctx))
         {
             let (true_dest, true_ops, false_dest, false_ops) = if negated {
                 (
-                    cond_br.get_false_dest(ctx),
-                    cond_br.get_false_operands(ctx),
-                    cond_br.get_true_dest(ctx),
-                    cond_br.get_true_operands(ctx),
+                    cond_br.get_operation().deref(ctx).get_successor(1),
+                    cond_br.successor_operands(ctx, 1),
+                    cond_br.get_operation().deref(ctx).get_successor(0),
+                    cond_br.successor_operands(ctx, 0),
                 )
             } else {
                 (
-                    cond_br.get_true_dest(ctx),
-                    cond_br.get_true_operands(ctx),
-                    cond_br.get_false_dest(ctx),
-                    cond_br.get_false_operands(ctx),
+                    cond_br.get_operation().deref(ctx).get_successor(0),
+                    cond_br.successor_operands(ctx, 0),
+                    cond_br.get_operation().deref(ctx).get_successor(1),
+                    cond_br.successor_operands(ctx, 1),
                 )
             };
             CondBrOp::new(ctx, direct_cond, true_dest, true_ops, false_dest, false_ops)
@@ -108,10 +97,10 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
             continue;
         }
 
-        let taken = if let Some(cond) = as_const_operand(ctx, cond_br.get_condition(ctx)) {
+        let taken = if let Some(cond) = as_const_operand(ctx, cond_br.get_operand_condition(ctx)) {
             Some(cond.is_true())
-        } else if cond_br.get_true_dest(ctx) == cond_br.get_false_dest(ctx)
-            && cond_br.get_true_operands(ctx) == cond_br.get_false_operands(ctx)
+        } else if cond_br.get_operation().deref(ctx).get_successor(0) == cond_br.get_operation().deref(ctx).get_successor(1)
+            && cond_br.successor_operands(ctx, 0) == cond_br.successor_operands(ctx, 1)
         {
             Some(true)
         } else {
@@ -122,9 +111,9 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
         };
 
         let (dest, operands) = if taken {
-            (cond_br.get_true_dest(ctx), cond_br.get_true_operands(ctx))
+            (cond_br.get_operation().deref(ctx).get_successor(0), cond_br.successor_operands(ctx, 0))
         } else {
-            (cond_br.get_false_dest(ctx), cond_br.get_false_operands(ctx))
+            (cond_br.get_operation().deref(ctx).get_successor(1), cond_br.successor_operands(ctx, 1))
         };
         BrOp::new(ctx, dest, operands)
             .get_operation()
@@ -145,16 +134,16 @@ fn negated_i1_condition(ctx: &Context, cond: Value) -> Option<(Value, bool)> {
         return None;
     }
     let icmp = ICmpOp::from_operation(op);
-    let negate_on_zero = match icmp.get_predicate(ctx) {
+    let negate_on_zero = match icmp.predicate(ctx) {
         ICmpPredicateAttr::EQ => true,
         ICmpPredicateAttr::NE => false,
         _ => return None,
     };
     // Accept the constant on either side.
-    let (value, constant) = if let Some(c) = as_const_operand(ctx, icmp.get_rhs(ctx)) {
-        (icmp.get_lhs(ctx), c)
-    } else if let Some(c) = as_const_operand(ctx, icmp.get_lhs(ctx)) {
-        (icmp.get_rhs(ctx), c)
+    let (value, constant) = if let Some(c) = as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(1)) {
+        (icmp.get_operation().deref(ctx).get_operand(0), c)
+    } else if let Some(c) = as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(0)) {
+        (icmp.get_operation().deref(ctx).get_operand(1), c)
     } else {
         return None;
     };
@@ -233,7 +222,7 @@ fn merge_straight_line_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 continue;
             }
             let br = BrOp::from_operation(term);
-            let succ = br.get_dest(ctx);
+            let succ = br.get_operation().deref(ctx).get_successor(0);
             if succ == block || succ.num_preds(ctx) != 1 {
                 continue;
             }
@@ -243,7 +232,7 @@ fn merge_straight_line_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 continue;
             }
 
-            let operands = br.get_dest_operands(ctx);
+            let operands = br.successor_operands(ctx, 0);
             if operands.len() != succ.deref(ctx).get_num_arguments() {
                 continue;
             }
@@ -296,11 +285,11 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
             continue;
         }
         let br = BrOp::from_operation(term);
-        let dest = br.get_dest(ctx);
+        let dest = br.get_operation().deref(ctx).get_successor(0);
         if dest == block {
             continue;
         }
-        let forwarded = br.get_dest_operands(ctx);
+        let forwarded = br.successor_operands(ctx, 0);
         let block_args: Vec<Value> = block.deref(ctx).arguments().collect();
 
         // The block dominates its destination, so downstream blocks may use
@@ -345,10 +334,10 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
             let pred_opid = Operation::get_opid(pred_term, ctx);
             if pred_opid == BrOp::get_opid_static() {
                 let pred_br = BrOp::from_operation(pred_term);
-                if pred_br.get_dest(ctx) != block {
+                if pred_br.get_operation().deref(ctx).get_successor(0) != block {
                     continue;
                 }
-                let Some(new_operands) = substituted(&pred_br.get_dest_operands(ctx)) else {
+                let Some(new_operands) = substituted(&pred_br.successor_operands(ctx, 0)) else {
                     continue;
                 };
                 BrOp::new(ctx, dest, new_operands)
@@ -359,10 +348,10 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
             } else if pred_opid == CondBrOp::get_opid_static() {
                 let pred_cbr = CondBrOp::from_operation(pred_term);
                 let (mut true_dest, mut true_ops) =
-                    (pred_cbr.get_true_dest(ctx), pred_cbr.get_true_operands(ctx));
+                    (pred_cbr.get_operation().deref(ctx).get_successor(0), pred_cbr.successor_operands(ctx, 0));
                 let (mut false_dest, mut false_ops) = (
-                    pred_cbr.get_false_dest(ctx),
-                    pred_cbr.get_false_operands(ctx),
+                    pred_cbr.get_operation().deref(ctx).get_successor(1),
+                    pred_cbr.successor_operands(ctx, 1),
                 );
                 let mut any = false;
                 if true_dest == block {
@@ -384,7 +373,7 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 if !any {
                     continue;
                 }
-                let condition = pred_cbr.get_condition(ctx);
+                let condition = pred_cbr.get_operand_condition(ctx);
                 CondBrOp::new(ctx, condition, true_dest, true_ops, false_dest, false_ops)
                     .get_operation()
                     .insert_before(ctx, pred_term);
@@ -400,7 +389,14 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
+    use crate::dialects::llvm::ops::FuncOp;
     use crate::{
         dialects::{
             builtin::{
@@ -408,7 +404,6 @@ mod tests {
                 types::Signedness,
             },
             llvm::{
-                self,
                 attributes::LinkageAttr,
                 ops::{ConstantOp, ReturnOp},
                 types::FuncType,
@@ -421,8 +416,7 @@ mod tests {
     use std::num::NonZero;
 
     fn test_context() -> Context {
-        let mut ctx = Context::new();
-        llvm::register(&mut ctx);
+        let ctx = Context::new();
         ctx
     }
 
@@ -432,23 +426,17 @@ mod tests {
         let i64_ty: TypeHandle =
             builtin::types::IntegerType::get(&mut ctx, 64, Signedness::Signless).into();
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i64_ty, vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "f".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
-        let entry = func.get_entry_block(&ctx);
+        let func = FuncOp::new(&mut ctx, "f".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx), &ctx);
-        else_block.insert_at_back(func.get_region(&ctx), &ctx);
+        then_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        else_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
 
         let i1_ty = builtin::types::IntegerType::get(&mut ctx, 1, Signedness::Signless);
-        let cond = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap())),
-        );
+        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_v = cond.get_result(&ctx);
         CondBrOp::new(&mut ctx, cond_v, then_block, vec![], else_block, vec![])
@@ -456,20 +444,14 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         let i64_int = builtin::types::IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let ten = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_int, APInt::from_u64(10, NonZero::new(64).unwrap())),
-        );
+        let ten = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_int, APInt::from_u64(10, NonZero::new(64).unwrap()))));
         ten.get_operation().insert_at_back(then_block, &ctx);
         let ten_v = ten.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(ten_v))
             .get_operation()
             .insert_at_back(then_block, &ctx);
 
-        let twenty = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_int, APInt::from_u64(20, NonZero::new(64).unwrap())),
-        );
+        let twenty = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_int, APInt::from_u64(20, NonZero::new(64).unwrap()))));
         twenty.get_operation().insert_at_back(else_block, &ctx);
         let twenty_v = twenty.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(twenty_v))

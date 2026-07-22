@@ -3,3 +3,4 @@
 
 # fixture build artifacts
 crates/backend-tests/fixtures/*/target/
+rustc-ice-*.txt

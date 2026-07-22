@@ -11,7 +11,8 @@ categories = ["compilers"]
 
 [dependencies]
 pliron.workspace = true
-llvm-compat.workspace = true
+pliron-llvm.workspace = true
+pliron-inspect-driver.workspace = true
 awint.workspace = true
 combine.workspace = true
 thiserror.workspace = true

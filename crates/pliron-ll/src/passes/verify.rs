@@ -58,6 +58,12 @@ impl Pass for VerifyPass {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
 
     #[test]

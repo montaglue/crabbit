@@ -9,16 +9,18 @@ use crate::{
             registers::{self, Register},
         },
         builtin::{
-            op_interfaces::OneRegionInterface,
+            op_interfaces::{AtMostOneRegionInterface},
             ops::ModuleOp,
+            type_interfaces::FunctionTypeInterface,
             types::{FP32Type, FP64Type, IntegerType, UnitType},
         },
         llvm::{
             attributes::LinkageAttr as LlvmLinkageAttr,
             ops::{
-                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CStrOp, CallOp, CondBrOp,
+                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
                 ConstantOp, ExtractValueOp, FuncOp, GetElementPtrOp, ICmpOp, InsertValueOp,
-                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PtrToIntOp, ReturnOp, SDivOp, SRemOp,
+                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp,
+                SRemOp,
                 ShlOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, UnreachableOp, XorOp,
                 ZExtOp,
             },
@@ -36,8 +38,10 @@ use crate::{
     result::STAIRResult,
 };
 
+use crate::ll::ops::CStrOp;
+
 use super::{error::X86_64DarwinErr, util::cast_operation};
-use llvm_compat::ll::{LinkageAttr};
+use crate::ll::{LinkageAttr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AbiClass {
@@ -106,9 +110,9 @@ pub(super) fn module_op(ctx: &Context, root: Ptr<Operation>) -> STAIRResult<Modu
 /// Darwin backend does not support.
 pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> STAIRResult<LinkageAttr> {
     match linkage {
-        LlvmLinkageAttr::External => Ok(LinkageAttr::External),
-        LlvmLinkageAttr::Internal => Ok(LinkageAttr::Internal),
-        LlvmLinkageAttr::Private => Ok(LinkageAttr::Private),
+        LlvmLinkageAttr::ExternalLinkage => Ok(LinkageAttr::External),
+        LlvmLinkageAttr::InternalLinkage => Ok(LinkageAttr::Internal),
+        LlvmLinkageAttr::PrivateLinkage => Ok(LinkageAttr::Private),
         other => Err(input_error_noloc!(X86_64DarwinErr::UnsupportedLinkage(
             name.to_string(),
             other
@@ -127,7 +131,7 @@ pub(super) fn validate_function_type(
 }
 
 pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> STAIRResult<()> {
-    for block in func.get_region(ctx).deref(ctx).iter(ctx) {
+    for block in func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
         let mut op = block.deref(ctx).get_head();
         while let Some(op_ptr) = op {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
@@ -173,6 +177,7 @@ macro_rules! impl_binary_op {
 
 impl_valid_op!(
     ConstantOp,
+    PoisonOp,
     AllocaOp,
     LoadOp,
     StoreOp,
@@ -218,7 +223,7 @@ pub(super) fn function_abi_classes(
     let func_ty = ty_ref
         .downcast_ref::<FuncType>()
         .expect("llvm.func must carry llvm.func type");
-    let args = func_ty.arg_types_slice().to_vec();
+    let args = func_ty.arg_types();
     let result = func_ty.result_type();
     drop(ty_ref);
 
@@ -364,12 +369,12 @@ fn abi_type_layout(ctx: &Context, ty: TypeHandle) -> STAIRResult<(u64, u64)> {
         return Ok((align_to(element_size, alignment) * len, alignment));
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::StructType>() {
-        let fields = struct_ty.fields().ok_or_else(|| {
-            input_error_noloc!(X86_64DarwinErr::UnsupportedType(
+        if struct_ty.is_opaque() {
+            return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedType(
                 "opaque aggregate ABI type".to_string()
-            ))
-        })?;
-        let fields = fields.to_vec();
+            )));
+        }
+        let fields: Vec<_> = struct_ty.fields().collect();
         drop(ty_ref);
         let mut size = 0;
         let mut alignment = 1;
@@ -395,6 +400,8 @@ fn align_to(value: u64, align: u64) -> u64 {
 }
 
 pub(super) fn collect_entry_arguments(ctx: &Context, func: &FuncOp) -> STAIRResult<Vec<Value>> {
-    let entry = func.get_entry_block(ctx);
+    let entry = func
+        .get_entry_block(ctx)
+        .expect("llvm.func definition must have a body");
     Ok(entry.deref(ctx).arguments().collect())
 }

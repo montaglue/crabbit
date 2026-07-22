@@ -1,10 +1,12 @@
 //! Inline calls to module-internal LLVM functions into their callers.
 //!
-//! Runs on the block-argument form of the LLVM dialect (before
-//! `lower-llvm-block-args-to-phi`): callee bodies must not contain
-//! `llvm.phi` operations. After inlining, internal functions that are no
-//! longer referenced anywhere in the module are removed.
+//! Runs on the block-argument form of the LLVM dialect. After inlining,
+//! internal functions that are no longer referenced anywhere in the module
+//! are removed.
 
+use pliron::builtin::op_interfaces::{
+    AtMostOneRegionInterface as _, CallOpCallable, CallOpInterface as _,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -13,11 +15,11 @@ use crate::{
     context::{Context, Ptr},
     debug_info::{get_operation_result_name, set_operation_result_name},
     dialects::{
-        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
+        builtin::op_interfaces::{SymbolOpInterface},
         llvm::{
             attributes::LinkageAttr,
             op_interfaces::IsDeclaration,
-            ops::{AddressOfOp, BrOp, CallOp, FuncOp, PhiOp, ReturnOp},
+            ops::{AddressOfOp, BrOp, CallOp, FuncOp, ReturnOp},
         },
     },
     identifier::Identifier,
@@ -131,7 +133,7 @@ impl LLVMInlinePass {
         by_symbol: &FxHashMap<Identifier, FuncOp>,
         budget: usize,
     ) -> Option<(CallOp, FuncOp, usize)> {
-        let blocks: Vec<_> = func.get_region(ctx).deref(ctx).iter(ctx).collect();
+        let blocks: Vec<_> = func.get_region(ctx)?.deref(ctx).iter(ctx).collect();
         for block in blocks {
             let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
             for op in ops {
@@ -139,7 +141,7 @@ impl LLVMInlinePass {
                     continue;
                 }
                 let call = CallOp::from_operation(op);
-                let Some(callee_symbol) = call.get_callee(ctx) else {
+                let CallOpCallable::Direct(callee_symbol) = call.callee(ctx) else {
                     continue;
                 };
                 if callee_symbol == *caller_symbol {
@@ -149,7 +151,7 @@ impl LLVMInlinePass {
                     continue;
                 };
                 if callee.is_declaration(ctx)
-                    || !matches!(callee.get_linkage(ctx), LinkageAttr::Internal)
+                    || !matches!(callee.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone(), LinkageAttr::InternalLinkage)
                 {
                     continue;
                 }
@@ -167,13 +169,13 @@ impl LLVMInlinePass {
 }
 
 /// Count the callee's body operations, or `None` if the body contains
-/// something the inliner cannot clone (nested regions or phi ops).
+/// something the inliner cannot clone (nested regions).
 fn clonable_body_size(ctx: &Context, callee: FuncOp) -> Option<usize> {
     let mut size = 0usize;
-    for block in callee.get_region(ctx).deref(ctx).iter(ctx) {
+    for block in callee.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
         for op in block.deref(ctx).iter(ctx) {
             let op_ref = op.deref(ctx);
-            if op_ref.num_regions() != 0 || Operation::get_opid(op, ctx) == PhiOp::get_opid_static() {
+            if op_ref.num_regions() != 0 {
                 return None;
             }
             size += 1;
@@ -195,7 +197,7 @@ fn inline_call(
     };
     let caller_symbol = caller.get_symbol_name(ctx);
 
-    let callee_blocks: Vec<_> = callee.get_region(ctx).deref(ctx).iter(ctx).collect();
+    let callee_blocks: Vec<_> = callee.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx).collect();
     let reachable = reachable_blocks(ctx, callee_blocks[0]);
     let rpo = reverse_post_order(ctx, callee_blocks[0]);
 
@@ -223,7 +225,16 @@ fn inline_call(
     }
 
     // The continuation block receives the return value as a block argument.
-    let result_types: Vec<_> = call_op.deref(ctx).result_types().collect();
+    // An `llvm.call` to a `void` function still has one (void-typed) result;
+    // it carries no value, so the continuation takes no argument for it.
+    let result_types: Vec<_> = call_op
+        .deref(ctx)
+        .result_types()
+        .filter(|ty| {
+            !ty.deref(ctx)
+                .is::<pliron_llvm::types::VoidType>()
+        })
+        .collect();
     let tail_name = Identifier::try_from(format!("inl{tag}_ret"))
         .map_err(|_| crate::input_error_noloc!("llvm-inline: invalid block name"))?;
     let tail = BasicBlock::new(ctx, Some(tail_name), result_types);
@@ -265,11 +276,11 @@ fn inline_call(
 
     // Redirect the caller into the inlined entry and replace the call
     // result with the continuation block argument.
-    let args = call.get_args(ctx);
+    let args = call.args(ctx);
     BrOp::new(ctx, block_map[&callee_blocks[0]], args)
         .get_operation()
         .insert_at_back(call_block, ctx);
-    if call_op.deref(ctx).get_num_results() > 0 {
+    if tail.deref(ctx).get_num_arguments() > 0 {
         let result = call_op.deref(ctx).get_result(0);
         let replacement = tail.deref(ctx).get_argument(0);
         result.replace_some_uses_with(ctx, |_, _| true, &replacement);
@@ -401,7 +412,7 @@ fn remove_dead_internal_functions(ctx: &mut Context, root: Ptr<Operation>) {
         let mut changed = false;
         for func in funcs {
             if func.is_declaration(ctx)
-                || !matches!(func.get_linkage(ctx), LinkageAttr::Internal)
+                || !matches!(func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone(), LinkageAttr::InternalLinkage)
             {
                 continue;
             }
@@ -429,11 +440,11 @@ fn collect_referenced_symbols(
 ) {
     let opid = Operation::get_opid(op, ctx);
     if opid == CallOp::get_opid_static() {
-        if let Some(callee) = (CallOp::from_operation(op)).get_callee(ctx) {
+        if let CallOpCallable::Direct(callee) = (CallOp::from_operation(op)).callee(ctx) {
             symbols.insert(callee);
         }
     } else if opid == AddressOfOp::get_opid_static() {
-        symbols.insert((AddressOfOp::from_operation(op)).get_symbol(ctx));
+        symbols.insert((AddressOfOp::from_operation(op)).get_global_name(ctx));
     }
 
     let regions: Vec<_> = op.deref(ctx).regions().collect();
@@ -450,6 +461,14 @@ fn collect_referenced_symbols(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{
+        BinArithOp as _, IntBinArithOpWithOverflowFlag as _,
+    };
     use super::*;
     use crate::{
         dialects::{
@@ -473,8 +492,7 @@ mod tests {
     use std::num::NonZero;
 
     fn test_context() -> Context {
-        let mut ctx = Context::new();
-        llvm::register(&mut ctx);
+        let ctx = Context::new();
         ctx
     }
 
@@ -491,23 +509,17 @@ mod tests {
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i64_ty, vec![i64_ty], false);
 
         // callee: internal, returns arg + 1
-        let callee = llvm::ops::FuncOp::new(
-            &mut ctx,
-            "callee".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::Internal,
-        );
+        let callee = llvm::ops::FuncOp::new(&mut ctx, "callee".try_into().unwrap(), fn_ty);
+        callee.set_attr_llvm_function_linkage(&ctx, LinkageAttr::InternalLinkage);
+        callee.get_or_create_entry_block(&mut ctx);
         callee.get_operation().insert_at_back(module_block, &ctx);
-        let callee_entry = callee.get_entry_block(&ctx);
+        let callee_entry = callee.get_entry_block(&ctx).unwrap();
         let callee_arg = callee_entry.deref(&ctx).get_argument(0);
         let int_ty = builtin::types::IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let one = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(int_ty, APInt::from_u64(1, NonZero::new(64).unwrap())),
-        );
+        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(int_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(callee_entry, &ctx);
         let one_val = one.get_result(&ctx);
-        let add = AddOp::new(&mut ctx, callee_arg, one_val);
+        let add = AddOp::new_with_overflow_flag(&mut ctx, callee_arg, one_val, Default::default());
         add.get_operation().insert_at_back(callee_entry, &ctx);
         let sum = add.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(sum))
@@ -515,20 +527,17 @@ mod tests {
             .insert_at_back(callee_entry, &ctx);
 
         // caller: external, returns callee(arg)
-        let caller = llvm::ops::FuncOp::new(
-            &mut ctx,
-            "caller".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
+        let caller = llvm::ops::FuncOp::new(&mut ctx, "caller".try_into().unwrap(), fn_ty);
+        caller.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        caller.get_or_create_entry_block(&mut ctx);
         caller.get_operation().insert_at_back(module_block, &ctx);
-        let caller_entry = caller.get_entry_block(&ctx);
+        let caller_entry = caller.get_entry_block(&ctx).unwrap();
         let caller_arg = caller_entry.deref(&ctx).get_argument(0);
-        let call = CallOp::new_direct(
+        let call = CallOp::new(
             &mut ctx,
-            "callee".try_into().unwrap(),
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("callee".try_into().unwrap()),
+            fn_ty,
             vec![caller_arg],
-            Some(i64_ty),
         );
         call.get_operation().insert_at_back(caller_entry, &ctx);
         let call_res = call.get_operation().deref(&ctx).get_result(0);

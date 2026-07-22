@@ -3,8 +3,8 @@ use combine::{Parser, attempt, many, many1, optional, satisfy, token};
 use pliron::derive::{def_op, derive_op_interface_impl};
 use pliron::derive::op_interface_impl;
 
-use llvm_compat::ll::BranchWeightsAttr;
-use llvm_compat::op_interfaces::ATTR_KEY_BRANCH_WEIGHTS;
+use crate::ll::BranchWeightsAttr;
+use crate::ll::op_interfaces::ATTR_KEY_BRANCH_WEIGHTS;
 
 use crate::{
     common_traits::Named,
@@ -1217,4 +1217,4 @@ mod tests {
     }
 }
 
-use llvm_compat::ll::{BytesAttr, LinkageAttr};
+use crate::ll::{BytesAttr, LinkageAttr};

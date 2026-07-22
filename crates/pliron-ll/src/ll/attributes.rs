@@ -1,6 +1,5 @@
-//! `ll` dialect: attributes shared by the machine-level backends.
-//! (Temporarily defined here because the `llvm` dialect also stores
-//! [BytesAttr] payloads; moves to pliron-ll when llvm-compat is retired.)
+//! Attributes of the `ll` dialect: payloads shared by the machine-level
+//! backends and the LLVM-level extension ops.
 
 use combine::{Parser, many1, satisfy};
 
@@ -9,7 +8,7 @@ use pliron::{
     context::Context,
     location::Located,
     input_err,
-    parsable::{IntoParseResult, Parsable, ParseResult, StateStream},
+    parsable::{Parsable, ParseResult, StateStream},
     printable::{self, Printable},
 };
 

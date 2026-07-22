@@ -5,15 +5,14 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use clap::Parser;
-use llvm_compat::conversion::pass::{AnalysisManager, Pass, Passes, PassManager};
-use llvm_compat::passes::llvm::{
-    inline::LLVMInlinePass, mem2reg::Mem2RegPass, simplify::LLVMSimplifyPass,
-    simplify_cfg::LLVMSimplifyCfgPass, sroa::LLVMSroaPass,
+use pliron::pass::{AnalysisManager, Pass, PassManager, Passes};
+use pliron::opts::mem2reg::Mem2RegPass;
+use pliron_ll::passes::llvm::{
+    inline::LLVMInlinePass, simplify::LLVMSimplifyPass, simplify_cfg::LLVMSimplifyCfgPass,
+    sroa::LLVMSroaPass,
 };
-use llvm_compat::passes::lower_llvm_block_args_to_phi::LowerLLVMBlockArgsToPhiPass;
-use llvm_compat::passes::lower_llvm_phi_to_block_args::LowerLLVMPhiToBlockArgsPass;
-use llvm_compat::passes::verify::VerifyPass;
-use crabbit_mir::passes::convert_mir_to_llvm::ConvertMirToLLVMPass;
+use pliron_ll::passes::verify::VerifyPass;
+use crabbit_mir::passes::convert_mir_to_llvm::convert_mir_to_llvm_pass;
 use pliron::context::{Context, Ptr};
 use pliron::operation::Operation;
 use pliron_inspect_driver::{DriverHooks, run_stdio_driver};
@@ -38,14 +37,12 @@ impl CrabbitHooks {
     fn new() -> Self {
         let passes: Vec<Box<dyn Pass>> = vec![
             Box::new(VerifyPass::new()),
-            Box::new(ConvertMirToLLVMPass),
-            Box::new(LowerLLVMBlockArgsToPhiPass),
-            Box::new(Mem2RegPass::default()),
+            Box::new(convert_mir_to_llvm_pass()),
+            Box::new(Mem2RegPass),
             Box::new(LLVMInlinePass::default()),
             Box::new(LLVMSimplifyPass),
             Box::new(LLVMSimplifyCfgPass),
             Box::new(LLVMSroaPass),
-            Box::new(LowerLLVMPhiToBlockArgsPass),
         ];
         CrabbitHooks {
             passes: passes.into_iter().map(RefCell::new).collect(),

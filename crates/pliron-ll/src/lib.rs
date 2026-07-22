@@ -1,18 +1,19 @@
 //! Native machine-level dialects and backend pipelines on pliron:
 //! aarch64/x86_64 darwin — instruction selection, register allocation,
-//! encoding, and Mach-O emission.
+//! encoding, and Mach-O emission — plus the `ll` extension dialect and the
+//! LLVM-level mid-end passes over [pliron_llvm]'s dialect.
 
 pub mod aarch64;
+pub mod conversion;
+pub mod ll;
 pub mod macho;
 pub mod passes;
 pub mod x86_64;
 
-pub use llvm_compat::conversion;
-
 pub mod dialects {
-    pub use crate::{aarch64, macho, x86_64};
-    pub use llvm_compat::llvm;
+    pub use crate::{aarch64, ll, macho, x86_64};
     pub use pliron::builtin;
+    pub use pliron_llvm as llvm;
 }
 // ---- compatibility re-exports over the pliron core (cleanup pending) ----
 pub use pliron::{

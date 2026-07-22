@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use crate::r#type::TypeHandle;
+use super::isel_memory_abi::adapt_value_to_type;
 
 use crate::{
     context::{Context, Ptr},
@@ -10,7 +12,10 @@ use crate::{
 
 use super::{
     error::Aarch64DarwinErr,
-    llvm_to_aarch64_isel::{LoweredValue, fresh_vreg, lookup_value, materialize_typed},
+    llvm_to_aarch64_isel::{
+        LoweredValue, block_arg_registers, fresh_vreg, is_128_bit_integer, is_aggregate_ty,
+        is_zero_sized_ty, lookup_value, materialize_pair, materialize_typed, struct_fields,
+    },
 };
 
 /// Lowers CFG edges after instruction selection has assigned every LLVM block
@@ -68,31 +73,31 @@ pub(super) fn emit_block_arg_copies(
     let mut pending: Vec<(Register, Option<Register>)> = Vec::new();
     for (arg, dest_arg) in args.iter().copied().zip(dest_args) {
         let src = lookup_value(ctx, values, arg)?;
-        let dst = match lookup_value(ctx, values, dest_arg)? {
-            LoweredValue::Reg(reg) => reg,
-            _ => {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
-                    "AArch64 block argument target must be a register".to_string()
-                )));
-            }
-        };
-        if matches!(src, LoweredValue::Undef) {
-            // An undef incoming value (e.g. from mem2reg promoting a slot
-            // that is not initialized on this path) is never read; give the
-            // vreg a defined value so liveness stays consistent.
-            pending.push((dst, None));
-            continue;
-        }
-        let src = materialize_typed(
+        let mut dst_regs = Vec::new();
+        block_arg_registers(&lookup_value(ctx, values, dest_arg)?, &mut dst_regs);
+        let mut src_regs = Vec::new();
+        flatten_incoming(
             ctx,
             insert_block,
             src,
             dest_arg.get_type(ctx),
             next_vreg,
-            "block argument",
+            &mut src_regs,
         )?;
-        if src != dst {
-            pending.push((dst, Some(src)));
+        if dst_regs.len() != src_regs.len() {
+            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+                "block argument register count mismatch: {} incoming vs {} target",
+                src_regs.len(),
+                dst_regs.len()
+            ))));
+        }
+        for (dst, src) in dst_regs.into_iter().zip(src_regs) {
+            // An undef incoming leaf (e.g. from mem2reg promoting a slot
+            // that is not initialized on this path) is never read; give the
+            // vreg a defined value so liveness stays consistent.
+            if src.as_ref() != Some(&dst) {
+                pending.push((dst, src));
+            }
         }
     }
 
@@ -132,4 +137,69 @@ pub(super) fn machine_block(
             "branch target block was not lowered".to_string()
         ))
     })
+}
+
+/// Materialize an incoming block-argument value as one register per scalar
+/// leaf of `ty`, in the same leaf order as
+/// [block_arg_registers](llvm_to_aarch64_isel::block_arg_registers). `None`
+/// marks an undef leaf.
+fn flatten_incoming(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    src: LoweredValue,
+    ty: TypeHandle,
+    next_vreg: &mut usize,
+    out: &mut Vec<Option<Register>>,
+) -> STAIRResult<()> {
+    if is_zero_sized_ty(ctx, ty) {
+        return Ok(());
+    }
+    // Reconcile packed-scalar and field-wise representations of the same
+    // value before flattening.
+    let src = adapt_value_to_type(ctx, src, ty)?;
+    if is_128_bit_integer(ctx, ty) {
+        if matches!(src, LoweredValue::Undef) {
+            out.push(None);
+            out.push(None);
+            return Ok(());
+        }
+        let (lo, hi) = materialize_pair(ctx, insert_block, src, ty, next_vreg, "block argument")?;
+        out.push(Some(lo));
+        out.push(Some(hi));
+        return Ok(());
+    }
+    if is_aggregate_ty(ctx, ty) {
+        let fields = struct_fields(ctx, ty)?;
+        let field_values: Vec<Option<LoweredValue>> = match src {
+            LoweredValue::Undef => vec![None; fields.len()],
+            LoweredValue::Aggregate(values) => {
+                let mut values = values;
+                values.resize(fields.len(), None);
+                values
+            }
+            other => {
+                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+                    "aggregate block argument fed by non-aggregate {other:?}"
+                ))));
+            }
+        };
+        for (field_ty, field_value) in fields.into_iter().zip(field_values) {
+            flatten_incoming(
+                ctx,
+                insert_block,
+                field_value.unwrap_or(LoweredValue::Undef),
+                field_ty,
+                next_vreg,
+                out,
+            )?;
+        }
+        return Ok(());
+    }
+    if matches!(src, LoweredValue::Undef) {
+        out.push(None);
+        return Ok(());
+    }
+    let reg = materialize_typed(ctx, insert_block, src, ty, next_vreg, "block argument")?;
+    out.push(Some(reg));
+    Ok(())
 }

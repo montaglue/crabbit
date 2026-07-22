@@ -1,4 +1,4 @@
-use llvm_compat::ll::BytesAttr;
+use crate::ll::BytesAttr;
 
 use crate::{
     context::{Context, Ptr},

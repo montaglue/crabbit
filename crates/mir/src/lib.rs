@@ -5,11 +5,9 @@
 pub mod mir;
 pub mod passes;
 
-pub use llvm_compat::conversion;
-
 pub mod dialects {
     pub use crate::mir;
-    pub use llvm_compat::llvm;
+    pub use pliron_llvm as llvm;
     pub use pliron::builtin;
     pub use pliron_ll::{aarch64, macho, x86_64};
 }

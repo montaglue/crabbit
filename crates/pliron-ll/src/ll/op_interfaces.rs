@@ -1,28 +1,22 @@
-//! Op interfaces proposed upstream but not yet merged into pliron core
-//! (see MIGRATION-TO-PLIRON.md item #5 in the stair repo). Defined here,
-//! downstream, so the workspace builds against vanilla pliron; moves
-//! verbatim into the eventual upstream PR.
+//! Op interfaces of the `ll` dialect.
 //!
-//! [FunctionLikeInterface] (item #6) lives in `pliron-inspect-driver`
-//! instead, since pliron-inspect's generic root-selection is its one
-//! shared consumer; re-exported here for convenience.
+//! [WeightedBranchOpInterface] is proposed upstream but not yet merged into
+//! pliron core; defined here so the workspace builds against vanilla pliron,
+//! and moves verbatim into the eventual upstream PR.
 
 use thiserror::Error;
 
 use pliron::{
+    builtin::op_interfaces::BranchOpInterface,
     context::Context,
-    derive::op_interface,
+    derive::{op_interface, op_interface_impl},
     dict_key,
-    location::Located,
     op::{Op, op_cast},
     result::Result,
-    builtin::op_interfaces::BranchOpInterface,
     verify_err,
 };
 
-pub use pliron_inspect_driver::FunctionLikeInterface;
-
-use crate::ll::BranchWeightsAttr;
+use super::attributes::BranchWeightsAttr;
 
 dict_key!(
     /// Key for the `branch_weights` attribute.
@@ -55,10 +49,10 @@ pub trait WeightedBranchOpInterface: BranchOpInterface {
 
     /// Set this op's successor weights; one weight per successor.
     fn set_successor_weights(&self, ctx: &Context, weights: Vec<u32>) {
-        self.get_operation().deref_mut(ctx).attributes.set(
-            ATTR_KEY_BRANCH_WEIGHTS.clone(),
-            BranchWeightsAttr(weights),
-        );
+        self.get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(ATTR_KEY_BRANCH_WEIGHTS.clone(), BranchWeightsAttr(weights));
     }
 
     fn verify(op: &dyn Op, ctx: &Context) -> Result<()>
@@ -88,3 +82,6 @@ pub trait WeightedBranchOpInterface: BranchOpInterface {
         Ok(())
     }
 }
+
+#[op_interface_impl]
+impl WeightedBranchOpInterface for pliron_llvm::ops::CondBrOp {}

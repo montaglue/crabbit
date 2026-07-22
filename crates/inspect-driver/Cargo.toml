@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 pliron.workspace = true
-llvm-compat.workspace = true
+pliron-llvm.workspace = true
 pliron-ll.workspace = true
 crabbit-mir.workspace = true
 pliron-inspect-driver.workspace = true

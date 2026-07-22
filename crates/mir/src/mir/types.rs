@@ -7,7 +7,7 @@ use combine::{
 use pliron::derive::def_type;
 
 use crate::{
-    context::{Context, Ptr},
+    context::Context,
     impl_verify_succ,
     ir::{
         irfmt::parsers::{spaced, type_parser},
@@ -78,5 +78,5 @@ impl Parsable for PtrType {
 
 impl_verify_succ!(PtrType);
 
-pub fn register(ctx: &mut Context) {
+pub fn register(_ctx: &mut Context) {
 }

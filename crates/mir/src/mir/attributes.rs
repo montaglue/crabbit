@@ -6,7 +6,6 @@ use pliron::derive::def_attribute;
 use crate::{
     context::Context,
     impl_verify_succ,
-    ir::attribute::Attribute,
     ir::irfmt::parsers::{int_parser, spaced},
     parsable::{Parsable, ParseResult, StateStream},
     printable::{self, Printable},
@@ -58,5 +57,5 @@ impl Parsable for InsertExtractValueIndicesAttr {
 
 impl_verify_succ!(InsertExtractValueIndicesAttr);
 
-pub fn register(ctx: &mut Context) {
+pub fn register(_ctx: &mut Context) {
 }

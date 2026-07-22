@@ -165,7 +165,7 @@ fn stack_chunks(mut bytes: u64) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         dialects::{aarch64, aarch64::registers::{FP, Register}, builtin},
         ir::op::Op,

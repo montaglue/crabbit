@@ -116,7 +116,7 @@ fn insert_block_epilogues(ctx: &mut Context, block: Ptr<BasicBlock>, stack_size:
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         dialects::{builtin, x86_64},
         ir::op::Op,

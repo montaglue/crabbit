@@ -5,6 +5,10 @@
 
 #![cfg(target_os = "macos")]
 
+#[allow(unused_imports)]
+use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
+#[allow(unused_imports)]
+use pliron_llvm::op_interfaces::{BinArithOp as _, IntBinArithOpWithOverflowFlag as _};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,7 +23,6 @@ use pliron_ll::{
             types::{IntegerType, Signedness},
         },
         llvm::{
-            self,
             attributes::{ICmpPredicateAttr, LinkageAttr},
             ops::{
                 AddOp, BrOp, CallOp, CondBrOp, ConstantOp, FuncOp, ICmpOp, MulOp, ReturnOp, SubOp,
@@ -36,7 +39,6 @@ use pliron_ll::{
 
 fn context() -> Context {
     let mut ctx = Context::new();
-    llvm::register(&mut ctx);
     x86_64::register(&mut ctx);
     macho::register(&mut ctx);
     ctx
@@ -48,10 +50,7 @@ fn i64_ty(ctx: &mut Context) -> pliron_ll::r#type::TypeHandle {
 
 fn i64_const(ctx: &mut Context, entry: pliron_ll::context::Ptr<BasicBlock>, value: u64) -> Value {
     let ty = IntegerType::get(ctx, 64, Signedness::Signless);
-    let constant = ConstantOp::new_integer(
-        ctx,
-        IntegerAttr::new(ty, APInt::from_u64(value, NonZero::new(64).unwrap())),
-    );
+    let constant = ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, APInt::from_u64(value, NonZero::new(64).unwrap()))));
     constant.get_operation().insert_at_back(entry, ctx);
     constant.get_result(ctx)
 }
@@ -88,14 +87,11 @@ fn returns_constant_exit_code() {
     let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
     let i64_ty = i64_ty(&mut ctx);
     let func_ty = FuncType::get(&mut ctx, i64_ty, vec![], false);
-    let func = FuncOp::new(
-        &mut ctx,
-        "main".try_into().unwrap(),
-        func_ty,
-        LinkageAttr::External,
-    );
+    let func = FuncOp::new(&mut ctx, "main".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
     func.get_operation().insert_at_back(body, &ctx);
-    let entry = func.get_entry_block(&ctx);
+    let entry = func.get_entry_block(&ctx).unwrap();
     let value = i64_const(&mut ctx, entry, 42);
     ReturnOp::new(&mut ctx, Some(value))
         .get_operation()
@@ -114,20 +110,17 @@ fn computes_arithmetic_across_calls() {
     let i64_ty = i64_ty(&mut ctx);
 
     let helper_ty = FuncType::get(&mut ctx, i64_ty, vec![i64_ty, i64_ty], false);
-    let helper = FuncOp::new(
-        &mut ctx,
-        "helper".try_into().unwrap(),
-        helper_ty,
-        LinkageAttr::External,
-    );
+    let helper = FuncOp::new(&mut ctx, "helper".try_into().unwrap(), helper_ty);
+    helper.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+    helper.get_or_create_entry_block(&mut ctx);
     helper.get_operation().insert_at_back(body, &ctx);
-    let entry = helper.get_entry_block(&ctx);
+    let entry = helper.get_entry_block(&ctx).unwrap();
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
-    let product = MulOp::new(&mut ctx, args[0], args[1]);
+    let product = MulOp::new_with_overflow_flag(&mut ctx, args[0], args[1], Default::default());
     product.get_operation().insert_at_back(entry, &ctx);
     let three = i64_const(&mut ctx, entry, 3);
     let product_result = product.get_result(&ctx);
-    let sum = AddOp::new(&mut ctx, product_result, three);
+    let sum = AddOp::new_with_overflow_flag(&mut ctx, product_result, three, Default::default());
     sum.get_operation().insert_at_back(entry, &ctx);
     let sum_result = sum.get_result(&ctx);
     ReturnOp::new(&mut ctx, Some(sum_result))
@@ -135,26 +128,24 @@ fn computes_arithmetic_across_calls() {
         .insert_at_back(entry, &ctx);
 
     let main_ty = FuncType::get(&mut ctx, i64_ty, vec![], false);
-    let main = FuncOp::new(
-        &mut ctx,
-        "main".try_into().unwrap(),
-        main_ty,
-        LinkageAttr::External,
-    );
+    let main = FuncOp::new(&mut ctx, "main".try_into().unwrap(), main_ty);
+    main.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+    main.get_or_create_entry_block(&mut ctx);
     main.get_operation().insert_at_back(body, &ctx);
-    let entry = main.get_entry_block(&ctx);
+    let entry = main.get_entry_block(&ctx).unwrap();
     let twenty = i64_const(&mut ctx, entry, 20);
     let four = i64_const(&mut ctx, entry, 4);
-    let call = CallOp::new_direct(
+    let helper_call_ty = FuncType::get(&mut ctx, i64_ty, vec![i64_ty, i64_ty], false);
+    let call = CallOp::new(
         &mut ctx,
-        "helper".try_into().unwrap(),
+        pliron::builtin::op_interfaces::CallOpCallable::Direct("helper".try_into().unwrap()),
+        helper_call_ty,
         vec![twenty, four],
-        Some(i64_ty),
     );
     call.get_operation().insert_at_back(entry, &ctx);
     let call_result = call.get_operation().deref(&ctx).get_result(0);
     let eleven = i64_const(&mut ctx, entry, 11);
-    let difference = SubOp::new(&mut ctx, call_result, eleven);
+    let difference = SubOp::new_with_overflow_flag(&mut ctx, call_result, eleven, Default::default());
     difference.get_operation().insert_at_back(entry, &ctx);
     let difference_result = difference.get_result(&ctx);
     ReturnOp::new(&mut ctx, Some(difference_result))
@@ -173,24 +164,21 @@ fn branches_on_comparisons() {
     let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
     let i64_ty = i64_ty(&mut ctx);
     let func_ty = FuncType::get(&mut ctx, i64_ty, vec![], false);
-    let func = FuncOp::new(
-        &mut ctx,
-        "main".try_into().unwrap(),
-        func_ty,
-        LinkageAttr::External,
-    );
+    let func = FuncOp::new(&mut ctx, "main".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
     func.get_operation().insert_at_back(body, &ctx);
-    let entry = func.get_entry_block(&ctx);
+    let entry = func.get_entry_block(&ctx).unwrap();
     let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
-    then_block.insert_at_back(func.get_region(&ctx), &ctx);
+    then_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
     let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
-    else_block.insert_at_back(func.get_region(&ctx), &ctx);
+    else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
     let exit_block = BasicBlock::new(
         &mut ctx,
         Some("exit".try_into().unwrap()),
         vec![i64_ty],
     );
-    exit_block.insert_at_back(func.get_region(&ctx), &ctx);
+    exit_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
     let seven = i64_const(&mut ctx, entry, 7);
     let nine = i64_const(&mut ctx, entry, 9);

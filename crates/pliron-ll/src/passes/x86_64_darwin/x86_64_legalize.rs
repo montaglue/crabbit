@@ -71,7 +71,7 @@ fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
         dialects::{

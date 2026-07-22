@@ -288,7 +288,7 @@ fn simplify_branches_for_layout(ctx: &mut Context, layout: &[Ptr<BasicBlock>]) {
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use super::*;
     use crate::{
         common_traits::Named,

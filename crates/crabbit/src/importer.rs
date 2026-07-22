@@ -60,7 +60,6 @@ pub fn create_context() -> Context {
     aarch64::register(&mut ctx);
     x86_64::register(&mut ctx);
     stair_mir::register(&mut ctx);
-    llvm::register(&mut ctx);
     macho::register(&mut ctx);
     ctx
 }
@@ -402,6 +401,30 @@ fn import_function<'tcx>(
     Ok(())
 }
 
+/// An `llvm.func` declaration (no body).
+fn new_llvm_func_decl(
+    ctx: &mut Context,
+    name: crate::identifier::Identifier,
+    ty: TypedHandle<llvm::types::FuncType>,
+    linkage: LinkageAttr,
+) -> llvm::ops::FuncOp {
+    let func = llvm::ops::FuncOp::new(ctx, name, ty);
+    func.set_attr_llvm_function_linkage(ctx, linkage);
+    func
+}
+
+/// An `llvm.func` definition with an entry block carrying the argument values.
+fn new_llvm_func_def(
+    ctx: &mut Context,
+    name: crate::identifier::Identifier,
+    ty: TypedHandle<llvm::types::FuncType>,
+    linkage: LinkageAttr,
+) -> llvm::ops::FuncOp {
+    let func = new_llvm_func_decl(ctx, name, ty, linkage);
+    func.get_or_create_entry_block(ctx);
+    func
+}
+
 fn declare_external_function(
     ctx: &mut Context,
     module_body: Ptr<BasicBlock>,
@@ -421,7 +444,7 @@ fn declare_external_function(
         .map(|arg| llvm_decl_type(ctx, arg))
         .collect();
     let func_ty = llvm::types::FuncType::get(ctx, result, args, false);
-    let func = llvm::ops::FuncOp::new_declaration(ctx, symbol, func_ty, LinkageAttr::External);
+    let func = new_llvm_func_decl(ctx, symbol, func_ty, LinkageAttr::ExternalLinkage);
     func.get_operation().insert_at_back(module_body, ctx);
 }
 
@@ -454,9 +477,10 @@ fn declare_static_global<'tcx>(
     let pointee = pointee_ty(ty)?;
     let global_ty = convert_ty(tcx, ctx, pointee)?;
     let global_ty = llvm_decl_type(ctx, global_ty);
-    let global = llvm::ops::GlobalOp::new(ctx, symbol, global_ty, LinkageAttr::External);
+    let global = llvm::ops::GlobalOp::new(ctx, symbol, global_ty);
+    global.set_attr_llvm_global_linkage(ctx, LinkageAttr::ExternalLinkage);
     if let Some(bytes) = static_initializer_bytes(tcx, def_id) {
-        global.set_initializer_bytes(ctx, bytes);
+        pliron_ll::ll::set_global_initializer_bytes(ctx, &global, bytes);
     }
     global.get_operation().insert_at_back(module_body, ctx);
     Ok(())
@@ -497,8 +521,9 @@ fn declare_anonymous_byte_global(
 
     let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
     let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, bytes.len() as u64).into();
-    let global = llvm::ops::GlobalOp::new(ctx, symbol.clone(), global_ty, LinkageAttr::Private);
-    global.set_initializer_bytes(ctx, bytes.to_vec());
+    let global = llvm::ops::GlobalOp::new(ctx, symbol.clone(), global_ty);
+    global.set_attr_llvm_global_linkage(ctx, LinkageAttr::PrivateLinkage);
+    pliron_ll::ll::set_global_initializer_bytes(ctx, &global, bytes.to_vec());
     global.get_operation().insert_at_back(module_body, ctx);
     symbol
 }
@@ -507,7 +532,7 @@ fn llvm_decl_type(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
     let ty_ref = ty.deref(ctx);
     if ty_ref.is::<stair_mir::types::PtrType>() {
         drop(ty_ref);
-        return llvm::types::PointerType::get(ctx).into();
+        return llvm::types::PointerType::get(ctx, 0).into();
     }
     if let Some(array_ty) = ty_ref.downcast_ref::<llvm::types::ArrayType>() {
         let elem = array_ty.elem_type();
@@ -517,8 +542,8 @@ fn llvm_decl_type(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
         return llvm::types::ArrayType::get(ctx, elem, size).into();
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
-        let name = struct_ty.name().cloned();
-        let fields = struct_ty.fields().map(|fields| fields.to_vec());
+        let name = struct_ty.name();
+        let fields = (!struct_ty.is_opaque()).then(|| struct_ty.fields().collect::<Vec<_>>());
         drop(ty_ref);
         let fields = fields.map(|fields| {
             fields
@@ -544,7 +569,7 @@ fn declare_default_allocator_shims<'tcx>(
     ctx: &mut Context,
     module_body: Ptr<BasicBlock>,
 ) {
-    let ptr_ty: TypeHandle = llvm::types::PointerType::get(ctx).into();
+    let ptr_ty: TypeHandle = llvm::types::PointerType::get(ctx, 0).into();
     let usize_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
     let void_ty: TypeHandle = llvm::types::VoidType::get(ctx).into();
 
@@ -569,12 +594,7 @@ fn declare_default_allocator_shims<'tcx>(
         ("realloc", realloc_ty),
         ("calloc", calloc_ty),
     ] {
-        let decl = llvm::ops::FuncOp::new_declaration(
-            ctx,
-            name.try_into().unwrap(),
-            ty,
-            LinkageAttr::External,
-        );
+        let decl = new_llvm_func_decl(ctx, name.try_into().unwrap(), ty, LinkageAttr::ExternalLinkage);
         decl.get_operation().insert_at_back(module_body, ctx);
     }
 
@@ -615,15 +635,17 @@ fn declare_default_allocator_shims<'tcx>(
         Some(ptr_ty),
     );
 
-    let no_alloc = llvm::ops::FuncOp::new(
+    let no_alloc = new_llvm_func_def(
         ctx,
         allocator_symbol(tcx, "__rust_no_alloc_shim_is_unstable_v2"),
         no_alloc_ty,
-        LinkageAttr::External,
+        LinkageAttr::ExternalLinkage,
     );
     let ret = llvm::ops::ReturnOp::new(ctx, None);
-    ret.get_operation()
-        .insert_at_back(no_alloc.get_entry_block(ctx), ctx);
+    let no_alloc_entry = no_alloc
+        .get_entry_block(ctx)
+        .expect("definition has an entry block");
+    ret.get_operation().insert_at_back(no_alloc_entry, ctx);
     no_alloc.get_operation().insert_at_back(module_body, ctx);
 }
 
@@ -638,8 +660,10 @@ fn define_allocator_call<F>(
 ) where
     F: FnOnce(&[Value], Value) -> Vec<Value>,
 {
-    let func = llvm::ops::FuncOp::new(ctx, name, func_ty, LinkageAttr::External);
-    let entry = func.get_entry_block(ctx);
+    let func = new_llvm_func_def(ctx, name, func_ty, LinkageAttr::ExternalLinkage);
+    let entry = func
+        .get_entry_block(ctx)
+        .expect("definition has an entry block");
     let args: Vec<_> = entry.deref(ctx).arguments().collect();
     let usize_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
     let one = integer_constant(ctx, usize_ty, 1)
@@ -648,7 +672,22 @@ fn define_allocator_call<F>(
     let one_value = one.deref(ctx).get_result(0);
     one.insert_at_back(entry, ctx);
     let call_args = select_args(&args, one_value);
-    let call = llvm::ops::CallOp::new_direct(ctx, callee, call_args, result_ty);
+    let call_result_ty =
+        result_ty.unwrap_or_else(|| llvm::types::VoidType::get(ctx).into());
+    let call_arg_types: Vec<TypeHandle> = call_args
+        .iter()
+        .map(|arg| {
+            use pliron::r#type::Typed;
+            arg.get_type(ctx)
+        })
+        .collect();
+    let callee_ty = llvm::types::FuncType::get(ctx, call_result_ty, call_arg_types, false);
+    let call = llvm::ops::CallOp::new(
+        ctx,
+        pliron::builtin::op_interfaces::CallOpCallable::Direct(callee),
+        callee_ty,
+        call_args,
+    );
     let ret_value = result_ty.map(|_| call.get_operation().deref(ctx).get_result(0));
     call.get_operation().insert_at_back(entry, ctx);
     let ret = llvm::ops::ReturnOp::new(ctx, ret_value);
@@ -1889,10 +1928,14 @@ fn set_internal_linkage(
             .is_some_and(|symbol_op| symbol_op.get_symbol_name(ctx) == *symbol)
     });
     if let Some(func) = func {
-        func.deref_mut(ctx).attributes.set(
-            llvm::ops::ATTR_KEY_LLVM_LINKAGE.clone(),
-            LinkageAttr::Internal,
-        );
+        if let Some(llvm_func) = Operation::get_op::<llvm::ops::FuncOp>(func, ctx) {
+            llvm_func.set_attr_llvm_function_linkage(ctx, LinkageAttr::InternalLinkage);
+        } else {
+            func.deref_mut(ctx).attributes.set(
+                crabbit_mir::passes::convert_mir_to_llvm::ATTR_KEY_MIR_FUNC_LINKAGE.clone(),
+                LinkageAttr::InternalLinkage,
+            );
+        }
     }
 }
 
@@ -2015,10 +2058,10 @@ fn stair_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
         return Ok(stride * len);
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
-        let fields = struct_ty
-            .fields()
-            .ok_or_else(|| "opaque struct in ABI sizing".to_string())?
-            .to_vec();
+        if struct_ty.is_opaque() {
+            return Err("opaque struct in ABI sizing".to_string());
+        }
+        let fields: Vec<_> = struct_ty.fields().collect();
         drop(ty_ref);
         let mut size = 0u64;
         let mut align = 1u64;
@@ -2047,10 +2090,10 @@ fn stair_ty_align(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
         return stair_ty_align(ctx, elem);
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
-        let fields = struct_ty
-            .fields()
-            .ok_or_else(|| "opaque struct in ABI sizing".to_string())?
-            .to_vec();
+        if struct_ty.is_opaque() {
+            return Err("opaque struct in ABI sizing".to_string());
+        }
+        let fields: Vec<_> = struct_ty.fields().collect();
         drop(ty_ref);
         let mut align = 1u64;
         for field in fields {
@@ -2247,12 +2290,13 @@ fn aggregate_field_type(
         return Ok(array_ty.elem_type());
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
-        return struct_ty.field_type(index).ok_or_else(|| {
-            format!(
+        if index >= struct_ty.num_fields() {
+            return Err(format!(
                 "aggregate field index {index} is out of bounds for {}",
                 ty_ref.disp(ctx)
-            )
-        });
+            ));
+        }
+        return Ok(struct_ty.field_type(index));
     }
     Err(format!("unsupported aggregate type: {}", ty_ref.disp(ctx)))
 }
@@ -2320,10 +2364,10 @@ fn collect_simple_abi_fields(
                 ty_ref
             ));
         };
-        struct_ty
-            .fields()
-            .ok_or_else(|| "opaque struct argument cannot be ABI-lowered".to_string())?
-            .to_vec()
+        if struct_ty.is_opaque() {
+            return Err("opaque struct argument cannot be ABI-lowered".to_string());
+        }
+        struct_ty.fields().collect::<Vec<_>>()
     };
 
     for (index, field_ty) in fields.into_iter().enumerate() {
@@ -2556,12 +2600,13 @@ fn import_rvalue<'tcx>(
                         value_ty_ref.disp(ctx)
                     ));
                 };
-                let Some(result_ty) = struct_ty.field_type(1) else {
+                if struct_ty.num_fields() < 2 {
                     return Err(format!(
                         "unsupported MIR pointer metadata operand shape: {}",
                         value_ty_ref.disp(ctx)
                     ));
-                };
+                }
+                let result_ty = struct_ty.field_type(1);
                 result_ty
             };
             let extract = stair_mir::ops::ExtractValueOp::new(ctx, value, vec![1], result_ty);
@@ -3623,10 +3668,10 @@ fn scalar_constant_in_aggregate(
         let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() else {
             return Ok(None);
         };
-        let Some(fields) = struct_ty.fields() else {
+        if struct_ty.is_opaque() {
             return Ok(None);
-        };
-        fields.to_vec()
+        }
+        struct_ty.fields().collect::<Vec<_>>()
     };
     let mut sized = fields.iter().enumerate().filter(|(_, field)| {
         stair_ty_size(ctx, **field)
@@ -4361,7 +4406,7 @@ fn usize_ty(ctx: &mut Context) -> TypedHandle<IntegerType> {
 }
 
 fn llvm_ptr_ty(ctx: &mut Context) -> TypeHandle {
-    llvm::types::PointerType::get(ctx).into()
+    llvm::types::PointerType::get(ctx, 0).into()
 }
 
 fn str_ref_ty(ctx: &mut Context) -> TypeHandle {
@@ -5042,7 +5087,7 @@ mod tests {
     #[test]
     fn abi_field_collection_flattens_simple_structs() {
         let mut ctx = create_context();
-        let ptr_ty: TypeHandle = llvm::types::PointerType::get(&mut ctx).into();
+        let ptr_ty: TypeHandle = llvm::types::PointerType::get(&mut ctx, 0).into();
         let i32_ty: TypeHandle = IntegerType::get(&mut ctx, 32, Signedness::Signed).into();
         let i64_ty: TypeHandle = IntegerType::get(&mut ctx, 64, Signedness::Unsigned).into();
         let nested_ty: TypeHandle =

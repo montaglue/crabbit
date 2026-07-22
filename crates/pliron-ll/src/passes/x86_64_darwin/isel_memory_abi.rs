@@ -8,7 +8,7 @@ use crate::{
             ops as x86_64_ops,
             registers::{RAX, Register},
         },
-        llvm::attributes::GepIndexAttr,
+        llvm::ops::GepIndex,
     },
     input_error_noloc,
     ir::{r#type::Typed, value::Value},
@@ -24,8 +24,7 @@ pub(super) fn lower_gep(
     entry: Ptr<crate::ir::basic_block::BasicBlock>,
     values: &HashMap<Value, LoweredValue>,
     base: Value,
-    dynamic_indices: &[Value],
-    indices: &[GepIndexAttr],
+    indices: &[GepIndex],
     source_elem_type: TypeHandle,
     next_vreg: &mut usize,
 ) -> STAIRResult<LoweredValue> {
@@ -37,14 +36,9 @@ pub(super) fn lower_gep(
 
     for index in indices {
         let (index_const, index_reg) = match index {
-            GepIndexAttr::Constant(value) => (Some(*value as u64), None),
-            GepIndexAttr::OperandIdx(operand_idx) => {
-                let value = dynamic_indices.get(*operand_idx).copied().ok_or_else(|| {
-                    input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
-                        "llvm.gep dynamic index operand is missing".to_string()
-                    ))
-                })?;
-                let reg = lookup_reg(ctx, entry, values, value, next_vreg)?;
+            GepIndex::Constant(value) => (Some(*value as u64), None),
+            GepIndex::Value(value) => {
+                let reg = lookup_reg(ctx, entry, values, *value, next_vreg)?;
                 (None, Some(reg))
             }
         };
@@ -1202,14 +1196,12 @@ pub(super) fn aggregate_field_layout(
             format!("non-aggregate layout type {}", ty_ref.disp(ctx))
         )));
     };
-    let fields = struct_ty
-        .fields()
-        .map(|fields| fields.to_vec())
-        .ok_or_else(|| {
-            input_error_noloc!(X86_64DarwinErr::UnsupportedType(
-                "opaque struct layout".to_string()
-            ))
-        })?;
+    if struct_ty.is_opaque() {
+        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedType(
+            "opaque struct layout".to_string()
+        )));
+    }
+    let fields: Vec<_> = struct_ty.fields().collect();
     drop(ty_ref);
 
     let mut offset = 0u64;

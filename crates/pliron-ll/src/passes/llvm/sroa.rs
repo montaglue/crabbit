@@ -13,17 +13,19 @@
 //! Integer accesses whose signedness differs from the leaf type are
 //! adapted with `llvm.bitcast` so every rewritten slot sees one type.
 
+use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
+use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 use crate::{
     context::{Context, Ptr},
     debug_info::{get_operation_result_name, set_operation_result_name},
     dialects::{
         builtin::{
             attributes::IntegerAttr,
-            op_interfaces::{OneRegionInterface, OneResultInterface},
+            op_interfaces::{OneResultInterface},
             types::{IntegerType, Signedness},
         },
         llvm::{
-            attributes::GepIndexAttr,
+            ops::GepIndex,
             op_interfaces::IsDeclaration,
             ops::{
                 AllocaOp, BitcastOp, ConstantOp, ExtractValueOp, GetElementPtrOp, InsertValueOp,
@@ -63,7 +65,7 @@ impl Pass for LLVMSroaPass {
                 continue;
             }
             let mut allocas = Vec::new();
-            for block in func.get_region(ctx).deref(ctx).iter(ctx) {
+            for block in func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
                 for op in block.deref(ctx).iter(ctx) {
                     if Operation::get_opid(op, ctx) == AllocaOp::get_opid_static() {
                         allocas.push(AllocaOp::from_operation(op));
@@ -108,7 +110,10 @@ fn flatten_type(ctx: &Context, ty: TypeHandle, path: &mut Vec<u32>, out: &mut Ve
         return Some(());
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<StructType>() {
-        let fields: Vec<_> = struct_ty.fields()?.to_vec();
+        if struct_ty.is_opaque() {
+            return None;
+        }
+        let fields: Vec<_> = struct_ty.fields().collect();
         drop(ty_ref);
         for (idx, field) in fields.into_iter().enumerate() {
             path.push(idx as u32);
@@ -148,7 +153,7 @@ enum SlotAccess {
 }
 
 fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> STAIRResult<()> {
-    let elem_ty = alloca.get_elem_type(ctx);
+    let elem_ty = alloca.result_pointee_type(ctx);
     if elem_ty.deref(ctx).downcast_ref::<StructType>().is_none() {
         return Ok(());
     }
@@ -172,14 +177,17 @@ fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> STAIRResult<()> {
     let mut slot_allocas = Vec::with_capacity(leaves.len());
     let mut insert_after = alloca.get_operation();
     for (idx, leaf) in leaves.iter().enumerate() {
-        let one = ConstantOp::new_integer(
+        let one = ConstantOp::new(
             ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(1, std::num::NonZero::new(64).unwrap())),
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(1, std::num::NonZero::new(64).unwrap()),
+            )),
         );
         one.get_operation().insert_after(ctx, insert_after);
         insert_after = one.get_operation();
         let one_val = one.get_result(ctx);
-        let slot_alloca = AllocaOp::new(ctx, one_val, leaf.ty);
+        let slot_alloca = AllocaOp::new(ctx, leaf.ty, one_val);
         slot_alloca.get_operation().insert_after(ctx, insert_after);
         insert_after = slot_alloca.get_operation();
         if let Some(name) = &base_name {
@@ -240,7 +248,7 @@ fn classify_accesses(
             }
         } else if opid == StoreOp::get_opid_static() && slot_use.find_index(ctx) == 1 {
             let store = StoreOp::from_operation(user);
-            let value = store.get_value(ctx);
+            let value = store.get_operand_value(ctx);
             if value == slot {
                 return None;
             }
@@ -278,7 +286,7 @@ fn classify_accesses(
                     });
                 } else if access_opid == StoreOp::get_opid_static() && gep_use.find_index(ctx) == 1 {
                     let store = StoreOp::from_operation(access_op);
-                    if !scalar_compatible(ctx, store.get_value(ctx).get_type(ctx), leaf_ty) {
+                    if !scalar_compatible(ctx, store.get_operand_value(ctx).get_type(ctx), leaf_ty) {
                         return None;
                     }
                     accesses.push(SlotAccess::ScalarStore {
@@ -300,29 +308,28 @@ fn classify_accesses(
 /// The gep's byte offset from its base when the source element type is a
 /// byte and every index is a compile-time constant.
 fn constant_byte_offset(ctx: &Context, gep: GetElementPtrOp) -> Option<u64> {
-    let source = gep.get_source_elem_type(ctx);
+    let source = gep.src_elem_type(ctx);
     let source_ref = source.deref(ctx);
     let int_ty = source_ref.downcast_ref::<IntegerType>()?;
     if int_ty.width() != 8 {
         return None;
     }
     drop(source_ref);
-    let indices = gep.get_indices(ctx).0;
+    let indices = gep.indices(ctx);
     if indices.len() != 1 {
         return None;
     }
     match indices[0] {
-        GepIndexAttr::Constant(value) => Some(value as u64),
-        GepIndexAttr::OperandIdx(dyn_idx) => {
-            // Dynamic indices start at operand 1 (operand 0 is the base).
-            let operand = gep.get_operation().deref(ctx).get_operand(dyn_idx + 1);
-            let Some(op) = operand.defining_op().filter(|_| operand.find_index(ctx) == 0) else {
-                return None;
-            };
+        GepIndex::Constant(value) => Some(value as u64),
+        GepIndex::Value(operand) => {
+            let op = operand
+                .defining_op()
+                .filter(|_| operand.find_index(ctx) == 0)?;
             if Operation::get_opid(op, ctx) != ConstantOp::get_opid_static() {
                 return None;
             }
-            Some((ConstantOp::from_operation(op)).get_value(ctx)?.value().to_u64())
+            let value = (ConstantOp::from_operation(op)).get_value(ctx);
+            Some(value.downcast_ref::<IntegerAttr>()?.value().to_u64())
         }
     }
 }
@@ -374,7 +381,7 @@ fn rewrite_whole_load(
         let leaf_load = LoadOp::new(ctx, slot_alloca, leaf.ty);
         leaf_load.get_operation().insert_before(ctx, load_op);
         let leaf_value = leaf_load.get_result(ctx);
-        let insert = InsertValueOp::new(ctx, leaf_value, aggregate, leaf.path.clone());
+        let insert = InsertValueOp::new(ctx, aggregate, leaf_value, leaf.path.clone());
         insert.get_operation().insert_before(ctx, load_op);
         aggregate = insert.get_result(ctx);
     }
@@ -390,7 +397,7 @@ fn rewrite_whole_store(
     slot_allocas: &[Value],
 ) {
     let store_op = store.get_operation();
-    let value = store.get_value(ctx);
+    let value = store.get_operand_value(ctx);
     for (leaf, &slot_alloca) in leaves.iter().zip(slot_allocas) {
         let leaf_value = resolve_leaf(ctx, value, &leaf.path, leaf.ty, store_op);
         StoreOp::new(ctx, leaf_value, slot_alloca)
@@ -427,14 +434,14 @@ fn resolve_leaf(
             break;
         }
         let insert = InsertValueOp::from_operation(op);
-        let indices = insert.get_indices(ctx);
+        let indices = insert.indices(ctx);
         if indices == path {
-            return insert.get_value(ctx);
+            return insert.get_operation().deref(ctx).get_operand(1);
         }
         if indices.len() < path.len() && path[..indices.len()] == indices[..] {
             // The insert wrote a sub-aggregate containing our leaf.
             path.drain(..indices.len());
-            current = insert.get_value(ctx);
+            current = insert.get_operation().deref(ctx).get_operand(1);
             continue;
         }
         if path.len() < indices.len() && indices[..path.len()] == path[..] {
@@ -442,9 +449,10 @@ fn resolve_leaf(
             // scalar leaves; treat the producer as opaque.
             break;
         }
-        current = insert.get_aggregate(ctx);
+        current = insert.get_operation().deref(ctx).get_operand(0);
     }
-    let extract = ExtractValueOp::new(ctx, current, path, leaf_ty);
+    let extract =
+        ExtractValueOp::new(ctx, current, path).expect("sroa leaf path must index the aggregate");
     extract.get_operation().insert_before(ctx, before);
     extract.get_result(ctx)
 }
@@ -472,7 +480,7 @@ fn rewrite_scalar_store(
     slot_alloca: Value,
 ) {
     let store_op = store.get_operation();
-    let value = adapt_value(ctx, store.get_value(ctx), leaf_ty, store_op);
+    let value = adapt_value(ctx, store.get_operand_value(ctx), leaf_ty, store_op);
     StoreOp::new(ctx, value, slot_alloca)
         .get_operation()
         .insert_before(ctx, store_op);
@@ -481,10 +489,15 @@ fn rewrite_scalar_store(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _, CastOpInterface as _};
     use super::*;
     use crate::{
         dialects::llvm::{
-                self,
                 attributes::LinkageAttr,
                 ops::{FuncOp, ReturnOp},
                 types::FuncType,
@@ -496,8 +509,7 @@ mod tests {
     use std::num::NonZero;
 
     fn test_context() -> Context {
-        let mut ctx = Context::new();
-        llvm::register(&mut ctx);
+        let ctx = Context::new();
         ctx
     }
 
@@ -509,23 +521,17 @@ mod tests {
             StructType::get_unnamed(&mut ctx, vec![u64_ty, u64_ty]).into();
         let fn_ty: TypedHandle<FuncType> =
             FuncType::get(&mut ctx, pair_ty, vec![pair_ty], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "split".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
-        let entry = func.get_entry_block(&ctx);
+        let func = FuncOp::new(&mut ctx, "split".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let arg = entry.deref(&ctx).get_argument(0);
 
         let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let one = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap())),
-        );
+        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(entry, &ctx);
         let one_val = one.get_result(&ctx);
-        let alloca = AllocaOp::new(&mut ctx, one_val, pair_ty);
+        let alloca = AllocaOp::new(&mut ctx, pair_ty, one_val);
         alloca.get_operation().insert_at_back(entry, &ctx);
         let slot = alloca.get_result(&ctx);
         StoreOp::new(&mut ctx, arg, slot)
@@ -546,7 +552,7 @@ mod tests {
         // The struct alloca is gone; two scalar allocas remain.
         assert!(!text.contains("x llvm.struct"), "{text}");
         assert_eq!(text.matches("llvm.alloca").count(), 2, "{text}");
-        assert!(text.contains("llvm.extractvalue"), "{text}");
-        assert!(text.contains("llvm.insertvalue"), "{text}");
+        assert!(text.contains("llvm.extract_value"), "{text}");
+        assert!(text.contains("llvm.insert_value"), "{text}");
     }
 }

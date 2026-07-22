@@ -1,4 +1,4 @@
-use llvm_compat::ll::LinkageAttr;
+use crate::ll::LinkageAttr;
 
 use crate::{
     context::{Context, Ptr},
@@ -96,7 +96,7 @@ fn external_branch_relocations(
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
         dialects::{

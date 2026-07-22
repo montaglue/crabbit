@@ -158,7 +158,7 @@ fn block_offsets(
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
         dialects::{
@@ -191,7 +191,7 @@ mod tests {
     }
 
     fn bytes(hex: &str) -> Vec<u8> {
-        llvm_compat::ll::BytesAttr::parse_str(&format!("0x{hex}"))
+        crate::ll::BytesAttr::parse_str(&format!("0x{hex}"))
             .unwrap()
             .0
     }

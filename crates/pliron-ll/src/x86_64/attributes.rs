@@ -6,7 +6,6 @@ use crate::{
     common_traits::Verify,
     context::Context,
     impl_verify_succ, input_err,
-    ir::attribute::Attribute,
     ir::irfmt::parsers::{int_parser, spaced},
     ir::location::Located,
     parsable::{Parsable, ParseResult, StateStream},

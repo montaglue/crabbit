@@ -39,13 +39,13 @@ impl Pass for VerifyLlvmForAarch64DarwinPass {
         while let Some(op_ptr) = op {
             if let Some(global) = cast_operation::<GlobalOp>(ctx, op_ptr) {
                 let name = global.get_symbol_name(ctx).to_string();
-                validate_linkage(&name, global.get_linkage(ctx))?;
+                validate_linkage(&name, global.get_attr_llvm_global_linkage(ctx).expect("llvm function without linkage").clone())?;
                 op = op_ptr.deref(ctx).get_next();
                 continue;
             } else if let Some(func) = cast_operation::<FuncOp>(ctx, op_ptr) {
                 let name = func.get_symbol_name(ctx).to_string();
-                validate_linkage(&name, func.get_linkage(ctx))?;
-                validate_function_type(ctx, &name, func.get_func_type(ctx))?;
+                validate_linkage(&name, func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
+                validate_function_type(ctx, &name, func.get_type(ctx).into())?;
                 if !func.is_declaration(ctx) {
                     validate_body(ctx, &func)?;
                 }
@@ -62,13 +62,18 @@ impl Pass for VerifyLlvmForAarch64DarwinPass {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _, CastOpInterface as _};
     use crate::{
         context::Context,
         dialects::{
             aarch64,
             builtin::{self, op_interfaces::OneRegionInterface},
             llvm::{
-                self,
                 attributes::LinkageAttr,
                 ops::{FuncOp, GlobalOp},
                 types::FuncType,
@@ -83,7 +88,6 @@ mod tests {
 
     fn context() -> Context {
         let mut ctx = Context::new();
-        llvm::register(&mut ctx);
         aarch64::register(&mut ctx);
         ctx
     }
@@ -95,20 +99,12 @@ mod tests {
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
-        let global = GlobalOp::new(
-            &mut ctx,
-            "extern_data".try_into().unwrap(),
-            i64_ty.into(),
-            LinkageAttr::External,
-        );
+        let global = GlobalOp::new(&mut ctx, "extern_data".try_into().unwrap(), i64_ty.into());
+        global.set_attr_llvm_global_linkage(&ctx, LinkageAttr::ExternalLinkage);
         global.get_operation().insert_at_back(body, &ctx);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new_declaration(
-            &mut ctx,
-            "extern_func".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "extern_func".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
         func.get_operation().insert_at_back(body, &ctx);
 
         VerifyLlvmForAarch64DarwinPass
@@ -124,14 +120,11 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "bad_body".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "bad_body".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        aarch64::ops::ret(&mut ctx).insert_at_back(func.get_entry_block(&ctx), &ctx);
+        aarch64::ops::ret(&mut ctx).insert_at_back(func.get_entry_block(&ctx).unwrap(), &ctx);
 
         let err = match VerifyLlvmForAarch64DarwinPass.run(
             module.get_operation(),

@@ -277,10 +277,10 @@ dependencies = [
  "combine",
  "crabbit-mir",
  "expect-test",
- "llvm-compat",
  "log",
  "pliron",
  "pliron-ll",
+ "pliron-llvm",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -295,10 +295,10 @@ dependencies = [
  "anyhow",
  "clap",
  "crabbit-mir",
- "llvm-compat",
  "pliron",
  "pliron-inspect-driver",
  "pliron-ll",
+ "pliron-llvm",
 ]
 
 [[package]]
@@ -308,10 +308,11 @@ dependencies = [
  "awint",
  "combine",
  "expect-test",
- "llvm-compat",
  "log",
  "pliron",
+ "pliron-inspect-driver",
  "pliron-ll",
+ "pliron-llvm",
  "rustc-hash",
  "thiserror",
 ]
@@ -581,20 +582,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "llvm-compat"
-version = "0.1.0"
-dependencies = [
- "awint",
- "combine",
- "expect-test",
- "log",
- "pliron",
- "pliron-inspect-driver",
- "rustc-hash",
- "thiserror",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -689,6 +676,7 @@ dependencies = [
  "flowblocks",
  "pliron",
  "pliron-inspect-protocol",
+ "pliron-llvm",
  "serde",
  "serde_json",
 ]
@@ -709,11 +697,22 @@ dependencies = [
  "awint",
  "combine",
  "expect-test",
- "llvm-compat",
  "log",
  "pliron",
+ "pliron-inspect-driver",
+ "pliron-llvm",
  "rustc-hash",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "pliron-llvm"
+version = "0.16.0"
+dependencies = [
+ "bitflags",
+ "log",
+ "pliron",
  "thiserror",
 ]
 

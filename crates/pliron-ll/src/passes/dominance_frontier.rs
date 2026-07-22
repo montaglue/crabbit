@@ -1,11 +1,11 @@
 //! Dominator-tree and dominance-frontier utilities for one-region operations.
 
+use pliron::region::Region;
 use rustc_hash::FxHashMap;
 
 use crate::{
     context::{Context, Ptr},
-    dialects::builtin::op_interfaces::OneRegionInterface,
-    ir::{basic_block::BasicBlock, op::Op},
+    ir::basic_block::BasicBlock,
     linked_list::ContainsLinkedList,
 };
 
@@ -56,12 +56,12 @@ impl DominanceFrontiers {
     }
 }
 
-/// Compute the dominator tree and dominance frontiers for an operation's region.
-pub fn compute_dominance_frontiers_for_op<T: Op + OneRegionInterface>(
-    op: &T,
+/// Compute the dominator tree and dominance frontiers for a region.
+pub fn compute_dominance_frontiers(
+    region: Ptr<Region>,
     ctx: &Context,
 ) -> (DominatorTree, DominanceFrontiers) {
-    let blocks = reachable_blocks(op, ctx);
+    let blocks = reachable_blocks(region, ctx);
     if blocks.is_empty() {
         let block_indexes = FxHashMap::default();
         return (
@@ -100,8 +100,7 @@ pub fn compute_dominance_frontiers_for_op<T: Op + OneRegionInterface>(
     )
 }
 
-fn reachable_blocks<T: Op + OneRegionInterface>(op: &T, ctx: &Context) -> Vec<Ptr<BasicBlock>> {
-    let region = op.get_region(ctx);
+fn reachable_blocks(region: Ptr<Region>, ctx: &Context) -> Vec<Ptr<BasicBlock>> {
     let Some(entry) = region.deref(ctx).get_head() else {
         return vec![];
     };
@@ -258,12 +257,21 @@ fn block_indexes(blocks: &[Ptr<BasicBlock>]) -> FxHashMap<Ptr<BasicBlock>, usize
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
+    #[allow(unused_imports)]
+    use pliron::op::Op as _;
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
     use crate::{
         dialects::{
             builtin::{self, types::Signedness},
             llvm::{
-                self,
                 attributes::LinkageAttr,
                 ops::{BrOp, CondBrOp, FuncOp, ReturnOp},
                 types::FuncType,
@@ -273,8 +281,7 @@ mod tests {
     };
 
     fn test_context() -> Context {
-        let mut ctx = Context::new();
-        llvm::register(&mut ctx);
+        let ctx = Context::new();
         ctx
     }
 
@@ -284,21 +291,18 @@ mod tests {
         let i1_ty: TypeHandle =
             builtin::types::IntegerType::get(&mut ctx, 1, Signedness::Signless).into();
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i1_ty, vec![i1_ty], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "diamond".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "diamond".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
 
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let cond = entry.deref(&ctx).get_argument(0);
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
         let join_block = BasicBlock::new(&mut ctx, Some("join".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx), &ctx);
-        else_block.insert_at_back(func.get_region(&ctx), &ctx);
-        join_block.insert_at_back(func.get_region(&ctx), &ctx);
+        then_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        else_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        join_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
 
         CondBrOp::new(&mut ctx, cond, then_block, vec![], else_block, vec![])
             .get_operation()
@@ -313,7 +317,7 @@ mod tests {
             .get_operation()
             .insert_at_back(join_block, &ctx);
 
-        let (dom_tree, frontiers) = compute_dominance_frontiers_for_op(&func, &ctx);
+        let (dom_tree, frontiers) = compute_dominance_frontiers(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
 
         assert!(dom_tree.entry() == Some(entry));
         assert!(dom_tree.immediate_dominator(then_block) == Some(entry));
@@ -330,14 +334,11 @@ mod tests {
         let i1_ty: TypeHandle =
             builtin::types::IntegerType::get(&mut ctx, 1, Signedness::Signless).into();
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i1_ty, vec![], false);
-        let func = FuncOp::new_declaration(
-            &mut ctx,
-            "decl".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "decl".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        let region = pliron::operation::Operation::add_region(func.get_operation(), &mut ctx);
 
-        let (dom_tree, _) = compute_dominance_frontiers_for_op(&func, &ctx);
+        let (dom_tree, _) = compute_dominance_frontiers(region, &ctx);
 
         assert!(dom_tree.entry().is_none());
         assert!(dom_tree.blocks().is_empty());

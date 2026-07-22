@@ -7,6 +7,11 @@
 
 use std::collections::HashMap;
 
+use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _, OneOpdInterface as _};
+use pliron_llvm::op_interfaces::{PointerTypeResult as _};
+
+use crate::ll::ops::CStrOp;
+
 use crate::{
     common_traits::Named,
     context::{Context, Ptr},
@@ -17,14 +22,20 @@ use crate::{
             ops::{self as x86_64_ops, FuncOp as X86_64FuncOp},
             registers::{R11, RAX, RDI, RDX, Register},
         },
-        builtin::op_interfaces::{OneRegionInterface, OneResultInterface, SymbolOpInterface},
+        builtin::{
+            attributes::IntegerAttr,
+            op_interfaces::{
+                CallOpCallable, OneRegionInterface, OneResultInterface, SymbolOpInterface,
+            },
+        },
         llvm::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AddressOfOp, AllocaOp, BitcastOp, BrOp, CStrOp, CallOp, CondBrOp, ConstantOp,
+                AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, ConstantOp,
                 ExtractValueOp, FuncOp as LlvmFuncOp, GetElementPtrOp, GlobalOp as LlvmGlobalOp,
-                ICmpOp, InsertValueOp, IntToPtrOp, LoadOp, PtrToIntOp, ReturnOp, StoreOp, TruncOp,
+                ICmpOp, InsertValueOp, IntToPtrOp, LoadOp, PoisonOp, PtrToIntOp, ReturnOp, StoreOp,
+                TruncOp,
                 UndefOp, UnreachableOp, ZExtOp,
             },
         },
@@ -76,7 +87,7 @@ impl Pass for LlvmToX86_64IselPass {
         for op_ptr in llvm_ops.iter().copied() {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(global) = op_obj.downcast_ref::<LlvmGlobalOp>() {
-                if let Some(bytes) = global.get_initializer_bytes(ctx) {
+                if let Some(bytes) = crate::ll::global_initializer_bytes(ctx, global) {
                     globals.insert(global.get_symbol_name(ctx), bytes);
                 }
             }
@@ -122,12 +133,12 @@ impl MachineFunctionPlan {
     ) -> STAIRResult<Self> {
         let name = llvm_func.get_symbol_name(ctx);
         let abi = function_abi(ctx, llvm_func)?;
-        let linkage = validate_linkage(&name.to_string(), llvm_func.get_linkage(ctx))?;
+        let linkage = validate_linkage(&name.to_string(), llvm_func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
         let func = X86_64FuncOp::new(ctx, name, linkage);
         func.get_operation().insert_at_back(module_body, ctx);
         let entry = func.entry_block(ctx);
 
-        let blocks: Vec<_> = llvm_func.get_region(ctx).deref(ctx).iter(ctx).collect();
+        let blocks: Vec<_> = llvm_func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx).collect();
         let region = func.get_region(ctx);
         let mut block_map = HashMap::new();
         for (index, llvm_block) in blocks.iter().copied().enumerate() {
@@ -206,7 +217,7 @@ fn lower_function(
     // plus static loop heuristics). They are transferred onto the machine
     // conditional branches below, the way LLVM's instruction selection copies
     // BranchProbabilityInfo onto MachineBasicBlock successor probabilities.
-    let branch_probabilities = HotPathInfo::for_op(llvm_func, ctx);
+    let branch_probabilities = HotPathInfo::for_region(llvm_func.get_region(ctx).expect("llvm.func definition must have a body"), ctx);
     let plan = MachineFunctionPlan::create(ctx, llvm_func, module_body)?;
     let MachineFunctionPlan {
         func,
@@ -274,14 +285,16 @@ fn lower_function(
         x86_64_ops::mov(ctx, dst, src).insert_at_back(entry, ctx);
     }
 
-    let llvm_entry = llvm_func.get_entry_block(ctx);
+    let llvm_entry = llvm_func
+        .get_entry_block(ctx)
+        .expect("llvm.func definition must have a body");
     for block in &blocks {
         if *block == llvm_entry {
             continue;
         }
         for arg in block.deref(ctx).arguments() {
-            let dst = fresh_vreg(&mut next_vreg);
-            values.insert(arg, LoweredValue::Reg(dst));
+            let lowered = block_arg_value(ctx, arg.get_type(ctx), &mut next_vreg)?;
+            values.insert(arg, lowered);
         }
     }
 
@@ -322,11 +335,12 @@ fn lower_function(
             let opid = Operation::get_opid(op_ptr, ctx);
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(alloca) = op_obj.downcast_ref::<AllocaOp>() {
-                let slot = stack.allocate(ctx, alloca.get_elem_type(ctx))?;
+                let slot = stack.allocate(ctx, alloca.result_pointee_type(ctx))?;
                 values.insert(alloca.get_result(ctx), LoweredValue::StackAddr(slot));
             } else if let Some(constant) = op_obj.downcast_ref::<ConstantOp>() {
-                let attr = constant
-                    .get_value(ctx)
+                let attr = constant.get_value(ctx);
+                let attr = attr
+                    .downcast_ref::<IntegerAttr>()
                     .expect("constant verified to be integer");
                 values.insert(
                     constant.get_result(ctx),
@@ -347,7 +361,7 @@ fn lower_function(
                     },
                 );
             } else if let Some(addr) = op_obj.downcast_ref::<AddressOfOp>() {
-                let symbol = addr.get_symbol(ctx);
+                let symbol = addr.get_global_name(ctx);
                 if let Some(bytes) = globals.get(&symbol).cloned() {
                     values.insert(
                         addr.get_result(ctx),
@@ -366,21 +380,23 @@ fn lower_function(
                 }
             } else if let Some(undef) = op_obj.downcast_ref::<UndefOp>() {
                 values.insert(undef.get_result(ctx), LoweredValue::Undef);
+            } else if let Some(poison) = op_obj.downcast_ref::<PoisonOp>() {
+                values.insert(poison.get_result(ctx), LoweredValue::Undef);
             } else if let Some(insert) = op_obj.downcast_ref::<InsertValueOp>() {
-                let aggregate = lookup_value(ctx, &values, insert.get_aggregate(ctx))?;
-                let value = lookup_value(ctx, &values, insert.get_value(ctx))?;
+                let aggregate = lookup_value(ctx, &values, insert.get_operation().deref(ctx).get_operand(0))?;
+                let value = lookup_value(ctx, &values, insert.get_operation().deref(ctx).get_operand(1))?;
                 values.insert(
                     insert.get_result(ctx),
-                    insert_aggregate_value(aggregate, &insert.get_indices(ctx), value)?,
+                    insert_aggregate_value(aggregate, &insert.indices(ctx), value)?,
                 );
             } else if let Some(extract) = op_obj.downcast_ref::<ExtractValueOp>() {
-                let aggregate = lookup_value(ctx, &values, extract.get_aggregate(ctx))?;
+                let aggregate = lookup_value(ctx, &values, extract.get_operation().deref(ctx).get_operand(0))?;
                 values.insert(
                     extract.get_result(ctx),
-                    extract_aggregate_value(aggregate, &extract.get_indices(ctx))?,
+                    extract_aggregate_value(aggregate, &extract.indices(ctx))?,
                 );
             } else if let Some(cast) = op_obj.downcast_ref::<IntToPtrOp>() {
-                let value = match lookup_value(ctx, &values, cast.get_input(ctx))? {
+                let value = match lookup_value(ctx, &values, cast.get_operand(ctx))? {
                     LoweredValue::Imm(imm) if imm & 1 == 1 => {
                         LoweredValue::TaggedLen((imm >> 1) as u64)
                     }
@@ -397,19 +413,19 @@ fn lower_function(
                 };
                 values.insert(cast.get_result(ctx), value);
             } else if let Some(cast) = op_obj.downcast_ref::<PtrToIntOp>() {
-                let value = lookup_value(ctx, &values, cast.get_input(ctx))?;
+                let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
                 values.insert(cast.get_result(ctx), value);
             } else if let Some(cast) = op_obj.downcast_ref::<BitcastOp>() {
-                let value = lookup_value(ctx, &values, cast.get_input(ctx))?;
+                let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
                 let result = cast.get_result(ctx);
                 let value = adapt_value_to_type(ctx, value, result.get_type(ctx))?;
                 values.insert(result, value);
             } else if let Some(cast) = op_obj.downcast_ref::<ZExtOp>() {
-                let value = lookup_value(ctx, &values, cast.get_input(ctx))?;
+                let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
                 values.insert(cast.get_result(ctx), value);
             } else if let Some(cast) = op_obj.downcast_ref::<TruncOp>() {
                 let result = cast.get_result(ctx);
-                let value = lookup_value(ctx, &values, cast.get_input(ctx))?;
+                let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
                 if let Some(mask) = integer_trunc_mask(ctx, result.get_type(ctx)) {
                     if let LoweredValue::Imm(imm) = value {
                         values.insert(result, LoweredValue::Imm(imm & mask as u128));
@@ -433,22 +449,19 @@ fn lower_function(
                     values.insert(result, value);
                 }
             } else if let Some(gep) = op_obj.downcast_ref::<GetElementPtrOp>() {
-                let dynamic_indices: Vec<_> =
-                    gep.get_operation().deref(ctx).operands().skip(1).collect();
                 let address = lower_gep(
                     ctx,
                     insert_block,
                     &values,
-                    gep.get_base(ctx),
-                    &dynamic_indices,
-                    &gep.get_indices(ctx).0,
-                    gep.get_source_elem_type(ctx),
+                    gep.get_operand_src_ptr(ctx),
+                    &gep.indices(ctx),
+                    gep.src_elem_type(ctx),
                     &mut next_vreg,
                 )?;
                 values.insert(gep.get_result(ctx), address);
             } else if let Some(load) = op_obj.downcast_ref::<LoadOp>() {
                 let result = load.get_result(ctx);
-                let addr = lookup_value(ctx, &values, load.get_addr(ctx))?;
+                let addr = lookup_value(ctx, &values, load.get_operand_address(ctx))?;
                 let value = load_memory(
                     ctx,
                     insert_block,
@@ -458,9 +471,9 @@ fn lower_function(
                 )?;
                 values.insert(result, value);
             } else if let Some(store) = op_obj.downcast_ref::<StoreOp>() {
-                let value = store.get_value(ctx);
+                let value = store.get_operand_value(ctx);
                 let lowered_value = lookup_value(ctx, &values, value)?;
-                let addr = lookup_value(ctx, &values, store.get_addr(ctx))?;
+                let addr = lookup_value(ctx, &values, store.get_operand_address(ctx))?;
                 store_memory(
                     ctx,
                     insert_block,
@@ -470,17 +483,10 @@ fn lower_function(
                     &mut next_vreg,
                 )?;
             } else if let Some(call) = op_obj.downcast_ref::<CallOp>() {
-                let callee = call.get_callee(ctx);
-                let mut args = call.get_args(ctx);
-                let callee_ptr = if callee.is_none() {
-                    // Indirect call: operand 0 is the callee function pointer.
-                    if args.is_empty() {
-                        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
-                            "indirect llvm.call has no callee operand".to_string()
-                        )));
-                    }
-                    let callee_value = args.remove(0);
-                    let lowered = lookup_value(ctx, &values, callee_value)?;
+                let callee = call.callee(ctx);
+                let args = call.args(ctx);
+                let callee_ptr = if let CallOpCallable::Indirect(callee_value) = &callee {
+                    let lowered = lookup_value(ctx, &values, *callee_value)?;
                     Some(materialize_pointer(
                         ctx,
                         insert_block,
@@ -562,10 +568,10 @@ fn lower_function(
                         .insert_at_back(insert_block, ctx);
                 }
                 match callee {
-                    Some(callee) => {
+                    CallOpCallable::Direct(callee) => {
                         x86_64_ops::call(ctx, callee).insert_at_back(insert_block, ctx);
                     }
-                    None => {
+                    CallOpCallable::Indirect(_) => {
                         x86_64_ops::call_reg(ctx, R11).insert_at_back(insert_block, ctx);
                     }
                 }
@@ -695,12 +701,12 @@ fn lower_function(
                 )?;
                 values.insert(result, LoweredValue::Reg(dst));
             } else if let Some(icmp) = op_obj.downcast_ref::<ICmpOp>() {
-                let lhs = icmp.get_lhs(ctx);
-                let rhs = icmp.get_rhs(ctx);
+                let lhs = icmp.get_operation().deref(ctx).get_operand(0);
+                let rhs = icmp.get_operation().deref(ctx).get_operand(1);
                 values.insert(
                     icmp.get_result(ctx),
                     LoweredValue::Compare(CompareValue {
-                        predicate: icmp.get_predicate(ctx),
+                        predicate: icmp.predicate(ctx),
                         lhs_ty: lhs.get_type(ctx),
                         lhs: Box::new(lookup_value(ctx, &values, lhs)?),
                         rhs_ty: rhs.get_type(ctx),
@@ -723,16 +729,16 @@ fn lower_function(
             } else if let Some(_unreachable) = op_obj.downcast_ref::<UnreachableOp>() {
                 x86_64_ops::trap(ctx).insert_at_back(insert_block, ctx);
             } else if let Some(br) = op_obj.downcast_ref::<BrOp>() {
-                let dest = br.get_dest(ctx);
-                let args = br.get_dest_operands(ctx);
+                let dest = br.get_operation().deref(ctx).get_successor(0);
+                let args = br.successor_operands(ctx, 0);
                 emit_block_arg_copies(ctx, insert_block, &values, dest, &args, &mut next_vreg)?;
                 let target = machine_block(&block_map, dest)?;
                 x86_64_ops::jmp(ctx, target).insert_at_back(insert_block, ctx);
             } else if let Some(cond_br) = op_obj.downcast_ref::<CondBrOp>() {
-                let true_dest = cond_br.get_true_dest(ctx);
-                let true_args = cond_br.get_true_operands(ctx);
-                let false_dest = cond_br.get_false_dest(ctx);
-                let false_args = cond_br.get_false_operands(ctx);
+                let true_dest = cond_br.get_operation().deref(ctx).get_successor(0);
+                let true_args = cond_br.successor_operands(ctx, 0);
+                let false_dest = cond_br.get_operation().deref(ctx).get_successor(1);
+                let false_args = cond_br.successor_operands(ctx, 1);
                 let true_target = branch_edge_target(
                     ctx,
                     region,
@@ -761,7 +767,7 @@ fn lower_function(
                     .unwrap_or_else(|| BranchProbability::from_ratio(1, 2));
                 let (taken_weight, not_taken_weight) =
                     (taken.numerator(), taken.complement().numerator());
-                let condition_value = lookup_value(ctx, &values, cond_br.get_condition(ctx))?;
+                let condition_value = lookup_value(ctx, &values, cond_br.get_operand_condition(ctx))?;
                 if let LoweredValue::Compare(compare) = condition_value {
                     if is_128_bit_integer(ctx, compare.lhs_ty) {
                         let condition =
@@ -935,14 +941,12 @@ fn extract_aggregate_value(aggregate: LoweredValue, indices: &[u32]) -> STAIRRes
             )));
         }
     };
+    // A field that was never inserted is an uninitialized read; through
+    // memory this would have been an undef load, so it is undef here too.
     let field = fields
         .get(*index as usize)
         .and_then(|field| field.clone())
-        .ok_or_else(|| {
-            input_error_noloc!(X86_64DarwinErr::UndefinedValue(
-                "extract from unset aggregate field".to_string()
-            ))
-        })?;
+        .unwrap_or(LoweredValue::Undef);
     extract_aggregate_value(field, rest)
 }
 
@@ -966,11 +970,26 @@ pub(super) fn materialize_typed(
     next_vreg: &mut usize,
     context: &str,
 ) -> STAIRResult<Register> {
+    // Reconcile packed-scalar and field-wise aggregate representations of
+    // the value with the type the use site expects.
+    let value = adapt_value_to_type(ctx, value, ty)?;
+    if let LoweredValue::Aggregate(fields) = &value {
+        if fields.len() > 1 {
+            return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(format!(
+                "cannot materialize {context}: multi-field aggregate of type {}",
+                pliron::printable::Printable::disp(&ty, ctx)
+            ))));
+        }
+    }
     if is_128_bit_integer(ctx, ty) {
         let (lo, _) = materialize_pair(ctx, entry, value, ty, next_vreg, context)?;
         return Ok(lo);
     }
-    let reg = materialize(ctx, entry, value, next_vreg, context)?;
+    let context = format!(
+        "{context} (type {})",
+        pliron::printable::Printable::disp(&ty, ctx)
+    );
+    let reg = materialize(ctx, entry, value, next_vreg, &context)?;
     normalize_integer_reg(ctx, entry, reg, ty, next_vreg)
 }
 
@@ -1306,10 +1325,62 @@ pub(super) fn store_reg_opcode(
     })
 }
 
+
+/// The [LoweredValue] shape of a block argument of type `ty`: one fresh
+/// virtual register per scalar leaf — a plain register for single-register
+/// scalars, a register pair for 128-bit integers, and a recursive
+/// [LoweredValue::Aggregate] for structs and arrays.
+pub(super) fn block_arg_value(
+    ctx: &Context,
+    ty: TypeHandle,
+    next_vreg: &mut usize,
+) -> STAIRResult<LoweredValue> {
+    if is_zero_sized_ty(ctx, ty) {
+        return Ok(LoweredValue::Undef);
+    }
+    if is_128_bit_integer(ctx, ty) {
+        return Ok(LoweredValue::RegPair(
+            fresh_vreg(next_vreg),
+            fresh_vreg(next_vreg),
+        ));
+    }
+    if is_aggregate_ty(ctx, ty) {
+        let fields = struct_fields(ctx, ty)?;
+        let mut lowered = Vec::with_capacity(fields.len());
+        for field in fields {
+            lowered.push(Some(block_arg_value(ctx, field, next_vreg)?));
+        }
+        return Ok(LoweredValue::Aggregate(lowered));
+    }
+    Ok(LoweredValue::Reg(fresh_vreg(next_vreg)))
+}
+
+/// The registers backing a block argument's [LoweredValue], in leaf order.
+pub(super) fn block_arg_registers(value: &LoweredValue, out: &mut Vec<Register>) {
+    match value {
+        LoweredValue::Reg(reg) => out.push(reg.clone()),
+        LoweredValue::RegPair(lo, hi) => {
+            out.push(lo.clone());
+            out.push(hi.clone());
+        }
+        LoweredValue::Aggregate(fields) => {
+            for field in fields.iter().flatten() {
+                block_arg_registers(field, out);
+            }
+        }
+        LoweredValue::Undef => {}
+        other => unreachable!("block arguments lower to registers, got {other:?}"),
+    }
+}
+
 pub(super) fn is_zero_sized_ty(ctx: &Context, ty: TypeHandle) -> bool {
-    ty.deref(ctx)
+    let ty_ref = ty.deref(ctx);
+    ty_ref
         .downcast_ref::<crate::dialects::builtin::types::UnitType>()
         .is_some()
+        || ty_ref
+            .downcast_ref::<crate::dialects::llvm::types::VoidType>()
+            .is_some()
 }
 
 pub(super) fn is_stack_scalar_ty(ctx: &Context, ty: TypeHandle) -> bool {
@@ -1393,14 +1464,12 @@ pub(super) fn struct_fields(
             format!("{:?}", &*ty_ref)
         )));
     };
-    struct_ty
-        .fields()
-        .map(|fields| fields.to_vec())
-        .ok_or_else(|| {
-            input_error_noloc!(X86_64DarwinErr::UnsupportedType(
-                "opaque struct stack slot".to_string()
-            ))
-        })
+    if struct_ty.is_opaque() {
+        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedType(
+            "opaque struct stack slot".to_string()
+        )));
+    }
+    Ok(struct_ty.fields().collect())
 }
 
 fn align_to_16(bytes: u64) -> u64 {

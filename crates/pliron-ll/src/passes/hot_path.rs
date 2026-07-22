@@ -22,13 +22,13 @@
 //! (`llvm`, `cf`), and [`HotPathInfo::from_edges`] serves label-based machine
 //! CFGs (e.g. the `aarch64` dialect, see the `aarch64-block-placement` pass).
 
+use pliron::region::Region;
 use rustc_hash::FxHashMap;
 
 use crate::{
     context::{Context, Ptr},
-    dialects::builtin::op_interfaces::OneRegionInterface,
-    op_interfaces::WeightedBranchOpInterface,
-    ir::{basic_block::BasicBlock, op::Op, op::op_cast, operation::Operation},
+    ll::op_interfaces::WeightedBranchOpInterface,
+    ir::{basic_block::BasicBlock, op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
     passes::dominance_frontier::immediate_dominators,
 };
@@ -106,11 +106,10 @@ pub struct HotPathInfo {
 }
 
 impl HotPathInfo {
-    /// Analyze the region of a single-region operation whose terminators
-    /// reference successors directly (`llvm`, `cf`, ...). Explicit weights are
-    /// read through [`WeightedBranchOpInterface`].
-    pub fn for_op<T: Op + OneRegionInterface>(op: &T, ctx: &Context) -> Self {
-        let region = op.get_region(ctx);
+    /// Analyze a region whose terminators reference successors directly
+    /// (`llvm`, `cf`, ...). Explicit weights are read through
+    /// [`WeightedBranchOpInterface`].
+    pub fn for_region(region: Ptr<Region>, ctx: &Context) -> Self {
         let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
         let block_indexes = block_indexes(&blocks);
 
@@ -504,12 +503,21 @@ fn extract_hot_path(probabilities: &[Vec<(usize, BranchProbability)>]) -> Vec<us
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
+    #[allow(unused_imports)]
+    use pliron::op::Op as _;
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
     use crate::{
         dialects::{
             builtin::{self, types::Signedness},
             llvm::{
-                self,
                 attributes::LinkageAttr,
                 ops::{BrOp, CondBrOp, FuncOp, ReturnOp},
                 types::FuncType,
@@ -519,8 +527,7 @@ mod tests {
     };
 
     fn test_context() -> Context {
-        let mut ctx = Context::new();
-        llvm::register(&mut ctx);
+        let ctx = Context::new();
         ctx
     }
 
@@ -602,27 +609,24 @@ mod tests {
 
     #[test]
     fn for_op_reads_weights_through_the_interface() {
-        use crate::op_interfaces::WeightedBranchOpInterface;
+        use crate::ll::op_interfaces::WeightedBranchOpInterface;
 
         let mut ctx = test_context();
         let i1_ty: TypeHandle =
             builtin::types::IntegerType::get(&mut ctx, 1, Signedness::Signless).into();
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i1_ty, vec![i1_ty], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "weighted".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "weighted".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
 
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let cond = entry.deref(&ctx).get_argument(0);
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
         let join_block = BasicBlock::new(&mut ctx, Some("join".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx), &ctx);
-        else_block.insert_at_back(func.get_region(&ctx), &ctx);
-        join_block.insert_at_back(func.get_region(&ctx), &ctx);
+        then_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        else_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        join_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
 
         let cond_br = CondBrOp::new(&mut ctx, cond, then_block, vec![], else_block, vec![]);
         cond_br.set_successor_weights(&ctx, vec![1, 7]);
@@ -637,7 +641,7 @@ mod tests {
             .get_operation()
             .insert_at_back(join_block, &ctx);
 
-        let info = HotPathInfo::for_op(&func, &ctx);
+        let info = HotPathInfo::for_region(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
 
         assert!(info.edge_probability(entry, else_block) == BranchProbability::from_ratio(7, 8));
         assert!(info.hot_path() == [entry, else_block, join_block]);

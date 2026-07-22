@@ -82,6 +82,14 @@ pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> ST
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{
+        BinArithOp as _, CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
+    };
     use std::num::NonZero;
 
     use crate::{
@@ -93,8 +101,8 @@ mod tests {
                 types::FP32Type,
             },
             llvm::{
-                self,
-                attributes::{GepIndexAttr, GepIndicesAttr, LinkageAttr},
+                attributes::LinkageAttr,
+                ops::GepIndex,
                 ops::{
                     AddOp, AllocaOp, BrOp, CondBrOp, ConstantOp, FuncOp, GetElementPtrOp, LoadOp,
                     ReturnOp, StoreOp,
@@ -112,7 +120,6 @@ mod tests {
 
     fn context() -> Context {
         let mut ctx = Context::new();
-        llvm::register(&mut ctx);
         aarch64::register(&mut ctx);
         macho::register(&mut ctx);
         ctx
@@ -155,18 +162,12 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "main".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "main".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
-        let constant = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(7, NonZero::new(64).unwrap())),
-        );
+        let entry = func.get_entry_block(&ctx).unwrap();
+        let constant = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(7, NonZero::new(64).unwrap()))));
         constant.get_operation().insert_at_back(entry, &ctx);
         let ret_value = constant.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(ret_value))
@@ -185,12 +186,9 @@ mod tests {
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
         let f32_ty = FP32Type::get(&ctx);
         let func_ty = FuncType::get(&mut ctx, f32_ty.into(), vec![f32_ty.into()], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "fp_identity".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "fp_identity".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
 
         let err = match lower_module(&mut ctx, module.get_operation()) {
@@ -216,16 +214,13 @@ mod tests {
             vec![i64_ty.into(), i64_ty.into()],
             false,
         );
-        let func = FuncOp::new(
-            &mut ctx,
-            "add2".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "add2".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let args: Vec<_> = entry.deref(&ctx).arguments().collect();
-        let add = AddOp::new(&mut ctx, args[0], args[1]);
+        let add = AddOp::new_with_overflow_flag(&mut ctx, args[0], args[1], Default::default());
         add.get_operation().insert_at_back(entry, &ctx);
         let add_result = add.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(add_result))
@@ -248,14 +243,11 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![i64_ty.into(); 9], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "ninth".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "ninth".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let ninth_arg = entry.deref(&ctx).get_argument(8);
         ReturnOp::new(&mut ctx, Some(ninth_arg))
             .get_operation()
@@ -275,22 +267,16 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![i64_ty.into()], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "slot".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "slot".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let arg = entry.deref(&ctx).get_argument(0);
-        let one = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap())),
-        );
+        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(entry, &ctx);
         let one_result = one.get_result(&ctx);
-        let alloca = AllocaOp::new(&mut ctx, one_result, i64_ty.into());
+        let alloca = AllocaOp::new(&mut ctx, i64_ty.into(), one_result);
         alloca.get_operation().insert_at_back(entry, &ctx);
         let slot = alloca.get_result(&ctx);
         StoreOp::new(&mut ctx, arg, slot)
@@ -317,23 +303,17 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "branchy".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "branchy".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let second = BasicBlock::new(&mut ctx, Some("bb1".try_into().unwrap()), vec![]);
-        second.insert_at_back(func.get_region(&ctx), &ctx);
+        second.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
         BrOp::new(&mut ctx, second, vec![])
             .get_operation()
             .insert_at_back(entry, &ctx);
-        let constant = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap())),
-        );
+        let constant = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap()))));
         constant.get_operation().insert_at_back(second, &ctx);
         let constant_result = constant.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(constant_result))
@@ -356,23 +336,17 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "cond".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "cond".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx), &ctx);
+        then_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
-        else_block.insert_at_back(func.get_region(&ctx), &ctx);
+        else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let cond = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap())),
-        );
+        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
         CondBrOp::new(
@@ -386,20 +360,14 @@ mod tests {
         .get_operation()
         .insert_at_back(entry, &ctx);
 
-        let then_value = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap())),
-        );
+        let then_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         then_value.get_operation().insert_at_back(then_block, &ctx);
         let then_result = then_value.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(then_result))
             .get_operation()
             .insert_at_back(then_block, &ctx);
 
-        let else_value = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap())),
-        );
+        let else_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap()))));
         else_value.get_operation().insert_at_back(else_block, &ctx);
         let else_result = else_value.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(else_result))
@@ -420,25 +388,19 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "block_arg".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "block_arg".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let target = BasicBlock::new(
             &mut ctx,
             Some("target".try_into().unwrap()),
             vec![i64_ty.into()],
         );
-        target.insert_at_back(func.get_region(&ctx), &ctx);
+        target.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let value = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(42, NonZero::new(64).unwrap())),
-        );
+        let value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(42, NonZero::new(64).unwrap()))));
         value.get_operation().insert_at_back(entry, &ctx);
         let value_result = value.get_result(&ctx);
         BrOp::new(&mut ctx, target, vec![value_result])
@@ -465,41 +427,29 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "cond_block_args".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "cond_block_args".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let then_block = BasicBlock::new(
             &mut ctx,
             Some("then".try_into().unwrap()),
             vec![i64_ty.into()],
         );
-        then_block.insert_at_back(func.get_region(&ctx), &ctx);
+        then_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
         let else_block = BasicBlock::new(
             &mut ctx,
             Some("else".try_into().unwrap()),
             vec![i64_ty.into()],
         );
-        else_block.insert_at_back(func.get_region(&ctx), &ctx);
+        else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let cond = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap())),
-        );
+        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
         cond.get_operation().insert_at_back(entry, &ctx);
-        let true_value = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(7, NonZero::new(64).unwrap())),
-        );
+        let true_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(7, NonZero::new(64).unwrap()))));
         true_value.get_operation().insert_at_back(entry, &ctx);
-        let false_value = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(9, NonZero::new(64).unwrap())),
-        );
+        let false_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(9, NonZero::new(64).unwrap()))));
         false_value.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
         let true_result = true_value.get_result(&ctx);
@@ -539,36 +489,21 @@ mod tests {
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let array_ty = ArrayType::get(&mut ctx, i64_ty.into(), 4);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "gep".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "gep".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
 
-        let one = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap())),
-        );
+        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(entry, &ctx);
         let one_result = one.get_result(&ctx);
-        let slot = AllocaOp::new(&mut ctx, one_result, array_ty.into());
+        let slot = AllocaOp::new(&mut ctx, array_ty.into(), one_result);
         slot.get_operation().insert_at_back(entry, &ctx);
-        let value = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(99, NonZero::new(64).unwrap())),
-        );
+        let value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(99, NonZero::new(64).unwrap()))));
         value.get_operation().insert_at_back(entry, &ctx);
         let slot_result = slot.get_result(&ctx);
-        let elem = GetElementPtrOp::new(
-            &mut ctx,
-            slot_result,
-            vec![],
-            GepIndicesAttr(vec![GepIndexAttr::Constant(2)]),
-            i64_ty.into(),
-        );
+        let elem = GetElementPtrOp::new(&mut ctx, slot_result, vec![GepIndex::Constant(2)], i64_ty.into());
         elem.get_operation().insert_at_back(entry, &ctx);
         let value_result = value.get_result(&ctx);
         let elem_result = elem.get_result(&ctx);
@@ -591,7 +526,7 @@ mod tests {
     #[test]
     fn block_placement_lays_out_weighted_hot_path_as_fallthrough() {
         use crate::common_traits::Named;
-        use llvm_compat::op_interfaces::WeightedBranchOpInterface;
+        use crate::ll::op_interfaces::WeightedBranchOpInterface;
 
         let mut ctx = context();
         let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
@@ -601,23 +536,17 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "biased".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "biased".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx), &ctx);
+        then_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
-        else_block.insert_at_back(func.get_region(&ctx), &ctx);
+        else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let cond = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap())),
-        );
+        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
         let cond_br = CondBrOp::new(
@@ -633,10 +562,7 @@ mod tests {
         cond_br.get_operation().insert_at_back(entry, &ctx);
 
         for (block, value) in [(then_block, 1u64), (else_block, 0u64)] {
-            let constant = ConstantOp::new_integer(
-                &mut ctx,
-                IntegerAttr::new(i64_ty, APInt::from_u64(value, NonZero::new(64).unwrap())),
-            );
+            let constant = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(value, NonZero::new(64).unwrap()))));
             constant.get_operation().insert_at_back(block, &ctx);
             let result = constant.get_result(&ctx);
             ReturnOp::new(&mut ctx, Some(result))
@@ -718,18 +644,12 @@ mod tests {
         let i64_ty =
             builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "main".try_into().unwrap(),
-            func_ty,
-            LinkageAttr::External,
-        );
+        let func = FuncOp::new(&mut ctx, "main".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
-        let entry = func.get_entry_block(&ctx);
-        let zero = ConstantOp::new_integer(
-            &mut ctx,
-            IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap())),
-        );
+        let entry = func.get_entry_block(&ctx).unwrap();
+        let zero = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap()))));
         zero.get_operation().insert_at_back(entry, &ctx);
         let zero_result = zero.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(zero_result))

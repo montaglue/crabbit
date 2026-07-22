@@ -4,7 +4,7 @@ use combine::{Parser, optional, parser::char::char, sep_by, token, value};
 use pliron::derive::{def_op, derive_op_interface_impl};
 use pliron::derive::derive_attr_get_set;
 
-use llvm_compat::op_interfaces::FunctionLikeInterface;
+use pliron_inspect_driver::FunctionLikeInterface;
 
 use crate::{
     common_traits::Named,
@@ -1651,7 +1651,7 @@ impl Parsable for CallOp {
                 let ctx = &mut *state_stream.state.ctx;
                 let op = CallOp::new_direct(ctx, callee, args, result_type);
                 if !results.is_empty() && op.get_operation().deref(ctx).get_num_results() > 0 {
-                    let result = op.get_operation().deref(ctx).get_result(0);
+                    let _result = op.get_operation().deref(ctx).get_result(0);
                     process_parsed_ssa_defs(state_stream, &results, op.get_operation()).ok();
                 }
                 OpObj::new(op)
@@ -1694,7 +1694,7 @@ fn print_successor_operands(
     write!(f, ")")
 }
 
-pub fn register(ctx: &mut Context) {
+pub fn register(_ctx: &mut Context) {
 }
 
 #[cfg(test)]
@@ -1703,7 +1703,7 @@ mod tests {
 
     use crate::{
         context::Context,
-        dialects::{builtin, mir},
+        dialects::mir,
         ir::{
             location,
             operation::{Operation, OperationParserConfig},

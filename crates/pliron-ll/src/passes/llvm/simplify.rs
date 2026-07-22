@@ -1,10 +1,10 @@
 //! Local LLVM-dialect simplifications: constant folding, insert/extract
 //! value forwarding, block-local store-to-load forwarding, dead store
-//! elimination, trivial phi elimination and dead code elimination.
-//!
-//! All rewrites are CFG-neutral, so the pass is safe to run both on the
-//! block-argument form and on the phi form of the LLVM dialect.
+//! elimination and dead code elimination. All rewrites are CFG-neutral.
 
+use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
+use pliron_llvm::op_interfaces::CastOpInterface as _;
+use crate::ll::ops::CStrOp;
 use std::num::NonZero;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -14,23 +14,22 @@ use crate::{
     dialects::{
         builtin::{
             attributes::IntegerAttr,
-            op_interfaces::{OneRegionInterface, OneResultInterface},
+            op_interfaces::{OneResultInterface},
             types::{IntegerType, Signedness},
         },
         llvm::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, CStrOp, ConstantOp,
+                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, ConstantOp,
                 ExtractValueOp, FCmpOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
-                LShrOp, LoadOp, MulOp, OrOp, PhiOp, PtrToIntOp, SDivOp, SExtOp, SRemOp, ShlOp,
-                StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
+                LShrOp, LoadOp, MulOp, OrOp, PtrToIntOp, SDivOp, SExtOp, SRemOp, ShlOp,
+                PoisonOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
             },
             types::PointerType,
         },
     },
     ir::{
-        basic_block::BasicBlock,
         op::{Op, OpId},
         operation::Operation,
         region::Region,
@@ -39,7 +38,6 @@ use crate::{
     },
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    passes::dominance_frontier::{DominatorTree, compute_dominance_frontiers_for_op},
     result::STAIRResult,
     utils::apint::APInt,
 };
@@ -62,14 +60,10 @@ impl Pass for LLVMSimplifyPass {
             if func.is_declaration(ctx) {
                 continue;
             }
-            let region = func.get_region(ctx);
-            // This pass never changes CFG edges, so the dominator tree
-            // stays valid across every fixpoint iteration.
-            let (dom_tree, _) = compute_dominance_frontiers_for_op(&func, ctx);
+            let region = func.get_region(ctx).expect("llvm.func definition must have a body");
             for _ in 0..MAX_ITERATIONS {
-                let mut changed = fold_ops(ctx, region, &dom_tree)?;
+                let mut changed = fold_ops(ctx, region)?;
                 changed |= forward_stores_to_loads(ctx, region);
-                changed |= eliminate_dead_phi_cycles(ctx, region);
                 changed |= eliminate_dead_code(ctx, region, &pure_ops);
                 if !changed {
                     break;
@@ -141,7 +135,8 @@ pub(crate) fn as_const_operand(ctx: &Context, value: Value) -> Option<ConstOpera
     if Operation::get_opid(op, ctx) != ConstantOp::get_opid_static() {
         return None;
     }
-    let attr = (ConstantOp::from_operation(op)).get_value(ctx)?;
+    let attr = (ConstantOp::from_operation(op)).get_value(ctx);
+    let attr = attr.downcast_ref::<IntegerAttr>()?;
     let apint = attr.value();
     Some(ConstOperand {
         bits: apint.to_u128(),
@@ -154,7 +149,10 @@ fn is_undef(ctx: &Context, value: Value) -> bool {
     value
         .defining_op()
         .filter(|_| value.find_index(ctx) == 0)
-        .is_some_and(|op| Operation::get_opid(op, ctx) == UndefOp::get_opid_static())
+        .is_some_and(|op| {
+            let opid = Operation::get_opid(op, ctx);
+            opid == UndefOp::get_opid_static() || opid == PoisonOp::get_opid_static()
+        })
 }
 
 /// Materialize an integer constant right before `before`, replacing all
@@ -170,7 +168,7 @@ fn replace_with_constant(
         mask_to_width(bits, width),
         NonZero::new(width as usize).unwrap(),
     );
-    let constant = ConstantOp::new_integer(ctx, IntegerAttr::new(ty, apint));
+    let constant = ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, apint)));
     constant.get_operation().insert_before(ctx, before);
     let new_value = constant.get_result(ctx);
     replace_op_with_value(ctx, before, new_value);
@@ -186,16 +184,15 @@ fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value: Value) {
 fn fold_ops(
     ctx: &mut Context,
     region: Ptr<Region>,
-    dom_tree: &DominatorTree,
 ) -> STAIRResult<bool> {
     let mut changed = false;
     for op in function_ops(ctx, region) {
-        changed |= fold_op(ctx, op, dom_tree)?;
+        changed |= fold_op(ctx, op)?;
     }
     Ok(changed)
 }
 
-fn fold_op(ctx: &mut Context, op: Ptr<Operation>, dom_tree: &DominatorTree) -> STAIRResult<bool> {
+fn fold_op(ctx: &mut Context, op: Ptr<Operation>) -> STAIRResult<bool> {
     let opid = Operation::get_opid(op, ctx);
 
     if opid == ICmpOp::get_opid_static() {
@@ -216,9 +213,6 @@ fn fold_op(ctx: &mut Context, op: Ptr<Operation>, dom_tree: &DominatorTree) -> S
     if opid == GetElementPtrOp::get_opid_static() {
         return Ok(fold_gep_aggregate_base(ctx, op));
     }
-    if opid == PhiOp::get_opid_static() {
-        return Ok(fold_trivial_phi(ctx, op, dom_tree));
-    }
     Ok(false)
 }
 
@@ -228,7 +222,7 @@ fn fold_op(ctx: &mut Context, op: Ptr<Operation>, dom_tree: &DominatorTree) -> S
 /// field 0 to a pointer, use that pointer directly.
 fn fold_gep_aggregate_base(ctx: &mut Context, op: Ptr<Operation>) -> bool {
     let gep = GetElementPtrOp::from_operation(op);
-    let mut aggregate = gep.get_base(ctx);
+    let mut aggregate = gep.get_operand_src_ptr(ctx);
     if aggregate
         .get_type(ctx)
         .deref(ctx)
@@ -245,9 +239,9 @@ fn fold_gep_aggregate_base(ctx: &mut Context, op: Ptr<Operation>) -> bool {
             return false;
         }
         let insert = InsertValueOp::from_operation(agg_op);
-        let indices = insert.get_indices(ctx);
+        let indices = insert.indices(ctx);
         if indices == [0] {
-            let pointer = insert.get_value(ctx);
+            let pointer = insert.get_operation().deref(ctx).get_operand(1);
             if pointer
                 .get_type(ctx)
                 .deref(ctx)
@@ -263,7 +257,7 @@ fn fold_gep_aggregate_base(ctx: &mut Context, op: Ptr<Operation>) -> bool {
             // A partial write into field 0's substructure; give up.
             return false;
         }
-        aggregate = insert.get_aggregate(ctx);
+        aggregate = insert.get_operation().deref(ctx).get_operand(0);
     }
 }
 
@@ -285,12 +279,12 @@ fn is_int_binary_arith(opid: &OpId) -> bool {
 fn fold_icmp(ctx: &mut Context, op: Ptr<Operation>) -> bool {
     let icmp = ICmpOp::from_operation(op);
     let (Some(lhs), Some(rhs)) = (
-        as_const_operand(ctx, icmp.get_lhs(ctx)),
-        as_const_operand(ctx, icmp.get_rhs(ctx)),
+        as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(0)),
+        as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(1)),
     ) else {
         return false;
     };
-    let result = match icmp.get_predicate(ctx) {
+    let result = match icmp.predicate(ctx) {
         ICmpPredicateAttr::EQ => lhs.masked() == rhs.masked(),
         ICmpPredicateAttr::NE => lhs.masked() != rhs.masked(),
         ICmpPredicateAttr::ULT => lhs.masked() < rhs.masked(),
@@ -414,8 +408,8 @@ fn fold_int_cast(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
 /// Forward `extractvalue` through a chain of `insertvalue` ops.
 fn fold_extractvalue(ctx: &mut Context, op: Ptr<Operation>) -> bool {
     let extract = ExtractValueOp::from_operation(op);
-    let indices = extract.get_indices(ctx);
-    let mut aggregate = extract.get_aggregate(ctx);
+    let indices = extract.indices(ctx);
+    let mut aggregate = extract.get_operation().deref(ctx).get_operand(0);
 
     loop {
         let Some(agg_op) = aggregate.defining_op().filter(|_| aggregate.find_index(ctx) == 0) else {
@@ -434,9 +428,9 @@ fn fold_extractvalue(ctx: &mut Context, op: Ptr<Operation>) -> bool {
             return false;
         }
         let insert = InsertValueOp::from_operation(agg_op);
-        let insert_indices = insert.get_indices(ctx);
+        let insert_indices = insert.indices(ctx);
         if insert_indices == indices {
-            let value = insert.get_value(ctx);
+            let value = insert.get_operation().deref(ctx).get_operand(1);
             replace_op_with_value(ctx, op, value);
             return true;
         }
@@ -446,69 +440,8 @@ fn fold_extractvalue(ctx: &mut Context, op: Ptr<Operation>) -> bool {
             // overlap the extracted value; give up.
             return false;
         }
-        aggregate = insert.get_aggregate(ctx);
+        aggregate = insert.get_operation().deref(ctx).get_operand(0);
     }
-}
-
-/// Replace a phi whose incoming values (ignoring self-references and
-/// undefs) are all the same single value.
-///
-/// Skipping an incoming is semantically sound (undef may be chosen to
-/// equal the surviving value), but structurally the survivor then no
-/// longer flows in through every predecessor, so it must dominate the
-/// phi's block for the replacement to be valid SSA — the backend lowers
-/// blocks in RPO and requires defs before uses.
-fn fold_trivial_phi(ctx: &mut Context, op: Ptr<Operation>, dom_tree: &DominatorTree) -> bool {
-    let phi = PhiOp::from_operation(op);
-    let result = phi.get_result(ctx);
-    let mut unique: Option<Value> = None;
-    let mut skipped_any = false;
-    for value in phi.get_incoming_values(ctx) {
-        if value == result || is_undef(ctx, value) {
-            skipped_any = true;
-            continue;
-        }
-        match unique {
-            None => unique = Some(value),
-            Some(existing) if existing == value => {}
-            Some(_) => return false,
-        }
-    }
-    let Some(replacement) = unique else {
-        return false;
-    };
-    if skipped_any {
-        let Some(phi_block) = op.deref(ctx).get_parent_block() else {
-            return false;
-        };
-        let Some(def_block) = defining_block(ctx, replacement) else {
-            return false;
-        };
-        if !dominates(dom_tree, def_block, phi_block) {
-            return false;
-        }
-    }
-    replace_op_with_value(ctx, op, replacement);
-    true
-}
-
-fn defining_block(ctx: &Context, value: Value) -> Option<Ptr<BasicBlock>> {
-    match value.defining_entity() {
-        crate::value::DefiningEntity::Op(op) => op.deref(ctx).get_parent_block(),
-        crate::value::DefiningEntity::Block(block) => Some(block),
-    }
-}
-
-/// Walk `block`'s immediate-dominator chain looking for `dominator`.
-fn dominates(dom_tree: &DominatorTree, dominator: Ptr<BasicBlock>, block: Ptr<BasicBlock>) -> bool {
-    let mut current = Some(block);
-    while let Some(candidate) = current {
-        if candidate == dominator {
-            return true;
-        }
-        current = dom_tree.immediate_dominator(candidate);
-    }
-    false
 }
 
 // ============================================================================
@@ -598,7 +531,7 @@ fn forward_stores_to_loads(ctx: &mut Context, region: Ptr<Region>) -> bool {
             let opid = Operation::get_opid(op, ctx);
             if opid == StoreOp::get_opid_static() {
                 let store = StoreOp::from_operation(op);
-                let addr = store.get_addr(ctx);
+                let addr = store.get_operand_address(ctx);
                 if !simple.contains(&addr) {
                     continue;
                 }
@@ -606,11 +539,11 @@ fn forward_stores_to_loads(ctx: &mut Context, region: Ptr<Region>) -> bool {
                     Operation::erase(dead, ctx);
                     changed = true;
                 }
-                known.insert(addr, store.get_value(ctx));
+                known.insert(addr, store.get_operand_value(ctx));
                 unread_store.insert(addr, op);
             } else if opid == LoadOp::get_opid_static() {
                 let load = LoadOp::from_operation(op);
-                let addr = load.get_addr(ctx);
+                let addr = load.get_operand_address(ctx);
                 if !simple.contains(&addr) {
                     continue;
                 }
@@ -694,7 +627,7 @@ fn forward_single_entry_store(ctx: &mut Context, region: Ptr<Region>, alloca: Al
         }
     }
 
-    let value = (StoreOp::from_operation(store)).get_value(ctx);
+    let value = (StoreOp::from_operation(store)).get_operand_value(ctx);
     let mut changed = false;
     for load in loads {
         let result = load.deref(ctx).get_result(0);
@@ -705,62 +638,6 @@ fn forward_single_entry_store(ctx: &mut Context, region: Ptr<Region>, alloca: Al
         }
     }
     changed
-}
-
-/// Erase phis that are only used by other dead phis. Plain DCE misses
-/// them: loop-carried phis feed each other in cycles, so every phi in the
-/// cycle has uses even though no real computation consumes any of them.
-fn eliminate_dead_phi_cycles(ctx: &mut Context, region: Ptr<Region>) -> bool {
-    let mut phis = FxHashSet::default();
-    for op in function_ops(ctx, region) {
-        if Operation::get_opid(op, ctx) == PhiOp::get_opid_static() {
-            phis.insert(op);
-        }
-    }
-    if phis.is_empty() {
-        return false;
-    }
-
-    // A phi is live when a non-phi consumes it; liveness propagates to
-    // every phi feeding a live phi.
-    let mut live: FxHashSet<Ptr<Operation>> = FxHashSet::default();
-    let mut worklist: Vec<Ptr<Operation>> = Vec::new();
-    for &phi in &phis {
-        let result = phi.deref(ctx).get_result(0);
-        if result
-            .uses(ctx)
-            .iter()
-            .any(|result_use| !phis.contains(&result_use.user_op()))
-        {
-            live.insert(phi);
-            worklist.push(phi);
-        }
-    }
-    while let Some(phi) = worklist.pop() {
-        for value in phi.deref(ctx).operands().collect::<Vec<_>>() {
-            if let Some(op) = value.defining_op() {
-                if phis.contains(&op) && live.insert(op) {
-                    worklist.push(op);
-                }
-            }
-        }
-    }
-
-    let dead: Vec<_> = phis
-        .iter()
-        .copied()
-        .filter(|phi| !live.contains(phi))
-        .collect();
-    if dead.is_empty() {
-        return false;
-    }
-    for &phi in &dead {
-        Operation::drop_all_uses(phi, ctx);
-    }
-    for phi in dead {
-        Operation::erase(phi, ctx);
-    }
-    true
 }
 
 // ============================================================================
@@ -794,7 +671,7 @@ fn pure_op_ids() -> FxHashSet<OpId> {
     ids.insert(GetElementPtrOp::get_opid_static());
     ids.insert(InsertValueOp::get_opid_static());
     ids.insert(ExtractValueOp::get_opid_static());
-    ids.insert(PhiOp::get_opid_static());
+    ids.insert(PoisonOp::get_opid_static());
     ids.insert(AllocaOp::get_opid_static());
     ids.insert(LoadOp::get_opid_static());
     ids.insert(AddressOfOp::get_opid_static());
@@ -847,6 +724,14 @@ fn is_trivially_dead(ctx: &Context, op: Ptr<Operation>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{
+        BinArithOp as _, CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
+    };
     use super::*;
     use crate::{
         dialects::{
@@ -863,8 +748,7 @@ mod tests {
     };
 
     fn test_context() -> Context {
-        let mut ctx = Context::new();
-        llvm::register(&mut ctx);
+        let ctx = Context::new();
         ctx
     }
 
@@ -874,10 +758,7 @@ mod tests {
 
     fn int_const(ctx: &mut Context, width: u32, value: u64) -> ConstantOp {
         let ty = int_ty(ctx, width);
-        ConstantOp::new_integer(
-            ctx,
-            IntegerAttr::new(ty, APInt::from_u64(value, NonZero::new(width as usize).unwrap())),
-        )
+        ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, APInt::from_u64(value, NonZero::new(width as usize).unwrap()))))
     }
 
     fn run_simplify(ctx: &mut Context, func: FuncOp) -> String {
@@ -892,13 +773,10 @@ mod tests {
         let mut ctx = test_context();
         let i64_ty: TypeHandle = int_ty(&mut ctx, 64).into();
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i64_ty, vec![], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "fold".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
-        let entry = func.get_entry_block(&ctx);
+        let func = FuncOp::new(&mut ctx, "fold".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
 
         let two = int_const(&mut ctx, 64, 2);
         two.get_operation().insert_at_back(entry, &ctx);
@@ -906,7 +784,7 @@ mod tests {
         three.get_operation().insert_at_back(entry, &ctx);
         let two_v = two.get_result(&ctx);
         let three_v = three.get_result(&ctx);
-        let add = AddOp::new(&mut ctx, two_v, three_v);
+        let add = AddOp::new_with_overflow_flag(&mut ctx, two_v, three_v, Default::default());
         add.get_operation().insert_at_back(entry, &ctx);
         let sum = add.get_result(&ctx);
         // Dead icmp of the constants: must be folded away entirely.
@@ -927,19 +805,16 @@ mod tests {
         let mut ctx = test_context();
         let i64_ty: TypeHandle = int_ty(&mut ctx, 64).into();
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i64_ty, vec![i64_ty], false);
-        let func = FuncOp::new(
-            &mut ctx,
-            "fwd".try_into().unwrap(),
-            fn_ty,
-            LinkageAttr::External,
-        );
-        let entry = func.get_entry_block(&ctx);
+        let func = FuncOp::new(&mut ctx, "fwd".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
         let arg = entry.deref(&ctx).get_argument(0);
 
         let one = int_const(&mut ctx, 64, 1);
         one.get_operation().insert_at_back(entry, &ctx);
         let one_v = one.get_result(&ctx);
-        let alloca = llvm::ops::AllocaOp::new(&mut ctx, one_v, i64_ty);
+        let alloca = llvm::ops::AllocaOp::new(&mut ctx, i64_ty, one_v);
         alloca.get_operation().insert_at_back(entry, &ctx);
         let slot = alloca.get_result(&ctx);
         StoreOp::new(&mut ctx, arg, slot)

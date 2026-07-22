@@ -488,7 +488,7 @@ fn align_to_16(bytes: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use llvm_compat::ll::LinkageAttr;
+    use crate::ll::LinkageAttr;
     use crate::{
         dialects::x86_64::{
                 self,

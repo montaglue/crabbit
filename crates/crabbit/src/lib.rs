@@ -21,16 +21,15 @@ use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
 use rustc_session::config::{OutputFilenames, OutputType};
+use pliron::opts::mem2reg::Mem2RegPass;
+
 use crate::{
     conversion::pass::{AnalysisManager, PMConfig, Pass, Passes},
     passes::llvm::inline::LLVMInlinePass,
-    passes::llvm::mem2reg::Mem2RegPass,
     passes::llvm::simplify::LLVMSimplifyPass,
     passes::llvm::simplify_cfg::LLVMSimplifyCfgPass,
     passes::llvm::sroa::LLVMSroaPass,
-    passes::lower_llvm_block_args_to_phi::LowerLLVMBlockArgsToPhiPass,
-    passes::lower_llvm_phi_to_block_args::LowerLLVMPhiToBlockArgsPass,
-    passes::{aarch64_darwin, convert_mir_to_llvm::ConvertMirToLLVMPass, x86_64_darwin},
+    passes::{aarch64_darwin, convert_mir_to_llvm::convert_mir_to_llvm_pass, x86_64_darwin},
     printable::Printable,
     trace::{StairTraceFile, StairTraceMeta},
 };
@@ -148,35 +147,25 @@ impl ObjectTarget {
 }
 
 /// The full MIR-to-machine-code pipeline for `target`, as pliron [Passes].
+/// The CFG stays in pliron's block-argument form throughout; pliron's own
+/// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
+/// values directly in that form.
 fn pipeline(target: ObjectTarget) -> Passes {
-    // Promote the importer's alloca-per-local pattern to SSA values before
-    // instruction selection. mem2reg emits explicit llvm.phi ops, so it runs
-    // after block arguments have been lowered to phis; the AArch64 lowering
-    // only understands block arguments, so the phis are raised back
-    // afterwards.
-    let mem2reg = || Mem2RegPass {
-        single_register_scalars_only: true,
-    };
-
     let mut passes = Passes::default();
-    passes.add_pass(ConvertMirToLLVMPass);
-    // Simplification runs in the block-argument form first: inline the
-    // module-internal call graph, then fold/clean and merge the inlined
-    // blocks. simplify runs again after the CFG cleanup because merging
-    // blocks turns cross-block load/store chains into block-local ones.
+    passes.add_pass(convert_mir_to_llvm_pass());
+    // Inline the module-internal call graph, then fold/clean and merge the
+    // inlined blocks. simplify runs again after the CFG cleanup because
+    // merging blocks turns cross-block load/store chains into block-local
+    // ones.
     passes.add_pass(LLVMInlinePass::default());
     passes.add_pass(LLVMSimplifyPass);
     passes.add_pass(LLVMSimplifyCfgPass);
-    // Split small struct allocas into scalars so mem2reg can promote
-    // the pieces (its block arguments carry one register each).
+    // Split small struct allocas into scalars so mem2reg can promote the
+    // pieces, then promote and clean up.
     passes.add_pass(LLVMSroaPass);
     passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LowerLLVMBlockArgsToPhiPass);
-    passes.add_pass(mem2reg());
-    // Clean up the undefs, trivial phis and dead ops mem2reg leaves
-    // behind, then re-merge the CFG once phis are back to block args.
+    passes.add_pass(Mem2RegPass);
     passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LowerLLVMPhiToBlockArgsPass);
     passes.add_pass(LLVMSimplifyCfgPass);
     passes.add_pass(LLVMSimplifyPass);
     // Second round: promoting pointer slots exposes direct accesses to
@@ -185,10 +174,8 @@ fn pipeline(target: ObjectTarget) -> Passes {
     // once more.
     passes.add_pass(LLVMSroaPass);
     passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LowerLLVMBlockArgsToPhiPass);
-    passes.add_pass(mem2reg());
+    passes.add_pass(Mem2RegPass);
     passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LowerLLVMPhiToBlockArgsPass);
     passes.add_pass(LLVMSimplifyCfgPass);
     passes.add_pass(LLVMSimplifyPass);
     passes.add_pass(target.pipeline());
@@ -337,20 +324,18 @@ pub use crabbit_mir::mir;
 
 pub mod passes {
     pub use crabbit_mir::passes::convert_mir_to_llvm;
-    pub use llvm_compat::passes::{
-        dominance_frontier, hot_path, llvm, lower_llvm_block_args_to_phi,
-        lower_llvm_phi_to_block_args, verify,
+    pub use pliron_ll::passes::{
+        aarch64_darwin, dominance_frontier, hot_path, llvm, verify, x86_64_darwin,
     };
-    pub use pliron_ll::passes::{aarch64_darwin, x86_64_darwin};
 }
 
-pub use llvm_compat::conversion;
+pub use pliron_ll::conversion;
 
 pub mod dialects {
     pub use crate::mir;
-    pub use llvm_compat::llvm;
+    pub use pliron_llvm as llvm;
     pub use pliron::builtin;
-    pub use pliron_ll::{aarch64, macho, x86_64};
+    pub use pliron_ll::{aarch64, ll, macho, x86_64};
 }
 // ---- compatibility re-exports over the pliron core (cleanup pending) ----
 pub use pliron::{
