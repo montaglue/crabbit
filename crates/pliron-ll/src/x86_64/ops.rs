@@ -965,7 +965,7 @@ mod tests {
 
     use crate::{
         context::{Context, Ptr},
-        dialects::{builtin, x86_64},
+        dialects::x86_64,
         ir::{
             location,
             op::Op,

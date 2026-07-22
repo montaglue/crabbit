@@ -33,7 +33,7 @@ use crate::{
         conversion_pattern::{ConversionPattern, ConversionPatternSet, PatternMatchResult},
         conversion_target::ConversionTarget,
         dialect_conversion::apply_partial_conversion,
-        pass::{Pass, PassOptions},
+        pass::{AnalysisManager, Pass, PassResult, changed},
         rewriter::ConversionPatternRewriter,
     },
     result::STAIRResult,
@@ -893,12 +893,7 @@ impl Pass for ConvertMirToLLVMPass {
         "convert-mir-to-llvm"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let mut target = ConversionTarget::new();
         target.add_illegal_dialect(DialectName::try_new("mir").unwrap());
         target.add_legal_dialect(DialectName::try_new("llvm").unwrap());
@@ -909,7 +904,7 @@ impl Pass for ConvertMirToLLVMPass {
         patterns.finalize();
 
         apply_partial_conversion(root, &target, &patterns, None, ctx)?;
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -948,7 +943,7 @@ mod tests {
         ret.get_operation().insert_at_back(entry, &ctx);
 
         ConvertMirToLLVMPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -983,7 +978,7 @@ mod tests {
         ret.get_operation().insert_at_back(entry, &ctx);
 
         ConvertMirToLLVMPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -1026,7 +1021,7 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         ConvertMirToLLVMPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -1071,7 +1066,7 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         ConvertMirToLLVMPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -1114,7 +1109,7 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         ConvertMirToLLVMPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -1164,7 +1159,7 @@ mod tests {
         ret.get_operation().insert_at_back(entry, &ctx);
 
         ConvertMirToLLVMPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));

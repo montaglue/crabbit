@@ -1005,7 +1005,7 @@ mod tests {
 
     use crate::{
         context::{Context, Ptr},
-        dialects::{aarch64, builtin},
+        dialects::aarch64,
         ir::{
             location,
             op::Op,

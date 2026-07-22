@@ -416,7 +416,7 @@ impl Parsable for FixupsAttr {
     }
 }
 
-pub fn register(ctx: &mut Context) {
+pub fn register(_ctx: &mut Context) {
 }
 
 #[cfg(test)]

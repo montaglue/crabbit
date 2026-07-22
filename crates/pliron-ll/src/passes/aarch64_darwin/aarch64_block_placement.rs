@@ -25,9 +25,8 @@ use crate::{
     dialects::builtin::op_interfaces::OneRegionInterface,
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::hot_path::{CfgEdge, HotPathInfo},
-    result::STAIRResult,
 };
 
 use super::{frontend::module_op, util::cast_operation};
@@ -39,12 +38,7 @@ impl Pass for Aarch64BlockPlacementPass {
         "aarch64-block-placement"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let ops: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -53,7 +47,7 @@ impl Pass for Aarch64BlockPlacementPass {
                 place_blocks(ctx, func);
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -298,7 +292,7 @@ mod tests {
     use super::*;
     use crate::{
         common_traits::Named,
-        dialects::{aarch64::{self, attributes::ConditionCode}, builtin},
+        dialects::aarch64::{self, attributes::ConditionCode},
         ir::op::Op,
     };
 
@@ -442,5 +436,3 @@ mod tests {
         assert!(Operation::get_opid(tail, &ctx) == BCondOp::get_opid_static());
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

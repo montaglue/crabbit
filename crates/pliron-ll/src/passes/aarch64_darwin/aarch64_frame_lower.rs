@@ -9,8 +9,7 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{frontend::module_op, util::cast_operation};
@@ -22,12 +21,7 @@ impl Pass for Aarch64FrameLowerPass {
         "aarch64-frame-lower"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -36,7 +30,7 @@ impl Pass for Aarch64FrameLowerPass {
                 lower_function_frame(ctx, func);
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -227,7 +221,7 @@ mod tests {
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         Aarch64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         assert_eq!(
@@ -316,5 +310,3 @@ mod tests {
         assert_eq!(stack_chunks(8191), vec![4095, 4095, 1]);
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

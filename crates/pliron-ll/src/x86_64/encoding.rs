@@ -504,15 +504,12 @@ mod tests {
 
     use crate::{
         context::Context,
-        dialects::{
-            builtin,
-            x86_64::{
+        dialects::x86_64::{
                 self,
                 attributes::ConditionCode,
                 ops,
                 registers::{R11, R12, R13, RAX, RBX},
             },
-        },
         ir::basic_block::BasicBlock,
     };
 

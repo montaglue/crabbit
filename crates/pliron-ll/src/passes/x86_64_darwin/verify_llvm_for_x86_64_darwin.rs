@@ -1,35 +1,39 @@
 use crate::{
-    context::Context,
+    context::{Context, Ptr},
     dialects::{
-        builtin::{op_interfaces::SymbolOpInterface, ops::ModuleOp},
+        builtin::op_interfaces::SymbolOpInterface,
         llvm::{
             op_interfaces::IsDeclaration,
             ops::{FuncOp, GlobalOp},
         },
     },
     input_error_noloc,
+    ir::operation::Operation,
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::OperationPass,
+    conversion::pass::{AnalysisManager, Pass, PassResult, unchanged},
     passes::x86_64_darwin::util::module_body,
-    result::STAIRResult,
 };
 
 use super::{
     error::X86_64DarwinErr,
-    frontend::{validate_body, validate_function_type, validate_linkage},
+    frontend::{module_op, validate_body, validate_function_type, validate_linkage},
     util::cast_operation,
 };
 
 pub struct VerifyLlvmForX86_64DarwinPass;
 
-impl OperationPass for VerifyLlvmForX86_64DarwinPass {
-    type OpType = ModuleOp;
-
+impl Pass for VerifyLlvmForX86_64DarwinPass {
     fn name(&self) -> &str {
         "verify-llvm-for-x86-64-darwin"
     }
 
-    fn run_on_operation(&self, module: ModuleOp, ctx: &mut Context) -> STAIRResult<()> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
+        let module = module_op(ctx, root)?;
         let body = module_body(ctx, module);
         let mut op = body.deref(ctx).get_head();
         while let Some(op_ptr) = op {
@@ -52,7 +56,7 @@ impl OperationPass for VerifyLlvmForX86_64DarwinPass {
                 )));
             }
         }
-        Ok(())
+        Ok(unchanged())
     }
 }
 
@@ -72,7 +76,7 @@ mod tests {
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{Pass, PassOptions},
+        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::VerifyLlvmForX86_64DarwinPass;
@@ -108,7 +112,7 @@ mod tests {
         func.get_operation().insert_at_back(body, &ctx);
 
         VerifyLlvmForX86_64DarwinPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
     }
 
@@ -132,7 +136,7 @@ mod tests {
         let err = match VerifyLlvmForX86_64DarwinPass.run(
             module.get_operation(),
             &mut ctx,
-            PassOptions::default(),
+            &mut AnalysisManager::default(),
         ) {
             Ok(_) => panic!("unsupported function body unexpectedly verified"),
             Err(err) => err,
@@ -140,7 +144,3 @@ mod tests {
         assert!(!err.to_string().is_empty());
     }
 }
-
-use crate::operation::Operation;
-
-use llvm_compat::ll::{LinkageAttr};

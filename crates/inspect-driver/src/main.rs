@@ -1,11 +1,11 @@
 //! pliron-inspect driver linking the crabbit dialect stack:
 //! mir, llvm, ll, aarch64, x86_64, macho — plus the mid-level pass pipeline.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
-use llvm_compat::conversion::pass::{Pass, PassOptions, PassObj};
+use llvm_compat::conversion::pass::{AnalysisManager, Pass, Passes, PassManager};
 use llvm_compat::passes::llvm::{
     inline::LLVMInlinePass, mem2reg::Mem2RegPass, simplify::LLVMSimplifyPass,
     simplify_cfg::LLVMSimplifyCfgPass, sroa::LLVMSroaPass,
@@ -26,30 +26,39 @@ struct Args {
     input: Option<PathBuf>,
 }
 
+/// `DriverHooks::run_pass` is `&self` (it's `pliron-inspect`'s fixed driver
+/// protocol), but running a real `pliron::pass::Pass` needs `&mut`. Each
+/// pass is behind a `RefCell` so `run_pass` can borrow one mutably for the
+/// one call it needs, without owning `&mut self`.
 struct CrabbitHooks {
-    passes: Vec<PassObj>,
+    passes: Vec<RefCell<Box<dyn Pass>>>,
 }
 
 impl CrabbitHooks {
     fn new() -> Self {
-        let passes: Vec<PassObj> = vec![
-            Arc::new(VerifyPass::new()),
-            Arc::new(ConvertMirToLLVMPass),
-            Arc::new(LowerLLVMBlockArgsToPhiPass),
-            Arc::new(Mem2RegPass::default()),
-            Arc::new(LLVMInlinePass::default()),
-            Arc::new(LLVMSimplifyPass),
-            Arc::new(LLVMSimplifyCfgPass),
-            Arc::new(LLVMSroaPass),
-            Arc::new(LowerLLVMPhiToBlockArgsPass),
+        let passes: Vec<Box<dyn Pass>> = vec![
+            Box::new(VerifyPass::new()),
+            Box::new(ConvertMirToLLVMPass),
+            Box::new(LowerLLVMBlockArgsToPhiPass),
+            Box::new(Mem2RegPass::default()),
+            Box::new(LLVMInlinePass::default()),
+            Box::new(LLVMSimplifyPass),
+            Box::new(LLVMSimplifyCfgPass),
+            Box::new(LLVMSroaPass),
+            Box::new(LowerLLVMPhiToBlockArgsPass),
         ];
-        CrabbitHooks { passes }
+        CrabbitHooks {
+            passes: passes.into_iter().map(RefCell::new).collect(),
+        }
     }
 }
 
 impl DriverHooks for CrabbitHooks {
     fn pass_names(&self) -> Vec<String> {
-        self.passes.iter().map(|p| p.name().to_string()).collect()
+        self.passes
+            .iter()
+            .map(|p| p.borrow().name().to_string())
+            .collect()
     }
 
     fn run_pass(
@@ -58,10 +67,13 @@ impl DriverHooks for CrabbitHooks {
         root: Ptr<Operation>,
         ctx: &mut Context,
     ) -> Result<Ptr<Operation>, String> {
-        let Some(pass) = self.passes.iter().find(|p| p.name() == name) else {
+        let Some(cell) = self.passes.iter().find(|p| p.borrow().name() == name) else {
             return Err(format!("unknown pass: {name}"));
         };
-        pass.run(root, ctx, PassOptions::default())
+        let mut pass = cell.borrow_mut();
+        let mut analyses = AnalysisManager::default();
+        <Passes as PassManager>::run_pass(pass.as_mut(), root, ctx, &mut analyses)
+            .map(|_| root)
             .map_err(|e| format!("{e}"))
     }
 }

@@ -1,37 +1,58 @@
 use crate::{
-    context::Context,
+    context::{Context, Ptr},
     dialects::{
         aarch64::attributes::FunctionAbiAttr,
         builtin::op_interfaces::SymbolOpInterface,
         llvm::ops::FuncOp,
     },
-    ir::op::Op,
-    conversion::pass::OperationPass,
+    ir::{op::Op, operation::Operation},
+    linked_list::ContainsLinkedList,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
 };
 
 use super::{
     attrs::ATTR_KEY_DARWIN_ABI,
-    frontend::{assign_darwin_abi, function_abi_classes},
+    frontend::{assign_darwin_abi, function_abi_classes, module_op},
+    util::{cast_operation, module_body},
 };
 
+/// Records each function's Darwin ABI argument/result locations as a
+/// [FunctionAbiAttr] on the `llvm.func`, for instruction selection to consume.
 pub struct LlvmAarch64DarwinAbiPass;
 
-impl OperationPass for LlvmAarch64DarwinAbiPass {
-    type OpType = FuncOp;
-
+impl Pass for LlvmAarch64DarwinAbiPass {
     fn name(&self) -> &str {
         "llvm-aarch64-darwin-abi"
     }
 
-    fn run_on_operation(&self, func: FuncOp, ctx: &mut Context) -> STAIRResult<()> {
-        let name = func.get_symbol_name(ctx).to_string();
-        let (args, result) = function_abi_classes(ctx, func.get_func_type(ctx))?;
-        let abi = assign_darwin_abi(&name, &args, result)?;
-        func.get_operation()
-            .deref_mut(ctx)
-            .attributes
-            .set(ATTR_KEY_DARWIN_ABI.clone(), FunctionAbiAttr(abi));
-        Ok(())
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
+        let module = module_op(ctx, root)?;
+        let body = module_body(ctx, module);
+        let funcs: Vec<_> = body
+            .deref(ctx)
+            .iter(ctx)
+            .filter_map(|op| cast_operation::<FuncOp>(ctx, op))
+            .collect();
+        for func in funcs {
+            assign_function_abi(ctx, func)?;
+        }
+        Ok(changed())
     }
+}
+
+fn assign_function_abi(ctx: &mut Context, func: FuncOp) -> STAIRResult<()> {
+    let name = func.get_symbol_name(ctx).to_string();
+    let (args, result) = function_abi_classes(ctx, func.get_func_type(ctx))?;
+    let abi = assign_darwin_abi(&name, &args, result)?;
+    func.get_operation()
+        .deref_mut(ctx)
+        .attributes
+        .set(ATTR_KEY_DARWIN_ABI.clone(), FunctionAbiAttr(abi));
+    Ok(())
 }

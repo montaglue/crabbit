@@ -28,7 +28,7 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::dominance_frontier::{
         DominanceFrontiers, DominatorTree, compute_dominance_frontiers_for_op,
     },
@@ -54,12 +54,7 @@ impl Pass for Mem2RegPass {
     // Allocas are collected up front and promoted outside of any IR walk:
     // promotion erases the alloca itself, which is not safe while a walker
     // still holds a pointer to it.
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let mut allocas = Vec::new();
         collect_allocas(ctx, root, &mut allocas);
 
@@ -74,7 +69,7 @@ impl Pass for Mem2RegPass {
             }
         }
 
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -623,7 +618,7 @@ mod tests {
 
     fn run_mem2reg(ctx: &mut Context, func: llvm::ops::FuncOp) -> String {
         Mem2RegPass::default()
-            .run(func.get_operation(), ctx, PassOptions::default())
+            .run(func.get_operation(), ctx, &mut AnalysisManager::default())
             .unwrap();
         format!("{}", func.get_operation().disp(ctx))
     }

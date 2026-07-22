@@ -21,9 +21,8 @@ use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
 use rustc_session::config::{OutputFilenames, OutputType};
-use crate::conversion::pass::PassObj;
 use crate::{
-    conversion::pass_manager::{PassManager, Pipeline},
+    conversion::pass::{AnalysisManager, PMConfig, Pass, Passes},
     passes::llvm::inline::LLVMInlinePass,
     passes::llvm::mem2reg::Mem2RegPass,
     passes::llvm::simplify::LLVMSimplifyPass,
@@ -35,12 +34,9 @@ use crate::{
     printable::Printable,
     trace::{StairTraceFile, StairTraceMeta},
 };
-use std::sync::Arc;
 use std::{
     any::Any,
-    cell::RefCell,
     collections::BTreeMap,
-    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -132,7 +128,7 @@ impl ObjectTarget {
         }
     }
 
-    fn pipeline(self) -> Pipeline {
+    fn pipeline(self) -> Passes {
         match self {
             Self::Aarch64Darwin => aarch64_darwin::pipeline(),
             Self::X86_64Darwin => x86_64_darwin::pipeline(),
@@ -141,7 +137,7 @@ impl ObjectTarget {
 
     fn write_object(
         self,
-        ctx: &crate::context::Context,
+        ctx: &mut crate::context::Context,
         root: crate::context::Ptr<crate::ir::operation::Operation>,
     ) -> crate::result::STAIRResult<Vec<u8>> {
         match self {
@@ -149,6 +145,77 @@ impl ObjectTarget {
             Self::X86_64Darwin => x86_64_darwin::write_macho_object_from_ir(ctx, root),
         }
     }
+}
+
+/// The full MIR-to-machine-code pipeline for `target`, as pliron [Passes].
+fn pipeline(target: ObjectTarget) -> Passes {
+    // Promote the importer's alloca-per-local pattern to SSA values before
+    // instruction selection. mem2reg emits explicit llvm.phi ops, so it runs
+    // after block arguments have been lowered to phis; the AArch64 lowering
+    // only understands block arguments, so the phis are raised back
+    // afterwards.
+    let mem2reg = || Mem2RegPass {
+        single_register_scalars_only: true,
+    };
+
+    let mut passes = Passes::default();
+    passes.add_pass(ConvertMirToLLVMPass);
+    // Simplification runs in the block-argument form first: inline the
+    // module-internal call graph, then fold/clean and merge the inlined
+    // blocks. simplify runs again after the CFG cleanup because merging
+    // blocks turns cross-block load/store chains into block-local ones.
+    passes.add_pass(LLVMInlinePass::default());
+    passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LLVMSimplifyCfgPass);
+    // Split small struct allocas into scalars so mem2reg can promote
+    // the pieces (its block arguments carry one register each).
+    passes.add_pass(LLVMSroaPass);
+    passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LowerLLVMBlockArgsToPhiPass);
+    passes.add_pass(mem2reg());
+    // Clean up the undefs, trivial phis and dead ops mem2reg leaves
+    // behind, then re-merge the CFG once phis are back to block args.
+    passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LowerLLVMPhiToBlockArgsPass);
+    passes.add_pass(LLVMSimplifyCfgPass);
+    passes.add_pass(LLVMSimplifyPass);
+    // Second round: promoting pointer slots exposes direct accesses to
+    // aggregates that were previously reached through those pointers
+    // (e.g. a loop iterator updated via `&mut`), so split and promote
+    // once more.
+    passes.add_pass(LLVMSroaPass);
+    passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LowerLLVMBlockArgsToPhiPass);
+    passes.add_pass(mem2reg());
+    passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(LowerLLVMPhiToBlockArgsPass);
+    passes.add_pass(LLVMSimplifyCfgPass);
+    passes.add_pass(LLVMSimplifyPass);
+    passes.add_pass(target.pipeline());
+    passes
+}
+
+/// The `(pass name, IR dump)` pairs pliron's `print_after_all` hook wrote
+/// into `dir` (as `{count}-after-{name}.plir`), in execution order.
+fn collect_pass_dumps(dir: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dumps: Vec<(usize, String, String)> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let stem = path.file_stem()?.to_str()?;
+            let (count, name) = stem.split_once("-after-")?;
+            let count: usize = count.parse().ok()?;
+            let contents = std::fs::read_to_string(&path).ok()?;
+            Some((count, name.to_string(), contents))
+        })
+        .collect();
+    dumps.sort_by_key(|(count, ..)| *count);
+    dumps
+        .into_iter()
+        .map(|(_, name, dump)| (name, dump))
+        .collect()
 }
 
 fn emit_object(
@@ -161,94 +228,47 @@ fn emit_object(
         return Err("Darwin STAIR object emission does not support kernels yet".to_string());
     }
 
-    let convert_pass: PassObj = Arc::new(ConvertMirToLLVMPass);
-    // Simplification runs in the block-argument form first: inline the
-    // module-internal call graph, then fold/clean and merge the inlined
-    // blocks. simplify runs again after the CFG cleanup because merging
-    // blocks turns cross-block load/store chains into block-local ones.
-    let inline_pass: PassObj = Arc::new(LLVMInlinePass::default());
-    let simplify_pass: PassObj = Arc::new(LLVMSimplifyPass);
-    let simplify_cfg_pass: PassObj = Arc::new(LLVMSimplifyCfgPass);
-    let sroa_pass: PassObj = Arc::new(LLVMSroaPass);
-    let lower_phi_pass: PassObj = Arc::new(LowerLLVMBlockArgsToPhiPass);
-    // Promote the importer's alloca-per-local pattern to SSA values before
-    // instruction selection. mem2reg emits explicit llvm.phi ops, so it runs
-    // after block arguments have been lowered to phis; the AArch64 lowering
-    // only understands block arguments, so the phis are raised back
-    // afterwards.
-    let mem2reg_pass: PassObj = Arc::new(Mem2RegPass {
-        single_register_scalars_only: true,
-    });
-    let raise_phi_pass: PassObj = Arc::new(LowerLLVMPhiToBlockArgsPass);
-
-    let pipeline = Pipeline::default()
-        .add_pass(convert_pass)
-        .add_pass(inline_pass)
-        .add_pass(simplify_pass.clone())
-        .add_pass(simplify_cfg_pass.clone())
-        // Split small struct allocas into scalars so mem2reg can promote
-        // the pieces (its block arguments carry one register each).
-        .add_pass(sroa_pass.clone())
-        .add_pass(simplify_pass.clone())
-        .add_pass(lower_phi_pass.clone())
-        .add_pass(mem2reg_pass.clone())
-        // Clean up the undefs, trivial phis and dead ops mem2reg leaves
-        // behind, then re-merge the CFG once phis are back to block args.
-        .add_pass(simplify_pass.clone())
-        .add_pass(raise_phi_pass.clone())
-        .add_pass(simplify_cfg_pass.clone())
-        .add_pass(simplify_pass.clone())
-        // Second round: promoting pointer slots exposes direct accesses to
-        // aggregates that were previously reached through those pointers
-        // (e.g. a loop iterator updated via `&mut`), so split and promote
-        // once more.
-        .add_pass(sroa_pass)
-        .add_pass(simplify_pass.clone())
-        .add_pass(lower_phi_pass)
-        .add_pass(mem2reg_pass)
-        .add_pass(simplify_pass.clone())
-        .add_pass(raise_phi_pass)
-        .add_pass(simplify_cfg_pass)
-        .add_pass(simplify_pass)
-        .add_pipeline(target.pipeline());
-
-    let names = pipeline.names();
-
     let project = trace_project(sess);
     let version = trace_version();
-    let trace = Rc::new(RefCell::new(StairTraceFile::new(StairTraceMeta {
+
+    // Per-pass IR dumps come from pliron's own PMConfig printing hooks; the
+    // trace file is assembled from the dumped files after the run, so a
+    // failed pipeline still leaves a trace up to the failing pass.
+    let dump_dir = std::env::temp_dir().join(format!("stair-pass-dumps-{version}"));
+    std::fs::create_dir_all(&dump_dir)
+        .map_err(|error| format!("failed to create pass dump directory: {error}"))?;
+    let mut analyses = AnalysisManager::default();
+    let mut config = PMConfig::default();
+    config.print_after_all = true;
+    config.ir_printing_dir = Some(dump_dir.clone());
+    analyses.set_config(config);
+
+    let initial_dump = imported.module.disp(&imported.ctx).to_string();
+    let run_result = pipeline(target).run(imported.module, &mut imported.ctx, &mut analyses);
+
+    let dumps = collect_pass_dumps(&dump_dir);
+    let _ = std::fs::remove_dir_all(&dump_dir);
+
+    let mut trace = StairTraceFile::new(StairTraceMeta {
         name: project.clone(),
         kind: "compiler-run".to_string(),
         entry: None,
         source: None,
-        pipeline: names,
+        pipeline: dumps.iter().map(|(name, _)| name.clone()).collect(),
         target: Some(sess.target.llvm_target.to_string()),
         note: Some(format!("version {version}")),
         extra: BTreeMap::new(),
-    })));
-    trace
-        .borrow_mut()
-        .push_dump("initial", imported.module.disp(&imported.ctx).to_string());
-
-    let callback_trace = trace.clone();
-    let mut pass_manager = PassManager::with_after_pass(Box::new(move |ctx, root, pass_name| {
-        if std::env::var_os("STAIR_DEBUG_PASS_PROGRESS").is_some() {
-            eprintln!("stair: dumping after pass {pass_name}");
-        }
-        callback_trace
-            .borrow_mut()
-            .push_dump(pass_name, root.disp(ctx).to_string());
-    }));
+    });
+    trace.push_dump("initial", initial_dump);
+    for (name, dump) in dumps {
+        trace.push_dump(name, dump);
+    }
     let trace_path = trace::project_trace_path(&project, &version);
-    let object_ir = match pass_manager.run(pipeline, &mut imported.ctx, imported.module) {
-        Ok(object_ir) => object_ir,
-        Err(error) => {
-            let _ = trace.borrow().write(&trace_path);
-            return Err(error.to_string());
-        }
-    };
+    if let Err(error) = run_result {
+        let _ = trace.write(&trace_path);
+        return Err(error.to_string());
+    }
     trace
-        .borrow()
         .write(&trace_path)
         .map_err(|error| error.to_string())?;
 
@@ -258,7 +278,7 @@ fn emit_object(
             .map_err(|error| format!("failed to create object output directory: {error}"))?;
     }
     let bytes = target
-        .write_object(&imported.ctx, object_ir)
+        .write_object(&mut imported.ctx, imported.module)
         .map_err(|error| error.to_string())?;
     std::fs::write(&object, bytes).map_err(|error| {
         format!(

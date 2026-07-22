@@ -30,9 +30,14 @@ use crate::{
         },
     },
     input_error_noloc,
-    ir::{basic_block::BasicBlock, op::Op, operation::Operation, r#type::Typed, value::Value},
+    ir::{
+        basic_block::BasicBlock,
+        op::Op,
+        operation::Operation,
+        r#type::{TypeHandle, Typed},
+        value::Value,
+    },
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{Pass, PassOptions},
     passes::hot_path::{BranchProbability, HotPathInfo},
     result::STAIRResult,
 };
@@ -44,55 +49,57 @@ use super::isel_memory_abi::{
     load_gpr_aggregate_result, load_memory, load_stack_value, lower_gep, result_location_for_type,
     scalar_size_of, stack_align_of, stack_size_of, store_memory, word_ty,
 };
+use crate::conversion::pass::{AnalysisManager, Pass, PassResult, changed};
+
 use super::{
     attrs::ATTR_KEY_DARWIN_ABI,
     error::Aarch64DarwinErr,
     frontend::{BinaryKind, binary_kind, collect_entry_arguments, module_op, validate_linkage},
-    util::{module_body, new_module_like},
+    util::module_body,
 };
 
-pub struct LlvmToAarch64ISelPass;
+/// Instruction selection: rewrites the module in place, lowering every
+/// defined `llvm.func` to an `aarch64.func` and erasing the `llvm` ops.
+pub struct LlvmToAarch64IselPass;
 
-impl Pass for LlvmToAarch64ISelPass {
+impl Pass for LlvmToAarch64IselPass {
     fn name(&self) -> &str {
         "llvm-to-aarch64-isel"
     }
 
     fn run(
-        &self,
+        &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
-        let old_module = module_op(ctx, root)?;
-        let new_module = new_module_like(ctx, old_module, "aarch64");
-        let new_body = module_body(ctx, new_module);
-        let old_body = module_body(ctx, old_module);
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
+        let module = module_op(ctx, root)?;
+        let body = module_body(ctx, module);
+        let llvm_ops: Vec<_> = body.deref(ctx).iter(ctx).collect();
 
         let mut globals = HashMap::<crate::identifier::Identifier, Vec<u8>>::new();
-        let mut op = old_body.deref(ctx).get_head();
-        while let Some(op_ptr) = op {
+        for op_ptr in llvm_ops.iter().copied() {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(global) = op_obj.downcast_ref::<LlvmGlobalOp>() {
                 if let Some(bytes) = global.get_initializer_bytes(ctx) {
                     globals.insert(global.get_symbol_name(ctx), bytes);
                 }
             }
-            op = op_ptr.deref(ctx).get_next();
         }
 
-        let mut op = old_body.deref(ctx).get_head();
-        while let Some(op_ptr) = op {
+        for op_ptr in llvm_ops.iter().copied() {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(llvm_func) = op_obj.downcast_ref::<LlvmFuncOp>() {
                 if !llvm_func.is_declaration(ctx) {
-                    lower_function(ctx, llvm_func, new_body, &globals)?;
+                    lower_function(ctx, llvm_func, body, &globals)?;
                 }
             }
-            op = op_ptr.deref(ctx).get_next();
         }
 
-        Ok(new_module.get_operation())
+        for op_ptr in llvm_ops {
+            Operation::erase(op_ptr, ctx);
+        }
+        Ok(changed())
     }
 }
 
@@ -1573,5 +1580,3 @@ pub(super) fn condition_code(predicate: ICmpPredicateAttr) -> ConditionCode {
         ICmpPredicateAttr::SGT => ConditionCode::Gt,
     }
 }
-
-use crate::r#type::TypeHandle;

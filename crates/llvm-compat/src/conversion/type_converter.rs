@@ -8,7 +8,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::{
-    context::{Context, Ptr},
+    context::Context,
     ir::r#type::TypeHandle,
 };
 

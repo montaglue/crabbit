@@ -1805,7 +1805,7 @@ impl Parsable for CallOp {
                 let ctx = &mut *state_stream.state.ctx;
                 let op = CallOp::new_direct(ctx, callee, args, result_type);
                 if !results.is_empty() && op.get_operation().deref(ctx).get_num_results() > 0 {
-                    let result = op.get_operation().deref(ctx).get_result(0);
+                    let _result = op.get_operation().deref(ctx).get_result(0);
                     process_parsed_ssa_defs(state_stream, &results, op.get_operation()).ok();
                 }
                 OpObj::new(op)
@@ -2636,7 +2636,7 @@ impl_verify_succ!(InsertValueOp);
 // Registration
 // ============================================================================
 
-pub fn register(ctx: &mut Context) {
+pub fn register(_ctx: &mut Context) {
     // Terminators
 
     // Integer arithmetic with overflow flags
@@ -2668,7 +2668,7 @@ mod tests {
 
     use crate::{
         context::Context,
-        dialects::{builtin, llvm},
+        dialects::llvm,
         ir::{
             location,
             operation::{Operation, OperationParserConfig},

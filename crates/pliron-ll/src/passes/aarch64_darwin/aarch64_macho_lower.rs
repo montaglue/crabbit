@@ -1,3 +1,5 @@
+use llvm_compat::ll::LinkageAttr;
+
 use crate::{
     context::{Context, Ptr},
     dialects::{
@@ -6,9 +8,8 @@ use crate::{
         builtin::{op_interfaces::SymbolOpInterface},
         macho::ops::{ObjectOp, Relocation, Symbol},
     },
-    ir::{op::Op, operation::Operation},
+    ir::operation::Operation,
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
     result::STAIRResult,
 };
 
@@ -20,54 +21,44 @@ use super::{
 
 const MACHO_ARM64_RELOC_BRANCH26: u8 = 2;
 
-pub struct Aarch64MachOLowerPass;
-
-impl Pass for Aarch64MachOLowerPass {
-    fn name(&self) -> &str {
-        "aarch64-macho-lower"
-    }
-
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
-        let module = module_op(ctx, root)?;
-        let body = module_body(ctx, module);
-        let mut text = Vec::new();
-        let mut symbols = Vec::new();
-        let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
-        for op in funcs {
-            let Some(func) = cast_operation::<FuncOp>(ctx, op) else {
-                continue;
-            };
-            let offset = text.len() as u64;
-            let encoded =
-                get_bytes_attr(op, ctx, ATTR_KEY_AARCH64_ENCODED.as_str()).unwrap_or_default();
-            text.extend_from_slice(&encoded);
-            if func.linkage(ctx) == LinkageAttr::External {
-                symbols.push(Symbol {
-                    name: darwin_symbol(&func.get_symbol_name(ctx).to_string()),
-                    offset,
-                    external: true,
-                    defined: true,
-                });
-            }
+/// Translates a fully-encoded aarch64 module into a Mach-O `macho.object`
+/// operation. This is a translation out of the pass pipeline (the way
+/// `mlir-translate` sits outside `mlir-opt`), not a [pliron::pass::Pass]:
+/// it produces a new operation instead of transforming the module.
+pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<ObjectOp> {
+    let module = module_op(ctx, root)?;
+    let body = module_body(ctx, module);
+    let mut text = Vec::new();
+    let mut symbols = Vec::new();
+    let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
+    for op in funcs {
+        let Some(func) = cast_operation::<FuncOp>(ctx, op) else {
+            continue;
+        };
+        let offset = text.len() as u64;
+        let encoded =
+            get_bytes_attr(op, ctx, ATTR_KEY_AARCH64_ENCODED.as_str()).unwrap_or_default();
+        text.extend_from_slice(&encoded);
+        if func.linkage(ctx) == LinkageAttr::External {
+            symbols.push(Symbol {
+                name: darwin_symbol(&func.get_symbol_name(ctx).to_string()),
+                offset,
+                external: true,
+                defined: true,
+            });
         }
-        let literals = get_bytes_attr(root, ctx, ATTR_KEY_AARCH64_MODULE_LITERALS.as_str())
-            .unwrap_or_default();
-        text.extend_from_slice(&literals);
-        let relocations = external_branch_relocations(ctx, root, &mut symbols);
-        let object = ObjectOp::new_with_relocations(
-            ctx,
-            identifier("aarch64_darwin_object"),
-            text,
-            symbols,
-            relocations,
-        );
-        Ok(object.get_operation())
     }
+    let literals =
+        get_bytes_attr(root, ctx, ATTR_KEY_AARCH64_MODULE_LITERALS.as_str()).unwrap_or_default();
+    text.extend_from_slice(&literals);
+    let relocations = external_branch_relocations(ctx, root, &mut symbols);
+    Ok(ObjectOp::new_with_relocations(
+        ctx,
+        identifier("aarch64_darwin_object"),
+        text,
+        symbols,
+        relocations,
+    ))
 }
 
 fn external_branch_relocations(
@@ -114,17 +105,16 @@ mod tests {
                 op_interfaces::{BinaryFixup, FixupKind},
             },
             builtin::{self, op_interfaces::OneRegionInterface},
-            macho::{self, ops::ObjectOp},
+            macho,
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{Pass, PassOptions},
     };
 
     use super::{
-        super::util::{cast_operation, set_bytes_attr, set_fixups_attr},
+        super::util::{set_bytes_attr, set_fixups_attr},
         ATTR_KEY_AARCH64_ENCODED, ATTR_KEY_AARCH64_FIXUPS, ATTR_KEY_AARCH64_MODULE_LITERALS,
-        Aarch64MachOLowerPass,
+        aarch64_macho_lower,
     };
 
     fn context() -> Context {
@@ -179,10 +169,7 @@ mod tests {
             ],
         );
 
-        let object = Aarch64MachOLowerPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
-            .unwrap();
-        let object = cast_operation::<ObjectOp>(&ctx, object).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         let relocations = object.relocations(&ctx);
         assert_eq!(relocations.len(), 2);
         assert_eq!(relocations[0].symbol, "_target");
@@ -198,5 +185,3 @@ mod tests {
         assert!(symbols.iter().any(|symbol| symbol.name == "_callee"));
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

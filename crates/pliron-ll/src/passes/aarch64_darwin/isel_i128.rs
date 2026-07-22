@@ -16,6 +16,7 @@ use super::{
         materialize_pair, materialize_typed, materialize_u64_immediate, opcode,
     },
 };
+use crate::r#type::TypeHandle;
 
 /// Lowers the operations which need a two-register i128 representation.
 pub(super) fn lower_binary_128(
@@ -517,5 +518,3 @@ fn fresh_shift(
 }
 
 // Addressing and memory -----------------------------------------------------
-
-use crate::r#type::TypeHandle;

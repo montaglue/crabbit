@@ -11,17 +11,15 @@
 //!
 //! // Run verification after SSA conversion
 //! let verify_pass = VerifyPass::new();
-//! verify_pass.run(module_op, &mut ctx, PassOptions::default())?;
+//! verify_pass.run(module_op, &mut ctx)?;
 //! ```
 
-use std::sync::Arc;
 
 use crate::{
     common_traits::Verify,
     context::{Context, Ptr},
     ir::operation::Operation,
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 /// Pass that verifies the IR is well-formed.
@@ -51,15 +49,10 @@ impl Pass for VerifyPass {
         "verify"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         // Verify the root operation and all nested operations recursively
         root.deref(ctx).verify(ctx)?;
-        Ok(root)
+        Ok(changed())
     }
 }
 

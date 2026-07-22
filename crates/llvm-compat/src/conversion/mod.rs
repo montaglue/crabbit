@@ -1,5 +1,4 @@
 pub mod pass;
-pub mod pass_manager;
 
 // Dialect conversion infrastructure (MLIR-style)
 pub mod conversion_pattern;

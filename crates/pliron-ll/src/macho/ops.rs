@@ -212,7 +212,7 @@ fn decode_relocations(relocations: &str) -> Vec<Relocation> {
         .collect()
 }
 
-pub fn register(ctx: &mut Context) {
+pub fn register(_ctx: &mut Context) {
 }
 
 use llvm_compat::ll::{BytesAttr};

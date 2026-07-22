@@ -9,8 +9,7 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{frontend::module_op, util::cast_operation};
@@ -36,12 +35,7 @@ impl Pass for X86_64FrameLowerPass {
         "x86-64-frame-lower"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -50,7 +44,7 @@ impl Pass for X86_64FrameLowerPass {
                 lower_function_frame(ctx, func);
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -170,7 +164,7 @@ mod tests {
         x86_64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         X86_64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let expected: Vec<(String, Option<String>)> = CALLEE_SAVED_GPRS
@@ -227,5 +221,3 @@ mod tests {
         );
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

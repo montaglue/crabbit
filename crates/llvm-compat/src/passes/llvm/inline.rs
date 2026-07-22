@@ -23,7 +23,7 @@ use crate::{
     identifier::Identifier,
     ir::{
         basic_block::BasicBlock,
-        location::{Located, Location},
+        location::Location,
         op::Op,
         operation::Operation,
         r#type::Typed,
@@ -32,10 +32,10 @@ use crate::{
     irbuild::{
         cloning,
         listener::DummyListener,
-        rewriter::{IRRewriter, Rewriter},
+        rewriter::IRRewriter,
     },
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
 };
 
@@ -60,12 +60,7 @@ impl Pass for LLVMInlinePass {
         "llvm-inline"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let funcs = collect_functions(ctx, root);
         let by_symbol: FxHashMap<Identifier, FuncOp> = funcs
             .iter()
@@ -77,7 +72,7 @@ impl Pass for LLVMInlinePass {
         }
 
         remove_dead_internal_functions(ctx, root);
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -542,7 +537,7 @@ mod tests {
             .insert_at_back(caller_entry, &ctx);
 
         LLVMInlinePass::default()
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));

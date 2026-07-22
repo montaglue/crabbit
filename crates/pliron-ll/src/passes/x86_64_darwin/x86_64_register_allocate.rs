@@ -12,7 +12,7 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
 };
 
@@ -34,12 +34,7 @@ impl Pass for X86_64RegisterAllocatePass {
         "x86-64-register-allocate"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -48,7 +43,7 @@ impl Pass for X86_64RegisterAllocatePass {
                 allocate_function(ctx, func)?;
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -495,13 +490,10 @@ fn align_to_16(bytes: u64) -> u64 {
 mod tests {
     use llvm_compat::ll::LinkageAttr;
     use crate::{
-        dialects::{
-            x86_64::{
+        dialects::x86_64::{
                 self,
                 ops::{self as x86_64_ops, ATTR_KEY_X86_64_RD},
             },
-            builtin,
-        },
         linked_list::ContainsLinkedList,
     };
 
@@ -647,5 +639,3 @@ mod tests {
         );
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

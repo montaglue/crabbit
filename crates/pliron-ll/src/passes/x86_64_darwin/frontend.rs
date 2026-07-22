@@ -37,6 +37,7 @@ use crate::{
 };
 
 use super::{error::X86_64DarwinErr, util::cast_operation};
+use llvm_compat::ll::{LinkageAttr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AbiClass {
@@ -397,5 +398,3 @@ pub(super) fn collect_entry_arguments(ctx: &Context, func: &FuncOp) -> STAIRResu
     let entry = func.get_entry_block(ctx);
     Ok(entry.deref(ctx).arguments().collect())
 }
-
-use llvm_compat::ll::{LinkageAttr};

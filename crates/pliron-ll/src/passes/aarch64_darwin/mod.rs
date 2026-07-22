@@ -21,17 +21,10 @@ mod macho;
 mod util;
 pub mod verify_llvm_for_aarch64_darwin;
 
-use std::sync::Arc;
-
 use crate::{
     context::{Context, Ptr},
-    dialects::macho::ops::ObjectOp,
-    input_error_noloc,
     ir::operation::Operation,
-    conversion::{
-        pass::PassObj,
-        pass_manager::{PassManager, Pipeline},
-    },
+    conversion::pass::{AnalysisManager, Pass, Passes},
     result::STAIRResult,
 };
 
@@ -40,48 +33,50 @@ use self::{
     aarch64_branch_relax::Aarch64BranchRelaxPass, aarch64_encode::Aarch64EncodePass,
     aarch64_frame_lower::Aarch64FrameLowerPass, aarch64_legalize::Aarch64LegalizePass,
     aarch64_machine_cfg_cleanup::Aarch64MachineCfgCleanupPass,
-    aarch64_macho_lower::Aarch64MachOLowerPass, aarch64_post_ra_opts::Aarch64PostRaOptsPass,
+    aarch64_macho_lower::aarch64_macho_lower, aarch64_post_ra_opts::Aarch64PostRaOptsPass,
     aarch64_register_allocate::Aarch64RegisterAllocatePass,
     aarch64_target_opts_pre_ra::Aarch64TargetOptsPreRaPass,
-    llvm_aarch64_darwin_abi::LlvmAarch64DarwinAbiPass, llvm_to_aarch64_isel::LlvmToAarch64ISelPass,
+    llvm_aarch64_darwin_abi::LlvmAarch64DarwinAbiPass,
+    llvm_to_aarch64_isel::LlvmToAarch64IselPass,
     verify_llvm_for_aarch64_darwin::VerifyLlvmForAarch64DarwinPass,
 };
 
-pub fn pipeline() -> Pipeline {
-    vec![
-        Arc::new(VerifyLlvmForAarch64DarwinPass) as PassObj,
-        Arc::new(LlvmAarch64DarwinAbiPass),
-        Arc::new(LlvmToAarch64ISelPass),
-        Arc::new(Aarch64LegalizePass),
-        Arc::new(Aarch64MachineCfgCleanupPass),
-        Arc::new(Aarch64TargetOptsPreRaPass),
-        Arc::new(Aarch64RegisterAllocatePass),
-        Arc::new(Aarch64FrameLowerPass),
-        Arc::new(Aarch64PostRaOptsPass),
-        Arc::new(Aarch64BlockPlacementPass),
-        Arc::new(Aarch64BranchRelaxPass),
-        Arc::new(Aarch64AsmLowerPass),
-        Arc::new(Aarch64EncodePass),
-        Arc::new(Aarch64MachOLowerPass),
-    ]
-    .into()
+/// The aarch64-darwin lowering pipeline: every step is a [Pass] on the
+/// `builtin.module`, from LLVM-dialect verification down to encoded machine
+/// code. Translation to Mach-O bytes happens outside the pipeline, in
+/// [write_macho_object_from_ir].
+pub fn pipeline() -> Passes {
+    let mut passes = Passes::default();
+    passes.add_pass(VerifyLlvmForAarch64DarwinPass);
+    passes.add_pass(LlvmAarch64DarwinAbiPass);
+    passes.add_pass(LlvmToAarch64IselPass);
+    passes.add_pass(Aarch64LegalizePass);
+    passes.add_pass(Aarch64MachineCfgCleanupPass);
+    passes.add_pass(Aarch64TargetOptsPreRaPass);
+    passes.add_pass(Aarch64RegisterAllocatePass);
+    passes.add_pass(Aarch64FrameLowerPass);
+    passes.add_pass(Aarch64PostRaOptsPass);
+    passes.add_pass(Aarch64BlockPlacementPass);
+    passes.add_pass(Aarch64BranchRelaxPass);
+    passes.add_pass(Aarch64AsmLowerPass);
+    passes.add_pass(Aarch64EncodePass);
+    passes
 }
 
-pub fn lower_to_macho_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Ptr<Operation>> {
-    PassManager::without_callback().run(pipeline(), ctx, root)
+/// Runs [pipeline] on `root` (a `builtin.module`) in place.
+pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<()> {
+    pipeline().run(root, ctx, &mut AnalysisManager::default())?;
+    Ok(())
 }
 
 pub fn emit_macho_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
-    let root = lower_to_macho_ir(ctx, root)?;
+    lower_module(ctx, root)?;
     write_macho_object_from_ir(ctx, root)
 }
 
-pub fn write_macho_object_from_ir(ctx: &Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
-    let Some(object) = util::cast_operation::<ObjectOp>(ctx, root) else {
-        return Err(input_error_noloc!(error::Aarch64DarwinErr::UnsupportedOp(
-            Operation::get_opid(root, ctx).to_string()
-        )));
-    };
+/// Translates a module lowered by [pipeline] into Mach-O object bytes.
+pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+    let object = aarch64_macho_lower(ctx, root)?;
     Ok(macho::write_macho_object(ctx, object))
 }
 
@@ -99,7 +94,7 @@ mod tests {
             },
             llvm::{
                 self,
-                attributes::{GepIndexAttr, GepIndicesAttr},
+                attributes::{GepIndexAttr, GepIndicesAttr, LinkageAttr},
                 ops::{
                     AddOp, AllocaOp, BrOp, CondBrOp, ConstantOp, FuncOp, GetElementPtrOp, LoadOp,
                     ReturnOp, StoreOp,
@@ -124,32 +119,32 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_has_stable_pass_order_and_names() {
-        let pipeline = pipeline();
-        let names: Vec<_> = pipeline
-            .passes
-            .iter()
-            .map(|prepared| prepared.pass.name())
-            .collect();
+    fn passes_have_stable_names() {
         assert_eq!(
-            names,
-            [
-                "verify-llvm-for-aarch64-darwin",
-                "llvm-aarch64-darwin-abi",
-                "llvm-to-aarch64-isel",
-                "aarch64-legalize",
-                "aarch64-machine-cfg-cleanup",
-                "aarch64-target-opts-pre-ra",
-                "aarch64-register-allocate",
-                "aarch64-frame-lower",
-                "aarch64-post-ra-opts",
-                "aarch64-block-placement",
-                "aarch64-branch-relax",
-                "aarch64-asm-lower",
-                "aarch64-encode",
-                "aarch64-macho-lower",
-            ]
+            VerifyLlvmForAarch64DarwinPass.name(),
+            "verify-llvm-for-aarch64-darwin"
         );
+        assert_eq!(LlvmAarch64DarwinAbiPass.name(), "llvm-aarch64-darwin-abi");
+        assert_eq!(LlvmToAarch64IselPass.name(), "llvm-to-aarch64-isel");
+        assert_eq!(Aarch64LegalizePass.name(), "aarch64-legalize");
+        assert_eq!(
+            Aarch64MachineCfgCleanupPass.name(),
+            "aarch64-machine-cfg-cleanup"
+        );
+        assert_eq!(
+            Aarch64TargetOptsPreRaPass.name(),
+            "aarch64-target-opts-pre-ra"
+        );
+        assert_eq!(
+            Aarch64RegisterAllocatePass.name(),
+            "aarch64-register-allocate"
+        );
+        assert_eq!(Aarch64FrameLowerPass.name(), "aarch64-frame-lower");
+        assert_eq!(Aarch64PostRaOptsPass.name(), "aarch64-post-ra-opts");
+        assert_eq!(Aarch64BlockPlacementPass.name(), "aarch64-block-placement");
+        assert_eq!(Aarch64BranchRelaxPass.name(), "aarch64-branch-relax");
+        assert_eq!(Aarch64AsmLowerPass.name(), "aarch64-asm-lower");
+        assert_eq!(Aarch64EncodePass.name(), "aarch64-encode");
     }
 
     #[test]
@@ -198,7 +193,7 @@ mod tests {
         );
         func.get_operation().insert_at_back(body, &ctx);
 
-        let err = match lower_to_macho_ir(&mut ctx, module.get_operation()) {
+        let err = match lower_module(&mut ctx, module.get_operation()) {
             Ok(_) => panic!("floating-point ABI signature unexpectedly lowered"),
             Err(err) => err,
         };
@@ -237,8 +232,8 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         // Entry copies of the two incoming argument registers, the add, the
         // result move, and ret: five instructions.
         assert_eq!(object.text(&ctx).len(), 20);
@@ -266,8 +261,8 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_ninth");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -308,8 +303,8 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_slot");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -345,8 +340,8 @@ mod tests {
             .get_operation()
             .insert_at_back(second, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_branchy");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -411,8 +406,8 @@ mod tests {
             .get_operation()
             .insert_at_back(else_block, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_cond");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -454,8 +449,8 @@ mod tests {
             .get_operation()
             .insert_at_back(target, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_block_arg");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -529,8 +524,8 @@ mod tests {
             .get_operation()
             .insert_at_back(else_block, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_cond_block_args");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -587,8 +582,8 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        let root = lower_to_macho_ir(&mut ctx, module.get_operation()).unwrap();
-        let object = util::cast_operation::<ObjectOp>(&ctx, root).unwrap();
+        lower_module(&mut ctx, module.get_operation()).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_gep");
         assert!(!object.text(&ctx).is_empty());
     }
@@ -651,21 +646,20 @@ mod tests {
 
         // Run the pipeline through block placement (post-RA layout, before
         // branch relaxation, as in LLVM).
-        let prefix: Pipeline = vec![
-            Arc::new(VerifyLlvmForAarch64DarwinPass) as PassObj,
-            Arc::new(LlvmAarch64DarwinAbiPass),
-            Arc::new(LlvmToAarch64ISelPass),
-            Arc::new(Aarch64LegalizePass),
-            Arc::new(Aarch64MachineCfgCleanupPass),
-            Arc::new(Aarch64TargetOptsPreRaPass),
-            Arc::new(Aarch64RegisterAllocatePass),
-            Arc::new(Aarch64FrameLowerPass),
-            Arc::new(Aarch64PostRaOptsPass),
-            Arc::new(aarch64_block_placement::Aarch64BlockPlacementPass),
-        ]
-        .into();
-        let root = PassManager::without_callback()
-            .run(prefix, &mut ctx, module.get_operation())
+        let mut prefix = Passes::default();
+        prefix.add_pass(VerifyLlvmForAarch64DarwinPass);
+        prefix.add_pass(LlvmAarch64DarwinAbiPass);
+        prefix.add_pass(LlvmToAarch64IselPass);
+        prefix.add_pass(Aarch64LegalizePass);
+        prefix.add_pass(Aarch64MachineCfgCleanupPass);
+        prefix.add_pass(Aarch64TargetOptsPreRaPass);
+        prefix.add_pass(Aarch64RegisterAllocatePass);
+        prefix.add_pass(Aarch64FrameLowerPass);
+        prefix.add_pass(Aarch64PostRaOptsPass);
+        prefix.add_pass(Aarch64BlockPlacementPass);
+        let root = module.get_operation();
+        prefix
+            .run(root, &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         // The cold `then` block moved out of line; the hot `else` block now
@@ -705,17 +699,14 @@ mod tests {
         assert!(aarch64::ops::branch_weights(&ctx, tail).is_some());
 
         // The rest of the pipeline still produces a valid MachO object.
-        let suffix: Pipeline = vec![
-            Arc::new(Aarch64BranchRelaxPass) as PassObj,
-            Arc::new(Aarch64AsmLowerPass),
-            Arc::new(Aarch64EncodePass),
-            Arc::new(Aarch64MachOLowerPass),
-        ]
-        .into();
-        let root = PassManager::without_callback()
-            .run(suffix, &mut ctx, root)
+        let mut suffix = Passes::default();
+        suffix.add_pass(Aarch64BranchRelaxPass);
+        suffix.add_pass(Aarch64AsmLowerPass);
+        suffix.add_pass(Aarch64EncodePass);
+        suffix
+            .run(root, &mut ctx, &mut AnalysisManager::default())
             .unwrap();
-        let bytes = write_macho_object_from_ir(&ctx, root).unwrap();
+        let bytes = write_macho_object_from_ir(&mut ctx, root).unwrap();
         assert_eq!(&bytes[0..4], &[0xcf, 0xfa, 0xed, 0xfe]);
     }
 
@@ -754,5 +745,3 @@ mod tests {
         );
     }
 }
-
-use llvm_compat::llvm::attributes::LinkageAttr;

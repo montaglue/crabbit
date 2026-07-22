@@ -12,7 +12,7 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
 };
 
@@ -34,12 +34,7 @@ impl Pass for Aarch64RegisterAllocatePass {
         "aarch64-register-allocate"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -48,7 +43,7 @@ impl Pass for Aarch64RegisterAllocatePass {
                 allocate_function(ctx, func)?;
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -495,13 +490,10 @@ fn align_to_16(bytes: u64) -> u64 {
 mod tests {
     use llvm_compat::ll::LinkageAttr;
     use crate::{
-        dialects::{
-            aarch64::{
+        dialects::aarch64::{
                 self,
                 ops::{self as aarch64_ops, ATTR_KEY_AARCH64_RD},
             },
-            builtin,
-        },
         linked_list::ContainsLinkedList,
     };
 
@@ -636,5 +628,3 @@ mod tests {
         );
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

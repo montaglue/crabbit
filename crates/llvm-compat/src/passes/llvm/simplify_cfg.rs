@@ -22,8 +22,7 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{inline::collect_functions, simplify::as_const_operand};
@@ -37,12 +36,7 @@ impl Pass for LLVMSimplifyCfgPass {
         "llvm-simplify-cfg"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) || contains_phi(ctx, func) {
                 continue;
@@ -58,7 +52,7 @@ impl Pass for LLVMSimplifyCfgPass {
                 }
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -483,7 +477,7 @@ mod tests {
             .insert_at_back(else_block, &ctx);
 
         LLVMSimplifyCfgPass
-            .run(func.get_operation(), &mut ctx, PassOptions::default())
+            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", func.get_operation().disp(&ctx));

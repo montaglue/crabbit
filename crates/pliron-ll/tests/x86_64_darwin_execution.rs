@@ -28,7 +28,7 @@ use pliron_ll::{
         },
         macho, x86_64,
     },
-    ir::{basic_block::BasicBlock, op::Op, r#type::TypeHandle, value::Value},
+    ir::{basic_block::BasicBlock, op::Op, value::Value},
     linked_list::ContainsLinkedList,
     passes::x86_64_darwin,
     utils::apint::APInt,

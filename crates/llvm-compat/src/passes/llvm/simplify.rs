@@ -38,13 +38,14 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::dominance_frontier::{DominatorTree, compute_dominance_frontiers_for_op},
     result::STAIRResult,
     utils::apint::APInt,
 };
 
 use super::inline::collect_functions;
+use crate::r#type::TypeHandle;
 
 const MAX_ITERATIONS: usize = 32;
 
@@ -55,12 +56,7 @@ impl Pass for LLVMSimplifyPass {
         "llvm-simplify"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let pure_ops = pure_op_ids();
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
@@ -80,7 +76,7 @@ impl Pass for LLVMSimplifyPass {
                 }
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -854,7 +850,7 @@ mod tests {
     use super::*;
     use crate::{
         dialects::{
-            builtin::{self, types::Signedness},
+            builtin::types::Signedness,
             llvm::{
                 self,
                 attributes::LinkageAttr,
@@ -886,7 +882,7 @@ mod tests {
 
     fn run_simplify(ctx: &mut Context, func: FuncOp) -> String {
         LLVMSimplifyPass
-            .run(func.get_operation(), ctx, PassOptions::default())
+            .run(func.get_operation(), ctx, &mut AnalysisManager::default())
             .unwrap();
         format!("{}", func.get_operation().disp(ctx))
     }
@@ -962,5 +958,3 @@ mod tests {
         assert!(!text.contains("llvm.alloca"), "{text}");
     }
 }
-
-use crate::r#type::TypeHandle;

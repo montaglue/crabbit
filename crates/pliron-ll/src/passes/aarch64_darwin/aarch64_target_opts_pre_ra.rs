@@ -1,8 +1,7 @@
 use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 pub struct Aarch64TargetOptsPreRaPass;
@@ -12,12 +11,7 @@ impl Pass for Aarch64TargetOptsPreRaPass {
         "aarch64-target-opts-pre-ra"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        _ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
-        Ok(root)
+    fn run(&mut self, _root: Ptr<Operation>, _ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+        Ok(changed())
     }
 }

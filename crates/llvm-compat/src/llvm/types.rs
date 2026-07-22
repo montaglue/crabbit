@@ -9,7 +9,7 @@ use pliron::derive::def_type;
 use pliron::derive::{format_type, type_interface_impl};
 
 use crate::{
-    context::{Context, Ptr},
+    context::Context,
     dialects::builtin::type_interfaces::FunctionTypeInterface,
     identifier::Identifier,
     impl_verify_succ,

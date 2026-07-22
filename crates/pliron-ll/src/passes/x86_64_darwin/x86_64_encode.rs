@@ -12,8 +12,7 @@ use crate::{
     input_error_noloc,
     ir::{basic_block::BasicBlock, op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{
@@ -30,12 +29,7 @@ impl Pass for X86_64EncodePass {
         "x86-64-encode"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -102,7 +96,7 @@ impl Pass for X86_64EncodePass {
             literal_bytes,
         );
         set_fixups_attr(root, ctx, ATTR_KEY_X86_64_FIXUPS.as_str(), fixups);
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -176,7 +170,7 @@ mod tests {
         },
         ir::{basic_block::BasicBlock, op::Op},
         linked_list::ContainsLinkedList,
-        conversion::pass::{Pass, PassOptions},
+        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::{
@@ -234,7 +228,7 @@ mod tests {
             .insert_at_back(third.entry_block(&ctx), &ctx);
 
         X86_64EncodePass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         assert_eq!(
@@ -286,5 +280,3 @@ mod tests {
         );
     }
 }
-
-use llvm_compat::ll::{BytesAttr, LinkageAttr};

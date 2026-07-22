@@ -11,7 +11,7 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
 };
 
@@ -23,12 +23,7 @@ impl Pass for LowerLLVMBlockArgsToPhiPass {
         "lower-llvm-block-args-to-phi"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let mut funcs = Vec::new();
         collect_ops(ctx, root, llvm_ops::FuncOp::get_opid_static(), &mut funcs);
 
@@ -36,7 +31,7 @@ impl Pass for LowerLLVMBlockArgsToPhiPass {
             lower_function(ctx, llvm_ops::FuncOp::from_operation(func))?;
         }
 
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -242,7 +237,7 @@ mod tests {
         ret.get_operation().insert_at_back(then_block, &ctx);
 
         LowerLLVMBlockArgsToPhiPass
-            .run(func.get_operation(), &mut ctx, PassOptions::default())
+            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", func.get_operation().disp(&ctx));

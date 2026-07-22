@@ -15,7 +15,6 @@ use pliron::{
     dict_key,
     location::Located,
     op::{Op, op_cast},
-    operation::Operation,
     result::Result,
     builtin::op_interfaces::BranchOpInterface,
     verify_err,

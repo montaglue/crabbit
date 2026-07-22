@@ -40,7 +40,7 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
     utils::apint::APInt,
 };
@@ -57,12 +57,7 @@ impl Pass for LLVMSroaPass {
         "llvm-sroa"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;
@@ -79,7 +74,7 @@ impl Pass for LLVMSroaPass {
                 try_split_alloca(ctx, alloca)?;
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -488,17 +483,14 @@ fn rewrite_scalar_store(
 mod tests {
     use super::*;
     use crate::{
-        dialects::{
-            builtin::{self},
-            llvm::{
+        dialects::llvm::{
                 self,
                 attributes::LinkageAttr,
                 ops::{FuncOp, ReturnOp},
                 types::FuncType,
             },
-        },
         ir::r#type::TypedHandle,
-        conversion::pass::Pass,
+        conversion::pass::{AnalysisManager, Pass},
         printable::Printable,
     };
     use std::num::NonZero;
@@ -547,7 +539,7 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         LLVMSroaPass
-            .run(func.get_operation(), &mut ctx, PassOptions::default())
+            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
         let text = format!("{}", func.get_operation().disp(&ctx));

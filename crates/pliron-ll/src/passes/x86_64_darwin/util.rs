@@ -1,21 +1,15 @@
+use llvm_compat::ll::BytesAttr;
+
 use crate::{
     context::{Context, Ptr},
     dialects::{
-        builtin::{
-            op_interfaces::{OneRegionInterface, SymbolOpInterface},
-            ops::ModuleOp,
-        },
+        builtin::{op_interfaces::OneRegionInterface, ops::ModuleOp},
         x86_64::{attributes::FixupsAttr, op_interfaces::BinaryFixup},
     },
     identifier::Identifier,
     ir::{op::Op, operation::Operation},
     linked_list::ContainsLinkedList,
 };
-
-pub(super) fn new_module_like(ctx: &mut Context, old_module: ModuleOp, suffix: &str) -> ModuleOp {
-    let name = format!("{}_{}", old_module.get_symbol_name(ctx), suffix);
-    ModuleOp::new(ctx, name.try_into().unwrap())
-}
 
 pub(super) fn module_body(
     ctx: &Context,
@@ -76,5 +70,3 @@ pub(super) fn darwin_symbol(name: &str) -> String {
 pub(super) fn identifier(value: &str) -> Identifier {
     value.try_into().unwrap()
 }
-
-use llvm_compat::ll::{BytesAttr};

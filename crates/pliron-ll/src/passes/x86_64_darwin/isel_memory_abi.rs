@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::{error::X86_64DarwinErr, frontend::RESULT_GPRS, llvm_to_x86_64_isel::*};
+use crate::r#type::TypeHandle;
 
 /// Lowers addresses, memory access, aggregate ABI values, and stack layout.
 pub(super) fn lower_gep(
@@ -1245,5 +1246,3 @@ pub(super) fn scalar_size_of(
         format!("non-scalar memory type {}", ty_ref.disp(ctx))
     )))
 }
-
-use crate::r#type::TypeHandle;

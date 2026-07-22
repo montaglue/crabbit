@@ -284,10 +284,7 @@ fn encode_three_reg(ctx: &Context, op: Ptr<Operation>, base: u32) -> Option<u32>
 mod tests {
     use crate::{
         context::Context,
-        dialects::{
-            aarch64::{self, ops, registers::Register},
-            builtin,
-        },
+        dialects::aarch64::{self, ops, registers::Register},
     };
 
     use std::collections::HashMap;

@@ -12,7 +12,7 @@ use crate::{
     input_error_noloc,
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
 };
 
@@ -25,12 +25,7 @@ impl Pass for Aarch64LegalizePass {
         "aarch64-legalize"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {
@@ -53,7 +48,7 @@ impl Pass for Aarch64LegalizePass {
                 }
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
 
@@ -94,7 +89,7 @@ mod tests {
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{Pass, PassOptions},
+        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::{Aarch64LegalizePass, verify_gpr_operands};
@@ -132,7 +127,7 @@ mod tests {
         let module = module_with_inst(&mut ctx, inst);
 
         Aarch64LegalizePass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
     }
 
@@ -144,7 +139,7 @@ mod tests {
 
         assert!(
             Aarch64LegalizePass
-                .run(module.get_operation(), &mut ctx, PassOptions::default())
+                .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
                 .is_err()
         );
     }
@@ -156,9 +151,7 @@ mod tests {
         let module = module_with_inst(&mut ctx, inst);
 
         Aarch64LegalizePass
-            .run(module.get_operation(), &mut ctx, PassOptions::default())
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
     }
 }
-
-use llvm_compat::ll::{LinkageAttr};

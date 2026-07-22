@@ -7,8 +7,7 @@ use crate::{
     input_error_noloc,
     ir::{op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{Pass, PassOptions},
-    result::STAIRResult,
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{error::Aarch64DarwinErr, frontend::module_op};
@@ -20,12 +19,7 @@ impl Pass for Aarch64AsmLowerPass {
         "aarch64-asm-lower"
     }
 
-    fn run(
-        &self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _options: PassOptions,
-    ) -> STAIRResult<Ptr<Operation>> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {
@@ -45,6 +39,6 @@ impl Pass for Aarch64AsmLowerPass {
                 }
             }
         }
-        Ok(root)
+        Ok(changed())
     }
 }
