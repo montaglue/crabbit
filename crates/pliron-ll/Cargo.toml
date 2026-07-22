@@ -4,6 +4,10 @@ description = "Native machine backends (aarch64/x86_64 darwin) for pliron"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["aarch64", "x86-64", "codegen", "pliron", "compiler"]
+categories = ["compilers"]
 
 [dependencies]
 pliron.workspace = true

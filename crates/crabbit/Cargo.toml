@@ -4,12 +4,21 @@ description = "rustc codegen backend emitting native code through pliron"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["rustc", "codegen-backend", "compiler", "pliron", "llvm"]
+categories = ["compilers"]
 
 [lib]
 crate-type = ["dylib"]
 
 [package.metadata.rust-analyzer]
 rustc_private = true
+
+# Uses `#![feature(rustc_private)]` against the `rustc-dev` component, which
+# docs.rs does not provide, so a docs.rs build can never succeed here.
+[package.metadata.docs.rs]
+targets = []
 
 [dependencies]
 pliron.workspace = true

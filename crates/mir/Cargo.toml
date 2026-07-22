@@ -4,6 +4,10 @@ description = "crabbit mir dialect + mir-to-llvm lowering on pliron"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["mir", "rustc", "compiler", "pliron", "codegen"]
+categories = ["compilers"]
 
 [dependencies]
 pliron.workspace = true

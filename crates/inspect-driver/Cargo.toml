@@ -4,6 +4,10 @@ description = "pliron-inspect driver for the crabbit dialects and passes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["pliron", "compiler", "cli", "debugging", "inspect"]
+categories = ["compilers", "command-line-utilities"]
 
 [[bin]]
 name = "crabbit-inspect-driver"
@@ -14,6 +18,6 @@ pliron.workspace = true
 llvm-compat.workspace = true
 pliron-ll.workspace = true
 crabbit-mir.workspace = true
-pliron-inspect-driver = { path = "../../../pliron-inspect/crates/driver" }
+pliron-inspect-driver.workspace = true
 anyhow.workspace = true
 clap.workspace = true

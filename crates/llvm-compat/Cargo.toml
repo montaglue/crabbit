@@ -4,6 +4,10 @@ description = "Transitional: STAIR llvm dialect + conversion framework on pliron
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["llvm", "compiler", "pliron", "dialect", "codegen"]
+categories = ["compilers"]
 
 [dependencies]
 pliron.workspace = true

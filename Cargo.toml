@@ -7,14 +7,24 @@ exclude = ["vendor"]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/montaglue/crabbit"
 
 [workspace.dependencies]
-pliron = { path = "../pliron-master" }
+# `version` is required alongside `path` so that `cargo publish` can resolve
+# this dependency against crates.io once the local path is stripped from the
+# packaged manifest. Locally, cargo still prefers the path.
+pliron = { path = "../pliron-master", version = "0.16.0" }
+# NOT YET PUBLISHED to crates.io (lives in the sibling `pliron-inspect` repo).
+# Every crate that depends on `llvm-compat` transitively depends on this, so
+# `cargo publish` will fail for the whole workspace until it has a published
+# version to pin here.
 pliron-inspect-driver = { path = "../pliron-inspect/crates/driver" }
-llvm-compat = { path = "crates/llvm-compat" }
-pliron-ll = { path = "crates/pliron-ll" }
-crabbit = { path = "crates/crabbit" }
-crabbit-mir = { path = "crates/mir" }
+# `version` on these intra-workspace deps is likewise required for `cargo
+# publish`; keep them in lockstep with `workspace.package.version` above.
+llvm-compat = { path = "crates/llvm-compat", version = "0.1.0" }
+pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }
+crabbit = { path = "crates/crabbit", version = "0.1.0" }
+crabbit-mir = { path = "crates/mir", version = "0.1.0" }
 awint = "0"
 combine = "4"
 thiserror = "2"
