@@ -1,13 +1,17 @@
 //! Native machine-level dialects and backend pipelines on pliron:
-//! aarch64/x86_64 darwin — instruction selection, register allocation,
-//! encoding, and Mach-O emission — plus the `ll` extension dialect and the
-//! LLVM-level mid-end passes over [pliron_llvm]'s dialect.
+//! aarch64 (darwin + linux) and x86_64 darwin — instruction selection,
+//! register allocation, encoding, and Mach-O/ELF emission — plus the `ll`
+//! extension dialect and the LLVM-level mid-end passes over [pliron_llvm]'s
+//! dialect. Backends are resolved from an LLVM-style target [triple] via
+//! the [targets] registry.
 
 pub mod aarch64;
 pub mod conversion;
 pub mod ll;
 pub mod macho;
 pub mod passes;
+pub mod targets;
+pub mod triple;
 pub mod x86_64;
 
 pub mod dialects {

@@ -5,21 +5,23 @@ pub mod aarch64_encode;
 pub mod aarch64_frame_lower;
 pub mod aarch64_legalize;
 pub mod aarch64_machine_cfg_cleanup;
-pub mod aarch64_macho_lower;
+pub mod aarch64_object_lower;
 pub mod aarch64_post_ra_opts;
 pub mod aarch64_register_allocate;
 pub mod aarch64_target_opts_pre_ra;
 mod attrs;
+mod elf;
 mod error;
 mod frontend;
 mod isel_control_flow;
 mod isel_i128;
 mod isel_memory_abi;
-pub mod llvm_aarch64_darwin_abi;
+pub mod llvm_aarch64_abi;
 pub mod llvm_to_aarch64_isel;
 mod macho;
+pub mod target;
 mod util;
-pub mod verify_llvm_for_aarch64_darwin;
+pub mod verify_llvm_for_aarch64;
 
 use crate::dialects::builtin::ops::ConstantOp;
 use crate::{
@@ -34,22 +36,25 @@ use self::{
     aarch64_branch_relax::Aarch64BranchRelaxPass, aarch64_encode::Aarch64EncodePass,
     aarch64_frame_lower::Aarch64FrameLowerPass, aarch64_legalize::Aarch64LegalizePass,
     aarch64_machine_cfg_cleanup::Aarch64MachineCfgCleanupPass,
-    aarch64_macho_lower::aarch64_macho_lower, aarch64_post_ra_opts::Aarch64PostRaOptsPass,
+    aarch64_object_lower::{aarch64_macho_lower, collect_object_parts},
+    aarch64_post_ra_opts::Aarch64PostRaOptsPass,
     aarch64_register_allocate::Aarch64RegisterAllocatePass,
     aarch64_target_opts_pre_ra::Aarch64TargetOptsPreRaPass,
-    llvm_aarch64_darwin_abi::LlvmAarch64DarwinAbiPass,
+    llvm_aarch64_abi::LlvmAarch64AbiPass,
     llvm_to_aarch64_isel::LlvmToAarch64IselPass,
-    verify_llvm_for_aarch64_darwin::VerifyLlvmForAarch64DarwinPass,
+    verify_llvm_for_aarch64::VerifyLlvmForAarch64Pass,
 };
+pub use self::target::TargetOs;
 
-/// The aarch64-darwin lowering pipeline: every step is a [Pass] on the
+/// The aarch64 lowering pipeline for `os`: every step is a [Pass] on the
 /// `builtin.module`, from LLVM-dialect verification down to encoded machine
-/// code. Translation to Mach-O bytes happens outside the pipeline, in
-/// [write_macho_object_from_ir].
-pub fn pipeline() -> Passes {
+/// code. Only verification and ABI assignment differ per OS; the machine
+/// passes are shared. Translation to object-container bytes happens outside
+/// the pipeline, in [write_macho_object_from_ir] / [write_elf_object_from_ir].
+pub fn pipeline(os: TargetOs) -> Passes {
     let mut passes = Passes::default();
-    passes.add_pass(VerifyLlvmForAarch64DarwinPass);
-    passes.add_pass(LlvmAarch64DarwinAbiPass);
+    passes.add_pass(VerifyLlvmForAarch64Pass::new(os));
+    passes.add_pass(LlvmAarch64AbiPass::new(os));
     passes.add_pass(LlvmToAarch64IselPass);
     passes.add_pass(Aarch64LegalizePass);
     passes.add_pass(Aarch64MachineCfgCleanupPass);
@@ -65,20 +70,31 @@ pub fn pipeline() -> Passes {
 }
 
 /// Runs [pipeline] on `root` (a `builtin.module`) in place.
-pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<()> {
-    pipeline().run(root, ctx, &mut AnalysisManager::default())?;
+pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>, os: TargetOs) -> STAIRResult<()> {
+    pipeline(os).run(root, ctx, &mut AnalysisManager::default())?;
     Ok(())
 }
 
 pub fn emit_macho_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
-    lower_module(ctx, root)?;
+    lower_module(ctx, root, TargetOs::Darwin)?;
     write_macho_object_from_ir(ctx, root)
+}
+
+pub fn emit_elf_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+    lower_module(ctx, root, TargetOs::Linux)?;
+    write_elf_object_from_ir(ctx, root)
 }
 
 /// Translates a module lowered by [pipeline] into Mach-O object bytes.
 pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
     let object = aarch64_macho_lower(ctx, root)?;
     Ok(macho::write_macho_object(ctx, object))
+}
+
+/// Translates a module lowered by [pipeline] into ELF object bytes.
+pub fn write_elf_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+    let parts = collect_object_parts(ctx, root, TargetOs::Linux)?;
+    Ok(elf::write_elf_object(&parts))
 }
 
 #[cfg(test)]
@@ -129,10 +145,21 @@ mod tests {
     #[test]
     fn passes_have_stable_names() {
         assert_eq!(
-            VerifyLlvmForAarch64DarwinPass.name(),
+            VerifyLlvmForAarch64Pass::new(TargetOs::Darwin).name(),
             "verify-llvm-for-aarch64-darwin"
         );
-        assert_eq!(LlvmAarch64DarwinAbiPass.name(), "llvm-aarch64-darwin-abi");
+        assert_eq!(
+            VerifyLlvmForAarch64Pass::new(TargetOs::Linux).name(),
+            "verify-llvm-for-aarch64-linux"
+        );
+        assert_eq!(
+            LlvmAarch64AbiPass::new(TargetOs::Darwin).name(),
+            "llvm-aarch64-darwin-abi"
+        );
+        assert_eq!(
+            LlvmAarch64AbiPass::new(TargetOs::Linux).name(),
+            "llvm-aarch64-linux-abi"
+        );
         assert_eq!(LlvmToAarch64IselPass.name(), "llvm-to-aarch64-isel");
         assert_eq!(Aarch64LegalizePass.name(), "aarch64-legalize");
         assert_eq!(
@@ -192,7 +219,7 @@ mod tests {
         func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
 
-        let err = match lower_module(&mut ctx, module.get_operation()) {
+        let err = match lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin) {
             Ok(_) => panic!("floating-point ABI signature unexpectedly lowered"),
             Err(err) => err,
         };
@@ -228,7 +255,7 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         // Entry copies of the two incoming argument registers, the add, the
         // result move, and ret: five instructions.
@@ -254,7 +281,7 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_ninth");
         assert!(!object.text(&ctx).is_empty());
@@ -290,7 +317,7 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_slot");
         assert!(!object.text(&ctx).is_empty());
@@ -321,7 +348,7 @@ mod tests {
             .get_operation()
             .insert_at_back(second, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_branchy");
         assert!(!object.text(&ctx).is_empty());
@@ -375,7 +402,7 @@ mod tests {
             .get_operation()
             .insert_at_back(else_block, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_cond");
         assert!(!object.text(&ctx).is_empty());
@@ -412,7 +439,7 @@ mod tests {
             .get_operation()
             .insert_at_back(target, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_block_arg");
         assert!(!object.text(&ctx).is_empty());
@@ -475,7 +502,7 @@ mod tests {
             .get_operation()
             .insert_at_back(else_block, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_cond_block_args");
         assert!(!object.text(&ctx).is_empty());
@@ -518,7 +545,7 @@ mod tests {
             .get_operation()
             .insert_at_back(entry, &ctx);
 
-        lower_module(&mut ctx, module.get_operation()).unwrap();
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_gep");
         assert!(!object.text(&ctx).is_empty());
@@ -574,8 +601,8 @@ mod tests {
         // Run the pipeline through block placement (post-RA layout, before
         // branch relaxation, as in LLVM).
         let mut prefix = Passes::default();
-        prefix.add_pass(VerifyLlvmForAarch64DarwinPass);
-        prefix.add_pass(LlvmAarch64DarwinAbiPass);
+        prefix.add_pass(VerifyLlvmForAarch64Pass::new(TargetOs::Darwin));
+        prefix.add_pass(LlvmAarch64AbiPass::new(TargetOs::Darwin));
         prefix.add_pass(LlvmToAarch64IselPass);
         prefix.add_pass(Aarch64LegalizePass);
         prefix.add_pass(Aarch64MachineCfgCleanupPass);

@@ -1,6 +1,6 @@
 [package]
 name = "pliron-ll"
-description = "Native machine backends (aarch64/x86_64 darwin) for pliron"
+description = "Native machine backends (aarch64 darwin/linux, x86_64 darwin) for pliron"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -16,7 +16,7 @@ use crate::{
     result::STAIRResult,
 };
 
-use super::{error::Aarch64DarwinErr, frontend::module_op, util::cast_operation};
+use super::{error::Aarch64Err, frontend::module_op, util::cast_operation};
 
 const ALLOCATABLE_GPRS: [Register; 4] = [
     Register::gpr(9),
@@ -474,7 +474,7 @@ fn virtual_operands_with_kind(
 
 fn next_spill_scratch(scratch_index: &mut usize) -> STAIRResult<Register> {
     let Some(scratch) = SPILL_SCRATCH_GPRS.get(*scratch_index) else {
-        return Err(crate::input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        return Err(crate::input_error_noloc!(Aarch64Err::UnsupportedOp(
             "aarch64 instruction needs more spill scratch registers than are reserved".to_string()
         )));
     };

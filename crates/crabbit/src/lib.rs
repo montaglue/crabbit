@@ -34,9 +34,12 @@ use crate::{
     passes::llvm::simplify::LLVMSimplifyPass,
     passes::llvm::simplify_cfg::LLVMSimplifyCfgPass,
     passes::llvm::sroa::LLVMSroaPass,
-    passes::{aarch64_darwin, x86_64_darwin},
     printable::Printable,
     trace::{StairTraceFile, StairTraceMeta},
+};
+use pliron_ll::{
+    targets::{self, TargetBackend},
+    triple::Triple,
 };
 use std::{
     any::Any,
@@ -55,7 +58,7 @@ impl CodegenBackend for StairBackend {
         sess.target.cpu.as_ref().to_owned()
     }
 
-    fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
+    fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>, _crate_info: &CrateInfo) -> Box<dyn Any> {
         Box::new(importer::import_crate(tcx))
     }
 
@@ -64,7 +67,6 @@ impl CodegenBackend for StairBackend {
         ongoing_codegen: Box<dyn Any>,
         sess: &Session,
         outputs: &OutputFilenames,
-        _crate_info: &CrateInfo,
     ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>) {
         let mut imported = ongoing_codegen
             .downcast::<importer::ImportedCrate>()
@@ -108,54 +110,26 @@ impl CodegenBackend for StairBackend {
     }
 }
 
-/// The Darwin object backend selected by the session's target architecture.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ObjectTarget {
-    Aarch64Darwin,
-    X86_64Darwin,
-}
-
-impl ObjectTarget {
-    fn for_session(sess: &Session) -> Result<Self, String> {
-        if sess.target.os.to_string() != "macos" {
-            return Err(format!(
-                "the STAIR object backend only supports macOS targets, got `{}`",
-                sess.target.llvm_target
-            ));
-        }
-        match sess.target.arch.to_string().as_str() {
-            "aarch64" => Ok(Self::Aarch64Darwin),
-            "x86_64" => Ok(Self::X86_64Darwin),
-            other => Err(format!(
-                "the STAIR object backend does not support the `{other}` architecture"
-            )),
-        }
-    }
-
-    fn pipeline(self) -> Passes {
-        match self {
-            Self::Aarch64Darwin => aarch64_darwin::pipeline(),
-            Self::X86_64Darwin => x86_64_darwin::pipeline(),
-        }
-    }
-
-    fn write_object(
-        self,
-        ctx: &mut crate::context::Context,
-        root: crate::context::Ptr<crate::ir::operation::Operation>,
-    ) -> crate::result::STAIRResult<Vec<u8>> {
-        match self {
-            Self::Aarch64Darwin => aarch64_darwin::write_macho_object_from_ir(ctx, root),
-            Self::X86_64Darwin => x86_64_darwin::write_macho_object_from_ir(ctx, root),
-        }
-    }
+/// Resolves the session's LLVM target triple against pliron-ll's backend
+/// registry, the way LLVM's `TargetRegistry::lookupTarget` resolves a
+/// `Target` from a triple.
+fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String> {
+    let triple = Triple::parse(&sess.target.llvm_target);
+    targets::lookup(&triple).ok_or_else(|| {
+        format!(
+            "no STAIR object backend is registered for target `{}` (parsed as `{triple}`); \
+             registered backends: {}",
+            sess.target.llvm_target,
+            targets::registered_names().collect::<Vec<_>>().join(", ")
+        )
+    })
 }
 
 /// The full MIR-to-machine-code pipeline for `target`, as pliron [Passes].
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
 /// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
-fn pipeline(target: ObjectTarget, internal_symbols: Vec<String>) -> Passes {
+fn pipeline(target: &TargetBackend, internal_symbols: Vec<String>) -> Passes {
     let mut passes = Passes::default();
     passes.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
     // mir-lower emits llvm.funcs without linkage; crabbit's llvm passes and
@@ -224,9 +198,9 @@ fn emit_object(
     outputs: &OutputFilenames,
     imported: &mut importer::ImportedCrate,
 ) -> Result<std::path::PathBuf, String> {
-    let target = ObjectTarget::for_session(sess)?;
+    let target = backend_for_session(sess)?;
     if imported.kernel_count > 0 {
-        return Err("Darwin STAIR object emission does not support kernels yet".to_string());
+        return Err("STAIR object emission does not support kernels yet".to_string());
     }
 
     let project = trace_project(sess);
@@ -274,7 +248,9 @@ fn emit_object(
         .write(&trace_path)
         .map_err(|error| error.to_string())?;
 
-    let object = outputs.temp_path_for_cgu(OutputType::Object, "stair_rust");
+    // No invocation-temp component: the object must outlive the rustc
+    // invocation (backend-tests inspect it after the build).
+    let object = outputs.temp_path_for_cgu(OutputType::Object, "stair_rust", None);
     if let Some(parent) = object.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create object output directory: {error}"))?;
@@ -339,7 +315,8 @@ pub mod trace;
 pub mod passes {
     pub use crabbit_mir::passes::lower_dialect_mir;
     pub use pliron_ll::passes::{
-        aarch64_darwin, dominance_frontier, hot_path, llvm, verify, x86_64_darwin,
+        aarch64, aarch64_darwin, aarch64_linux, dominance_frontier, hot_path, llvm, verify,
+        x86_64_darwin,
     };
 }
 

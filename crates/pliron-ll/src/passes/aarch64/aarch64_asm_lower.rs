@@ -10,7 +10,7 @@ use crate::{
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
-use super::{error::Aarch64DarwinErr, frontend::module_op};
+use super::{error::Aarch64Err, frontend::module_op};
 
 pub struct Aarch64AsmLowerPass;
 
@@ -28,7 +28,7 @@ impl Pass for Aarch64AsmLowerPass {
                     for op in block.deref(ctx).iter(ctx) {
                         let op_obj = Operation::get_op_dyn(op, ctx);
                         if op_cast::<dyn BinarySerializableOpInterface>(&*op_obj).is_none() {
-                            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                                 format!(
                                     "non-serializable AArch64 op `{}` reached asm lowering",
                                     Operation::get_opid(op, ctx)

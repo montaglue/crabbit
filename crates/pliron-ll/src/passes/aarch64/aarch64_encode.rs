@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     attrs::{ATTR_KEY_AARCH64_ENCODED, ATTR_KEY_AARCH64_FIXUPS, ATTR_KEY_AARCH64_MODULE_LITERALS},
-    error::Aarch64DarwinErr,
+    error::Aarch64Err,
     frontend::module_op,
     util::{cast_operation, set_bytes_attr, set_fixups_attr},
 };
@@ -71,7 +71,7 @@ impl Pass for Aarch64EncodePass {
                     let op = Operation::get_op_dyn(inst_op, ctx);
                     let serializable = op_cast::<dyn BinarySerializableOpInterface>(&*op)
                         .ok_or_else(|| {
-                            input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+                            input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                                 "non-serializable AArch64 operation `{}` reached binary emission",
                                 Operation::get_opid(inst_op, ctx)
                             )))

@@ -11,20 +11,32 @@ use crate::{
     ir::operation::Operation,
     linked_list::{ContainsLinkedList, LinkedList},
     conversion::pass::{AnalysisManager, Pass, PassResult, unchanged},
-    passes::aarch64_darwin::util::module_body,
+    passes::aarch64::util::module_body,
 };
 
 use super::{
-    error::Aarch64DarwinErr,
+    error::Aarch64Err,
     frontend::{module_op, validate_body, validate_function_type, validate_linkage},
+    target::TargetOs,
     util::cast_operation,
 };
 
-pub struct VerifyLlvmForAarch64DarwinPass;
+pub struct VerifyLlvmForAarch64Pass {
+    os: TargetOs,
+}
 
-impl Pass for VerifyLlvmForAarch64DarwinPass {
+impl VerifyLlvmForAarch64Pass {
+    pub fn new(os: TargetOs) -> Self {
+        Self { os }
+    }
+}
+
+impl Pass for VerifyLlvmForAarch64Pass {
     fn name(&self) -> &str {
-        "verify-llvm-for-aarch64-darwin"
+        match self.os {
+            TargetOs::Darwin => "verify-llvm-for-aarch64-darwin",
+            TargetOs::Linux => "verify-llvm-for-aarch64-linux",
+        }
     }
 
     fn run(
@@ -45,13 +57,13 @@ impl Pass for VerifyLlvmForAarch64DarwinPass {
             } else if let Some(func) = cast_operation::<FuncOp>(ctx, op_ptr) {
                 let name = func.get_symbol_name(ctx).to_string();
                 validate_linkage(&name, func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
-                validate_function_type(ctx, &name, func.get_type(ctx).into())?;
+                validate_function_type(ctx, self.os, &name, func.get_type(ctx).into())?;
                 if !func.is_declaration(ctx) {
                     validate_body(ctx, &func)?;
                 }
                 op = op_ptr.deref(ctx).get_next();
             } else {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     Operation::get_opid(op_ptr, ctx).to_string()
                 )));
             }
@@ -84,7 +96,7 @@ mod tests {
         conversion::pass::{AnalysisManager, Pass},
     };
 
-    use super::VerifyLlvmForAarch64DarwinPass;
+    use super::{VerifyLlvmForAarch64Pass, TargetOs};
 
     fn context() -> Context {
         let mut ctx = Context::new();
@@ -107,7 +119,7 @@ mod tests {
         func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
         func.get_operation().insert_at_back(body, &ctx);
 
-        VerifyLlvmForAarch64DarwinPass
+        VerifyLlvmForAarch64Pass::new(TargetOs::Darwin)
             .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
             .unwrap();
     }
@@ -126,7 +138,7 @@ mod tests {
         func.get_operation().insert_at_back(body, &ctx);
         aarch64::ops::ret(&mut ctx).insert_at_back(func.get_entry_block(&ctx).unwrap(), &ctx);
 
-        let err = match VerifyLlvmForAarch64DarwinPass.run(
+        let err = match VerifyLlvmForAarch64Pass::new(TargetOs::Darwin).run(
             module.get_operation(),
             &mut ctx,
             &mut AnalysisManager::default(),

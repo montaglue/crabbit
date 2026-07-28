@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    error::Aarch64DarwinErr,
+    error::Aarch64Err,
     llvm_to_aarch64_isel::{
         LoweredValue, block_arg_registers, fresh_vreg, is_128_bit_integer, is_aggregate_ty,
         is_zero_sized_ty, lookup_value, materialize_pair, materialize_typed, struct_fields,
@@ -57,7 +57,7 @@ pub(super) fn emit_block_arg_copies(
 ) -> STAIRResult<()> {
     let dest_args: Vec<_> = dest.deref(ctx).arguments().collect();
     if dest_args.len() != args.len() {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             format!(
                 "branch operand count {} does not match target block argument count {}",
                 args.len(),
@@ -85,7 +85,7 @@ pub(super) fn emit_block_arg_copies(
             &mut src_regs,
         )?;
         if dst_regs.len() != src_regs.len() {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                 "block argument register count mismatch: {} incoming vs {} target",
                 src_regs.len(),
                 dst_regs.len()
@@ -133,7 +133,7 @@ pub(super) fn machine_block(
     target: Ptr<BasicBlock>,
 ) -> STAIRResult<Ptr<BasicBlock>> {
     block_map.get(&target).copied().ok_or_else(|| {
-        input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        input_error_noloc!(Aarch64Err::UnsupportedOp(
             "branch target block was not lowered".to_string()
         ))
     })
@@ -178,7 +178,7 @@ fn flatten_incoming(
                 values
             }
             other => {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                     "aggregate block argument fed by non-aggregate {other:?}"
                 ))));
             }

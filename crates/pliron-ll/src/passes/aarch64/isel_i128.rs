@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    error::Aarch64DarwinErr,
+    error::Aarch64Err,
     frontend::BinaryKind,
     llvm_to_aarch64_isel::{
         CompareValue, LoweredValue, condition_code, fold_binary, fresh_vreg, is_128_bit_integer,
@@ -164,7 +164,7 @@ pub(super) fn lower_binary_128(
         }
         BinaryKind::Shr => {
             let Some(shift) = shift_amount else {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     "dynamic i128 logical shift right".to_string(),
                 )));
             };
@@ -172,7 +172,7 @@ pub(super) fn lower_binary_128(
         }
         BinaryKind::Shl => {
             let Some(shift) = shift_amount else {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     "dynamic i128 shift left".to_string(),
                 )));
             };
@@ -189,7 +189,7 @@ pub(super) fn lower_binary_128(
             Ok(LoweredValue::RegPair(lo, hi))
         }
         BinaryKind::SDiv | BinaryKind::UDiv | BinaryKind::SRem | BinaryKind::URem => Err(
-            input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!("128-bit {kind:?}"))),
+            input_error_noloc!(Aarch64Err::UnsupportedOp(format!("128-bit {kind:?}"))),
         ),
     }
 }

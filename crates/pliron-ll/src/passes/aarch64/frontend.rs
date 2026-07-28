@@ -41,7 +41,7 @@ use crate::{
 
 use crate::ll::ops::CStrOp;
 
-use super::{error::Aarch64DarwinErr, util::cast_operation};
+use super::{error::Aarch64Err, target::TargetOs, util::cast_operation};
 use crate::ll::{LinkageAttr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub(super) enum BinaryKind {
 }
 
 #[op_interface]
-pub(super) trait Aarch64DarwinValidOpInterface {
+pub(super) trait Aarch64ValidOpInterface {
     fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
     where
         Self: Sized,
@@ -78,7 +78,7 @@ pub(super) trait Aarch64DarwinValidOpInterface {
 }
 
 #[op_interface]
-pub(super) trait Aarch64DarwinBinaryOpInterface {
+pub(super) trait Aarch64BinaryOpInterface {
     fn binary_kind(&self) -> BinaryKind;
 
     fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
@@ -91,17 +91,17 @@ pub(super) trait Aarch64DarwinBinaryOpInterface {
 
 pub(super) fn module_op(ctx: &Context, root: Ptr<Operation>) -> STAIRResult<ModuleOp> {
     cast_operation::<ModuleOp>(ctx, root)
-        .ok_or_else(|| input_error_noloc!(Aarch64DarwinErr::NotModule))
+        .ok_or_else(|| input_error_noloc!(Aarch64Err::NotModule))
 }
 
 /// Map an LLVM linkage to its machine-level linkage, rejecting the ones the
-/// Darwin backend does not support.
+/// backend does not support.
 pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> STAIRResult<LinkageAttr> {
     match linkage {
         LlvmLinkageAttr::ExternalLinkage => Ok(LinkageAttr::External),
         LlvmLinkageAttr::InternalLinkage => Ok(LinkageAttr::Internal),
         LlvmLinkageAttr::PrivateLinkage => Ok(LinkageAttr::Private),
-        other => Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedLinkage(
+        other => Err(input_error_noloc!(Aarch64Err::UnsupportedLinkage(
             name.to_string(),
             other
         ))),
@@ -110,11 +110,12 @@ pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> STAIRRes
 
 pub(super) fn validate_function_type(
     ctx: &Context,
+    os: TargetOs,
     name: &str,
     ty: TypeHandle,
 ) -> STAIRResult<()> {
     let (args, result) = function_abi_classes(ctx, ty)?;
-    assign_darwin_abi(name, &args, result)?;
+    assign_abi(os, name, &args, result)?;
     Ok(())
 }
 
@@ -123,8 +124,8 @@ pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> STAIRResult<()> {
         let mut op = block.deref(ctx).get_head();
         while let Some(op_ptr) = op {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
-            if op_cast::<dyn Aarch64DarwinValidOpInterface>(&*op_obj).is_none() {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+            if op_cast::<dyn Aarch64ValidOpInterface>(&*op_obj).is_none() {
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     Operation::get_opid(op_ptr, ctx).to_string()
                 )));
             }
@@ -135,14 +136,14 @@ pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> STAIRResult<()> {
 }
 
 pub(super) fn binary_kind(op: &dyn Op) -> Option<BinaryKind> {
-    op_cast::<dyn Aarch64DarwinBinaryOpInterface>(op).map(|binary| binary.binary_kind())
+    op_cast::<dyn Aarch64BinaryOpInterface>(op).map(|binary| binary.binary_kind())
 }
 
 macro_rules! impl_valid_op {
     ($($op:ty),* $(,)?) => {
         $(
             #[op_interface_impl]
-            impl Aarch64DarwinValidOpInterface for $op {}
+            impl Aarch64ValidOpInterface for $op {}
         )*
     };
 }
@@ -151,10 +152,10 @@ macro_rules! impl_binary_op {
     ($($op:ty => $kind:expr),* $(,)?) => {
         $(
             #[op_interface_impl]
-            impl Aarch64DarwinValidOpInterface for $op {}
+            impl Aarch64ValidOpInterface for $op {}
 
             #[op_interface_impl]
-            impl Aarch64DarwinBinaryOpInterface for $op {
+            impl Aarch64BinaryOpInterface for $op {
                 fn binary_kind(&self) -> BinaryKind {
                     $kind
                 }
@@ -236,7 +237,7 @@ pub(super) fn abi_class(ctx: &Context, ty: TypeHandle) -> STAIRResult<AbiClass> 
         return Ok(AbiClass::Int { size, align });
     }
     if ty_ref.downcast_ref::<FP32Type>().is_some() || ty_ref.downcast_ref::<FP64Type>().is_some() {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
             "floating-point ABI lowering is not implemented".to_string()
         )));
     }
@@ -251,12 +252,13 @@ pub(super) fn abi_class(ctx: &Context, ty: TypeHandle) -> STAIRResult<AbiClass> 
         let (size, align) = abi_type_layout(ctx, ty)?;
         return Ok(AbiClass::Aggregate { size, align });
     }
-    Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+    Err(input_error_noloc!(Aarch64Err::UnsupportedType(
         format!("{:?}", &*ty_ref)
     )))
 }
 
-pub(super) fn assign_darwin_abi(
+pub(super) fn assign_abi(
+    os: TargetOs,
     name: &str,
     args: &[AbiClass],
     result: AbiClass,
@@ -276,6 +278,9 @@ pub(super) fn assign_darwin_abi(
                 }
             }
             AbiClass::Int { size, align } if *size <= 16 => {
+                if os.requires_even_gpr_pairs() {
+                    gpr += gpr % 2;
+                }
                 if gpr <= 6 {
                     locations.push(AbiLocation::GprPair(
                         Register::gpr(gpr),
@@ -283,13 +288,17 @@ pub(super) fn assign_darwin_abi(
                     ));
                     gpr += 2;
                 } else {
+                    // AAPCS64 rule C.11 (Apple ABI agrees): once an argument
+                    // is assigned to the stack, no later argument may
+                    // back-fill the remaining registers.
+                    gpr = 8;
                     stack_offset = align_to(stack_offset, *align);
                     locations.push(AbiLocation::Stack(stack_offset));
                     stack_offset += 16;
                 }
             }
             AbiClass::Int { size, .. } => {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                     format!("integer argument of {size} bytes in `{name}`")
                 )));
             }
@@ -300,7 +309,7 @@ pub(super) fn assign_darwin_abi(
                 locations.push(AbiLocation::Void);
             }
             AbiClass::Aggregate { .. } => {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                     format!("aggregate argument in `{name}`")
                 )));
             }
@@ -312,7 +321,7 @@ pub(super) fn assign_darwin_abi(
             AbiLocation::GprPair(Register::gpr(0), Register::gpr(1))
         }
         AbiClass::Int { size, .. } => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 format!("integer result of {size} bytes in `{name}`")
             )));
         }
@@ -355,7 +364,7 @@ fn abi_type_layout(ctx: &Context, ty: TypeHandle) -> STAIRResult<(u64, u64)> {
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::StructType>() {
         if struct_ty.is_opaque() {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "opaque aggregate ABI type".to_string()
             )));
         }
@@ -371,7 +380,7 @@ fn abi_type_layout(ctx: &Context, ty: TypeHandle) -> STAIRResult<(u64, u64)> {
         }
         return Ok((align_to(size, alignment), alignment));
     }
-    Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+    Err(input_error_noloc!(Aarch64Err::UnsupportedType(
         format!("{:?}", &*ty_ref)
     )))
 }
@@ -389,4 +398,40 @@ pub(super) fn collect_entry_arguments(ctx: &Context, func: &FuncOp) -> STAIRResu
         .get_entry_block(ctx)
         .expect("llvm.func definition must have a body");
     Ok(entry.deref(ctx).arguments().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AbiClass, TargetOs, assign_abi};
+    use crate::dialects::aarch64::attributes::AbiLocation;
+
+    const I64: AbiClass = AbiClass::Int { size: 8, align: 8 };
+    const I128: AbiClass = AbiClass::Int { size: 16, align: 16 };
+
+    #[test]
+    fn linux_starts_gpr_pairs_at_even_registers() {
+        let abi = assign_abi(TargetOs::Linux, "f", &[I64, I128], AbiClass::Void).unwrap();
+        // x1 is skipped: the pair must start at an even register on AAPCS64.
+        assert!(matches!(abi.args[1], AbiLocation::GprPair(a, b)
+            if a == super::Register::gpr(2) && b == super::Register::gpr(3)));
+    }
+
+    #[test]
+    fn darwin_packs_gpr_pairs_without_alignment() {
+        let abi = assign_abi(TargetOs::Darwin, "f", &[I64, I128], AbiClass::Void).unwrap();
+        assert!(matches!(abi.args[1], AbiLocation::GprPair(a, b)
+            if a == super::Register::gpr(1) && b == super::Register::gpr(2)));
+    }
+
+    #[test]
+    fn no_register_backfill_after_stack_assignment() {
+        // Seven i64s take x0..x6; the i128 pair does not fit and goes to the
+        // stack; the trailing i64 must NOT back-fill x7 (AAPCS64 rule C.11).
+        let args = [I64, I64, I64, I64, I64, I64, I64, I128, I64];
+        for os in [TargetOs::Darwin, TargetOs::Linux] {
+            let abi = assign_abi(os, "f", &args, AbiClass::Void).unwrap();
+            assert!(matches!(abi.args[7], AbiLocation::Stack(0)), "{os:?}");
+            assert!(matches!(abi.args[8], AbiLocation::Stack(16)), "{os:?}");
+        }
+    }
 }

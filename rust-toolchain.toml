@@ -1,3 +1,5 @@
 [toolchain]
-channel = "nightly"
+# Pinned to the same nightly NVlabs/cuda-oxide pins at the rev this
+# workspace depends on; crabbit's rustc_private code tracks this API.
+channel = "nightly-2026-04-03"
 components = ["rustc-dev", "llvm-tools-preview", "rust-src", "rustfmt", "clippy"]

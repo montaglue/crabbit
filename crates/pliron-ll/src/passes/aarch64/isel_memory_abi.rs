@@ -11,7 +11,7 @@ use crate::{
     result::STAIRResult,
 };
 
-use super::{error::Aarch64DarwinErr, llvm_to_aarch64_isel::*};
+use super::{error::Aarch64Err, llvm_to_aarch64_isel::*};
 use crate::r#type::TypeHandle;
 
 /// Lowers addresses, memory access, aggregate ABI values, and stack layout.
@@ -201,7 +201,7 @@ pub(super) fn emit_return_value(
         AbiLocation::IndirectResult { .. } => {
             let lowered = lookup_value(ctx, values, value)?;
             let sret_result_slot = sret_result_slot.ok_or_else(|| {
-                input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                input_error_noloc!(Aarch64Err::UnsupportedOp(
                     "missing saved sret result pointer".to_string()
                 ))
             })?;
@@ -218,7 +218,7 @@ pub(super) fn emit_return_value(
                 next_vreg,
             )
         }
-        AbiLocation::Stack(_) => Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        AbiLocation::Stack(_) => Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             "stack ABI location on a function result".to_string()
         ))),
     }
@@ -247,7 +247,7 @@ fn load_direct_aggregate_from_gprs(
     if !is_aggregate_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if *next_reg + 1 >= count {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                     "128-bit aggregate return field exceeds Darwin ABI location".to_string(),
                 )));
             }
@@ -260,7 +260,7 @@ fn load_direct_aggregate_from_gprs(
             return Ok(LoweredValue::RegPair(lo, hi));
         }
         if *next_reg >= count {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "aggregate return uses more GPR fields than Darwin ABI location".to_string()
             )));
         }
@@ -298,7 +298,7 @@ fn load_direct_aggregate_from_gprs(
 }
 
 /// Unpack an aggregate laid out across two 8-byte registers by memory layout,
-/// mirroring the Darwin AArch64 ABI for 9..=16 byte aggregates.
+/// mirroring the AArch64 ABI for 9..=16 byte aggregates.
 fn unpack_aggregate_from_reg_pair(
     ctx: &mut Context,
     entry: Ptr<crate::ir::basic_block::BasicBlock>,
@@ -311,7 +311,7 @@ fn unpack_aggregate_from_reg_pair(
     if is_stack_scalar_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if byte_offset != 0 {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                     "128-bit field at nonzero offset in register-pair aggregate".to_string()
                 )));
             }
@@ -319,7 +319,7 @@ fn unpack_aggregate_from_reg_pair(
         }
         let size = scalar_size_of(ctx, ty)?;
         if byte_offset < 8 && byte_offset + size > 8 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "scalar field straddles register boundary in aggregate".to_string()
             )));
         }
@@ -357,7 +357,7 @@ fn emit_direct_aggregate_to_gprs(
     if !is_aggregate_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if *next_reg + 1 >= 2 {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                     "direct aggregate return has more than two GPR fields".to_string(),
                 )));
             }
@@ -370,7 +370,7 @@ fn emit_direct_aggregate_to_gprs(
             return Ok(());
         }
         if *next_reg >= 2 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "direct aggregate return has more than two GPR fields".to_string()
             )));
         }
@@ -382,7 +382,7 @@ fn emit_direct_aggregate_to_gprs(
 
     if stack_size_of(ctx, ty)? <= 8 {
         if *next_reg >= 2 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "direct aggregate return has more than two GPR fields".to_string()
             )));
         }
@@ -394,7 +394,7 @@ fn emit_direct_aggregate_to_gprs(
 
     if stack_size_of(ctx, ty)? <= 16 {
         if *next_reg != 0 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "direct aggregate return has more than two GPR fields".to_string()
             )));
         }
@@ -417,7 +417,7 @@ fn emit_direct_aggregate_to_gprs(
 
     let fields = struct_fields(ctx, ty)?;
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             "direct aggregate return requires aggregate value".to_string()
         )));
     };
@@ -426,7 +426,7 @@ fn emit_direct_aggregate_to_gprs(
             .get(index)
             .and_then(|value| value.clone())
             .ok_or_else(|| {
-                input_error_noloc!(Aarch64DarwinErr::UndefinedValue(
+                input_error_noloc!(Aarch64Err::UndefinedValue(
                     "return from unset aggregate field".to_string()
                 ))
             })?;
@@ -436,7 +436,7 @@ fn emit_direct_aggregate_to_gprs(
 }
 
 /// Pack an aggregate into two 8-byte register halves by memory layout,
-/// mirroring the Darwin AArch64 ABI for 9..=16 byte aggregates. Missing
+/// mirroring the AArch64 ABI for 9..=16 byte aggregates. Missing
 /// (undef) fields leave their half untouched.
 fn pack_aggregate_to_reg_pair(
     ctx: &mut Context,
@@ -453,7 +453,7 @@ fn pack_aggregate_to_reg_pair(
     if is_stack_scalar_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if byte_offset != 0 {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                     "128-bit field at nonzero offset in register-pair aggregate".to_string()
                 )));
             }
@@ -465,7 +465,7 @@ fn pack_aggregate_to_reg_pair(
         }
         let size = scalar_size_of(ctx, ty)?;
         if byte_offset < 8 && byte_offset + size > 8 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 "scalar field straddles register boundary in aggregate".to_string()
             )));
         }
@@ -480,7 +480,7 @@ fn pack_aggregate_to_reg_pair(
     }
 
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             "packed aggregate return requires aggregate value".to_string()
         )));
     };
@@ -619,7 +619,7 @@ fn pack_aggregate_to_reg(
         LoweredValue::Aggregate(values) => values,
         LoweredValue::Undef => vec![None; layout.len()],
         _ => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                 "packed aggregate return requires aggregate value".to_string()
             )));
         }
@@ -829,7 +829,7 @@ fn store_stack_value(
         return store_stack_value(ctx, entry, offset, value, word_ty, next_vreg);
     }
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             format!(
                 "aggregate store requires aggregate value, got {value:?} for type {} size {}",
                 ty.deref(ctx).disp(ctx),
@@ -989,7 +989,7 @@ fn store_register_address_value(
         return store_register_address_value(ctx, entry, base, offset, value, word_ty, next_vreg);
     }
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             format!(
                 "aggregate store requires aggregate value, got {value:?} for type {} size {}",
                 ty.deref(ctx).disp(ctx),
@@ -1117,7 +1117,7 @@ pub(super) fn stack_size_of(
         .downcast_ref::<crate::dialects::llvm::types::StructType>()
         .is_none()
     {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
             format!("non-stack type {}", ty_ref.disp(ctx))
         )));
     }
@@ -1185,12 +1185,12 @@ pub(super) fn aggregate_field_layout(
     }
 
     let Some(struct_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::StructType>() else {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
             format!("non-aggregate layout type {}", ty_ref.disp(ctx))
         )));
     };
     if struct_ty.is_opaque() {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
             "opaque struct layout".to_string()
         )));
     }
@@ -1227,7 +1227,7 @@ pub(super) fn scalar_size_of(
     {
         return Ok(8);
     }
-    Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+    Err(input_error_noloc!(Aarch64Err::UnsupportedType(
         format!("non-scalar memory type {}", ty_ref.disp(ctx))
     )))
 }

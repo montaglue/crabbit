@@ -105,7 +105,12 @@ pub fn write_macho_object(ctx: &Context, object: ObjectOp) -> Vec<u8> {
         let symbolnum = symbol_indices
             .get(&relocation.symbol)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                panic!(
+                    "relocation against `{}` has no symbol-table entry",
+                    relocation.symbol
+                )
+            })
             & 0x00ff_ffff;
         let info = symbolnum
             | ((relocation.pcrel as u32) << 24)

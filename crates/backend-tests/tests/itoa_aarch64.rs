@@ -288,6 +288,12 @@ fn itoa_aarch64_crate_compiles_objects_and_runs_with_codegen_dylib() {
             OsString::from(format!("-Zcodegen-backend={}", backend.display())),
             OsString::from("-Coverflow-checks=off"),
         ]);
+        if !cfg!(target_os = "macos") {
+            // macOS keeps CGU objects after linking (they carry the unpacked
+            // debuginfo); other OSes delete them, so keep temps for the
+            // intermediate-object assertions.
+            build_args.push(OsString::from("-Csave-temps"));
+        }
         let compile = run_command(
             &cargo,
             build_args,

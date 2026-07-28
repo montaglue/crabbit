@@ -1219,7 +1219,7 @@ fn import_terminator<'tcx>(
             // argument untupled (matching `spread_arg` on the body).
             let untuple_last = callee_value.is_none()
                 && call_fn_def(tcx, state, body, func).is_some_and(|(def_id, _)| {
-                    tcx.fn_sig(def_id).skip_binder().skip_binder().abi()
+                    tcx.fn_sig(def_id).skip_binder().skip_binder().abi
                         == rustc_abi::ExternAbi::RustCall
                 });
 
@@ -1386,7 +1386,7 @@ fn import_terminator<'tcx>(
                 |_| rustc_middle::ty::TypingEnv::fully_monomorphized(),
             );
             if ty.needs_drop(tcx, typing_env) {
-                let drop_instance = Instance::resolve_drop_glue(tcx, ty);
+                let drop_instance = Instance::resolve_drop_in_place(tcx, ty);
                 let mut legaliser = Legaliser::default();
                 let symbol = legaliser.legalise(tcx.symbol_name(drop_instance).name);
                 import_upstream_instance(tcx, ctx, state.module_body, drop_instance)
@@ -1522,12 +1522,10 @@ fn lower_known_intrinsic_call<'tcx>(
     };
     let name = match instance.def {
         InstanceKind::Intrinsic(def_id) => tcx.item_name(def_id).to_string(),
-        _ if tcx
-            .def_path_str(instance.def.def_id())
-            .ends_with("ptr::drop_glue") =>
-        {
-            "drop_glue".to_string()
-        }
+        // Both explicit `ptr::drop_in_place` calls and drop-glue shims
+        // resolve to this instance kind (the shim was named `ptr::drop_glue`
+        // on newer nightlies; matching the kind covers both spellings).
+        InstanceKind::DropGlue(..) => "drop_glue".to_string(),
         _ => return Ok(false),
     };
 
@@ -1589,6 +1587,60 @@ fn lower_known_intrinsic_call<'tcx>(
             let value = cast_value_to_type(ctx, insert_block, value, store_ty);
             let store = stair_mir::ops::StoreOp::new(ctx, value, ptr);
             store.get_operation().insert_at_back(insert_block, ctx);
+            Ok(true)
+        }
+        // A genuinely atomic exchange, lowered to LLVM's aarch64 outline-
+        // atomic helper (`__aarch64_swpN_acq_rel`) from compiler-builtins,
+        // which dispatches to LSE `SWPAL` or an LL/SC loop at runtime. The
+        // ordering is strengthened to acquire+release regardless of the
+        // requested one, which is always sound. The helpers only exist in
+        // aarch64-linux's compiler-builtins; on other targets the intrinsic
+        // stays unhandled and fails loudly at link time (macOS std never
+        // reaches it — its `Mutex` is `os_unfair_lock`-based).
+        "atomic_xchg" => {
+            if !(tcx.sess.target.arch.to_string() == "aarch64"
+                && tcx.sess.target.os.to_string() == "linux")
+            {
+                return Ok(false);
+            }
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported atomic_xchg intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let value_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            let Some(storage_ty) = convert_storage_ty(tcx, ctx, value_ty)? else {
+                return Ok(true);
+            };
+            let size = layout_size_of_ty(tcx, value_ty)?;
+            if !matches!(size, 1 | 2 | 4 | 8) {
+                return Err(format!(
+                    "unsupported atomic_xchg operand size: {size} bytes"
+                ));
+            }
+            let helper: crate::identifier::Identifier =
+                format!("__aarch64_swp{size}_acq_rel").try_into().unwrap();
+            let ptr_ty = llvm_ptr_ty(ctx);
+            declare_external_function(
+                ctx,
+                state.module_body,
+                helper.clone(),
+                vec![storage_ty, ptr_ty],
+                Some(storage_ty),
+            );
+            let ptr = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let value = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            let value = normalize_bool_for_storage(tcx, ctx, state, insert_block, value_ty, value)?;
+            let value = cast_value_to_type(ctx, insert_block, value, storage_ty);
+            let mut call_args = Vec::new();
+            lower_abi_call_arg(ctx, insert_block, value, &mut call_args)?;
+            lower_abi_call_arg(ctx, insert_block, ptr, &mut call_args)?;
+            let call =
+                stair_mir::ops::CallOp::new_direct(ctx, helper, call_args, Some(storage_ty));
+            call.get_operation().insert_at_back(insert_block, ctx);
+            let old = call.get_result(ctx);
+            store_place(tcx, ctx, state, insert_block, body, destination, old)?;
             Ok(true)
         }
         "write_bytes" => {
@@ -1859,7 +1911,7 @@ fn lower_known_intrinsic_call<'tcx>(
                     args.len()
                 ));
             }
-            let drop_instance = Instance::resolve_drop_glue(tcx, ty);
+            let drop_instance = Instance::resolve_drop_in_place(tcx, ty);
             let mut legaliser = Legaliser::default();
             let symbol = legaliser.legalise(tcx.symbol_name(drop_instance).name);
             import_upstream_instance(tcx, ctx, state.module_body, drop_instance)
@@ -2559,7 +2611,7 @@ fn import_rvalue<'tcx>(
     rvalue: &Rvalue<'tcx>,
 ) -> Result<Value, String> {
     match rvalue {
-        Rvalue::Use(operand, _) => import_operand(tcx, ctx, state, insert_block, body, operand),
+        Rvalue::Use(operand) => import_operand(tcx, ctx, state, insert_block, body, operand),
         Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
             place_addr(tcx, ctx, state, insert_block, body, place)
         }
@@ -4433,7 +4485,7 @@ fn array_len<'tcx>(tcx: TyCtxt<'tcx>, len: rustc_middle::ty::Const<'tcx>) -> Res
     }
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
     let normalized = tcx
-        .try_normalize_erasing_regions(typing_env, rustc_middle::ty::Unnormalized::new(len))
+        .try_normalize_erasing_regions(typing_env, len)
         .map_err(|error| format!("unsupported non-constant array length: {len:?}: {error:?}"))?;
     normalized
         .try_to_target_usize(tcx)
@@ -4597,7 +4649,7 @@ fn normalize_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
         return ty;
     }
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
-    tcx.try_normalize_erasing_regions(typing_env, rustc_middle::ty::Unnormalized::new(ty))
+    tcx.try_normalize_erasing_regions(typing_env, ty)
         .unwrap_or(ty)
 }
 

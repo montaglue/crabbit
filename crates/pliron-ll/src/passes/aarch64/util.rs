@@ -63,10 +63,6 @@ pub(super) fn set_bytes_attr(op: Ptr<Operation>, ctx: &mut Context, key: &str, b
         .set(key.try_into().unwrap(), BytesAttr(bytes));
 }
 
-pub(super) fn darwin_symbol(name: &str) -> String {
-    format!("_{name}")
-}
-
 pub(super) fn identifier(value: &str) -> Identifier {
     value.try_into().unwrap()
 }

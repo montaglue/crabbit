@@ -63,8 +63,8 @@ use super::isel_memory_abi::{
 use crate::conversion::pass::{AnalysisManager, Pass, PassResult, changed};
 
 use super::{
-    attrs::ATTR_KEY_DARWIN_ABI,
-    error::Aarch64DarwinErr,
+    attrs::ATTR_KEY_AARCH64_ABI,
+    error::Aarch64Err,
     frontend::{BinaryKind, binary_kind, collect_entry_arguments, module_op, validate_linkage},
     util::module_body,
 };
@@ -183,10 +183,10 @@ fn function_abi(ctx: &Context, llvm_func: &LlvmFuncOp) -> STAIRResult<FunctionAb
         .get_operation()
         .deref(ctx)
         .attributes
-        .get::<FunctionAbiAttr>(&ATTR_KEY_DARWIN_ABI)
+        .get::<FunctionAbiAttr>(&ATTR_KEY_AARCH64_ABI)
         .map(|attr| attr.0.clone())
         .ok_or_else(|| {
-            input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+            input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                 "`{}` has no Darwin ABI locations; the abi pass must run before isel",
                 llvm_func.get_symbol_name(ctx)
             )))
@@ -296,7 +296,7 @@ fn lower_function(
                 values.insert(arg, LoweredValue::Reg(dst));
             }
             AbiLocation::IndirectResult { .. } => {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     "indirect-result ABI location on a function argument".to_string()
                 )));
             }
@@ -350,7 +350,7 @@ fn lower_function(
     );
     for block in ordered {
         let insert_block = *block_map.get(&block).ok_or_else(|| {
-            input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+            input_error_noloc!(Aarch64Err::UnsupportedOp(
                 "missing lowered AArch64 block".to_string()
             ))
         })?;
@@ -694,7 +694,7 @@ fn lower_function(
                         )?,
                         ResultLocation::IndirectX8 => {
                             let slot = indirect_result_slot.ok_or_else(|| {
-                                input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                                input_error_noloc!(Aarch64Err::UnsupportedOp(
                                     "missing indirect result slot".to_string()
                                 ))
                             })?;
@@ -920,7 +920,7 @@ fn lower_function(
                 }
                 aarch64_ops::b(ctx, false_target).insert_at_back(insert_block, ctx);
             } else {
-                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     opid.to_string()
                 )));
             }
@@ -995,7 +995,7 @@ pub(super) fn lookup_value(
     value: Value,
 ) -> STAIRResult<LoweredValue> {
     values.get(&value).cloned().ok_or_else(|| {
-        input_error_noloc!(Aarch64DarwinErr::UndefinedValue(
+        input_error_noloc!(Aarch64Err::UndefinedValue(
             value.unique_name(ctx).to_string()
         ))
     })
@@ -1013,7 +1013,7 @@ fn insert_aggregate_value(
         LoweredValue::Aggregate(fields) => fields,
         LoweredValue::Undef => Vec::new(),
         other => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                 format!("llvm.insertvalue into non-aggregate {other:?}")
             )));
         }
@@ -1035,7 +1035,7 @@ fn extract_aggregate_value(aggregate: LoweredValue, indices: &[u32]) -> STAIRRes
         LoweredValue::Aggregate(fields) => fields,
         LoweredValue::Undef => return Ok(LoweredValue::Undef),
         other => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                 format!("llvm.extractvalue from non-aggregate {other:?}")
             )));
         }
@@ -1074,7 +1074,7 @@ pub(super) fn materialize_typed(
     let value = adapt_value_to_type(ctx, value, ty)?;
     if let LoweredValue::Aggregate(fields) = &value {
         if fields.len() > 1 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(format!(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                 "cannot materialize {context}: multi-field aggregate of type {}",
                 pliron::printable::Printable::disp(&ty, ctx)
             ))));
@@ -1107,7 +1107,7 @@ pub(super) fn materialize_pair(
                 .first()
                 .and_then(|field| field.clone())
                 .ok_or_else(|| {
-                    input_error_noloc!(Aarch64DarwinErr::UndefinedValue(
+                    input_error_noloc!(Aarch64Err::UndefinedValue(
                         "missing low 128-bit lane".to_string()
                     ))
                 })?;
@@ -1115,7 +1115,7 @@ pub(super) fn materialize_pair(
                 .get(1)
                 .and_then(|field| field.clone())
                 .ok_or_else(|| {
-                    input_error_noloc!(Aarch64DarwinErr::UndefinedValue(
+                    input_error_noloc!(Aarch64Err::UndefinedValue(
                         "missing high 128-bit lane".to_string()
                     ))
                 })?;
@@ -1221,7 +1221,7 @@ pub(super) fn materialize(
         LoweredValue::Compare(compare) => lower_compare_value(ctx, entry, compare, next_vreg),
         LoweredValue::Aggregate(mut fields) if fields.len() == 1 => {
             let field = fields.pop().flatten().ok_or_else(|| {
-                input_error_noloc!(Aarch64DarwinErr::UndefinedValue(
+                input_error_noloc!(Aarch64Err::UndefinedValue(
                     "materialize from unset aggregate field".to_string()
                 ))
             })?;
@@ -1235,7 +1235,7 @@ pub(super) fn materialize(
             materialize_u64_immediate(ctx, entry, dst, 0);
             Ok(dst)
         }
-        LoweredValue::Aggregate(_) => Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        LoweredValue::Aggregate(_) => Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
             format!("cannot materialize {context}: {value:?}")
         ))),
     }
@@ -1254,7 +1254,7 @@ pub(super) fn materialize_pointer(
                 .first()
                 .and_then(|field| field.clone())
                 .ok_or_else(|| {
-                    input_error_noloc!(Aarch64DarwinErr::UndefinedValue(format!(
+                    input_error_noloc!(Aarch64Err::UndefinedValue(format!(
                         "missing data pointer for {context}"
                     )))
                 })?;
@@ -1386,7 +1386,7 @@ pub(super) fn load_sp_opcode(
         3 | 4 => aarch64_ops::LdrwSpOffsetOp::OPCODE,
         5..=8 => aarch64_ops::LdrSpOffsetOp::OPCODE,
         size => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 format!("scalar load size {size}")
             )));
         }
@@ -1403,7 +1403,7 @@ pub(super) fn store_sp_opcode(
         3 | 4 => aarch64_ops::StrwSpOffsetOp::OPCODE,
         5..=8 => aarch64_ops::StrSpOffsetOp::OPCODE,
         size => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 format!("scalar store size {size}")
             )));
         }
@@ -1420,7 +1420,7 @@ pub(super) fn load_reg_opcode(
         3 | 4 => aarch64_ops::LdrwRegOffsetOp::OPCODE,
         5..=8 => aarch64_ops::LdrRegOffsetOp::OPCODE,
         size => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 format!("scalar load size {size}")
             )));
         }
@@ -1437,7 +1437,7 @@ pub(super) fn store_reg_opcode(
         3 | 4 => aarch64_ops::StrwRegOffsetOp::OPCODE,
         5..=8 => aarch64_ops::StrRegOffsetOp::OPCODE,
         size => {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                 format!("scalar store size {size}")
             )));
         }
@@ -1558,7 +1558,7 @@ pub(super) fn struct_field_offset(
     let layout = aggregate_field_layout(ctx, ty)?;
     let index = index as usize;
     layout.get(index).copied().map(Some).ok_or_else(|| {
-        input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+        input_error_noloc!(Aarch64Err::UnsupportedOp(
             "llvm.gep struct field index is out of bounds".to_string()
         ))
     })
@@ -1579,12 +1579,12 @@ pub(super) fn struct_fields(
         return Ok(vec![array_ty.elem_type(); array_ty.size() as usize]);
     }
     let Some(struct_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::StructType>() else {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
             format!("{:?}", &*ty_ref)
         )));
     };
     if struct_ty.is_opaque() {
-        return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
             "opaque struct stack slot".to_string()
         )));
     }

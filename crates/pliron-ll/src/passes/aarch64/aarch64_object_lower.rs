@@ -3,7 +3,7 @@ use crate::ll::LinkageAttr;
 use crate::{
     context::{Context, Ptr},
     dialects::{
-        aarch64::op_interfaces::FixupKind,
+        aarch64::op_interfaces::{BinaryFixup, FixupKind},
         aarch64::ops::FuncOp,
         builtin::{op_interfaces::SymbolOpInterface},
         macho::ops::{ObjectOp, Relocation, Symbol},
@@ -16,16 +16,29 @@ use crate::{
 use super::{
     attrs::{ATTR_KEY_AARCH64_ENCODED, ATTR_KEY_AARCH64_FIXUPS, ATTR_KEY_AARCH64_MODULE_LITERALS},
     frontend::module_op,
-    util::{cast_operation, darwin_symbol, get_bytes_attr, get_fixups_attr, identifier, module_body},
+    target::TargetOs,
+    util::{cast_operation, get_bytes_attr, get_fixups_attr, identifier, module_body},
 };
 
 const MACHO_ARM64_RELOC_BRANCH26: u8 = 2;
 
-/// Translates a fully-encoded aarch64 module into a Mach-O `macho.object`
-/// operation. This is a translation out of the pass pipeline (the way
-/// `mlir-translate` sits outside `mlir-opt`), not a [pliron::pass::Pass]:
-/// it produces a new operation instead of transforming the module.
-pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<ObjectOp> {
+/// The container-format-independent pieces of an emitted aarch64 module:
+/// the text section, its symbols (already mangled for the target OS), and
+/// the branch fixups that must become relocations. Each object-container
+/// writer maps these into its own format.
+pub(super) struct ObjectParts {
+    pub text: Vec<u8>,
+    pub symbols: Vec<Symbol>,
+    pub fixups: Vec<BinaryFixup>,
+}
+
+/// Collects the encoded functions, module literals, symbols, and pending
+/// fixups of a fully-encoded aarch64 module, mangling symbol names for `os`.
+pub(super) fn collect_object_parts(
+    ctx: &Context,
+    root: Ptr<Operation>,
+    os: TargetOs,
+) -> STAIRResult<ObjectParts> {
     let module = module_op(ctx, root)?;
     let body = module_body(ctx, module);
     let mut text = Vec::new();
@@ -41,7 +54,7 @@ pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResu
         text.extend_from_slice(&encoded);
         if func.linkage(ctx) == LinkageAttr::External {
             symbols.push(Symbol {
-                name: darwin_symbol(&func.get_symbol_name(ctx).to_string()),
+                name: os.symbol_name(&func.get_symbol_name(ctx).to_string()),
                 offset,
                 external: true,
                 defined: true,
@@ -51,47 +64,56 @@ pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResu
     let literals =
         get_bytes_attr(root, ctx, ATTR_KEY_AARCH64_MODULE_LITERALS.as_str()).unwrap_or_default();
     text.extend_from_slice(&literals);
-    let relocations = external_branch_relocations(ctx, root, &mut symbols);
-    Ok(ObjectOp::new_with_relocations(
-        ctx,
-        identifier("aarch64_darwin_object"),
+    let mut fixups =
+        get_fixups_attr(root, ctx, ATTR_KEY_AARCH64_FIXUPS.as_str()).unwrap_or_default();
+    for fixup in &mut fixups {
+        fixup.symbol = os.symbol_name(&fixup.symbol);
+        if !symbols.iter().any(|existing| existing.name == fixup.symbol) {
+            symbols.push(Symbol {
+                name: fixup.symbol.clone(),
+                offset: 0,
+                external: true,
+                defined: false,
+            });
+        }
+    }
+    Ok(ObjectParts {
         text,
         symbols,
-        relocations,
-    ))
+        fixups,
+    })
 }
 
-fn external_branch_relocations(
-    ctx: &Context,
-    root: Ptr<Operation>,
-    symbols: &mut Vec<Symbol>,
-) -> Vec<Relocation> {
-    let fixups = get_fixups_attr(root, ctx, ATTR_KEY_AARCH64_FIXUPS.as_str()).unwrap_or_default();
-    fixups
-        .into_iter()
+/// Translates a fully-encoded aarch64 module into a Mach-O `macho.object`
+/// operation. This is a translation out of the pass pipeline (the way
+/// `mlir-translate` sits outside `mlir-opt`), not a [pliron::pass::Pass]:
+/// it produces a new operation instead of transforming the module.
+pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<ObjectOp> {
+    let parts = collect_object_parts(ctx, root, TargetOs::Darwin)?;
+    let relocations = parts
+        .fixups
+        .iter()
         .map(|fixup| {
-            let symbol = darwin_symbol(&fixup.symbol);
-            if !symbols.iter().any(|existing| existing.name == symbol) {
-                symbols.push(Symbol {
-                    name: symbol.clone(),
-                    offset: 0,
-                    external: true,
-                    defined: false,
-                });
-            }
             let kind = match fixup.kind {
                 FixupKind::Call26 => MACHO_ARM64_RELOC_BRANCH26,
             };
             Relocation {
                 offset: fixup.offset,
-                symbol,
+                symbol: fixup.symbol.clone(),
                 pcrel: true,
                 length: 2,
                 extern_: true,
                 kind,
             }
         })
-        .collect()
+        .collect();
+    Ok(ObjectOp::new_with_relocations(
+        ctx,
+        identifier("aarch64_object"),
+        parts.text,
+        parts.symbols,
+        relocations,
+    ))
 }
 
 #[cfg(test)]

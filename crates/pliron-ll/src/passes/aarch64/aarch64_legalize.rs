@@ -16,7 +16,7 @@ use crate::{
     result::STAIRResult,
 };
 
-use super::{error::Aarch64DarwinErr, frontend::module_op};
+use super::{error::Aarch64Err, frontend::module_op};
 
 pub struct Aarch64LegalizePass;
 
@@ -37,7 +37,7 @@ impl Pass for Aarch64LegalizePass {
                                 && aarch64_ops::imm(ctx, op)
                                     .is_some_and(|imm| imm > u16::MAX as u64)
                             {
-                                return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedType(
+                                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
                                     "materializing immediates wider than 16 bits is not implemented yet"
                                         .into()
                                 )));
@@ -70,7 +70,7 @@ fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
             Register::Physical(register) => register.class(),
         };
         if class != RegisterClass::Gpr64 {
-            return Err(input_error_noloc!(Aarch64DarwinErr::UnsupportedOp(
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                 format!("{mnemonic} requires a GPR operand, got `{register}`")
             )));
         }

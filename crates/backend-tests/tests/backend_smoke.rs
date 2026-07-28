@@ -155,6 +155,12 @@ fn compile_fixture(
         .arg(format!("-Zcodegen-backend={}", backend.display()))
         .arg("-Coverflow-checks=off")
         .env("CARGO_TARGET_DIR", target_dir);
+    if !cfg!(target_os = "macos") {
+        // macOS keeps CGU objects after linking (they carry the unpacked
+        // debuginfo); other OSes delete them, so keep temps for the
+        // intermediate-object assertions.
+        command.arg("-Csave-temps");
+    }
 
     command
         .status()
