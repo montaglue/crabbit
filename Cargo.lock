@@ -307,8 +307,10 @@ version = "0.1.0"
 dependencies = [
  "awint",
  "combine",
+ "dialect-mir",
  "expect-test",
  "log",
+ "mir-lower",
  "pliron",
  "pliron-inspect-driver",
  "pliron-ll",
@@ -377,6 +379,33 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.2",
+]
+
+[[package]]
+name = "dialect-mir"
+version = "0.2.1"
+source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
+dependencies = [
+ "combine",
+ "linkme",
+ "once_cell",
+ "pliron",
+ "pliron-derive",
+ "thiserror",
+]
+
+[[package]]
+name = "dialect-nvvm"
+version = "0.2.1"
+source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
+dependencies = [
+ "combine",
+ "dialect-mir",
+ "dyn-clone",
+ "linkme",
+ "pliron",
+ "pliron-derive",
+ "thiserror",
 ]
 
 [[package]]
@@ -480,8 +509,6 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -490,6 +517,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -579,6 +611,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "llvm-export"
+version = "0.2.1"
+source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
+dependencies = [
+ "bitflags",
+ "combine",
+ "dyn-clone",
+ "linkme",
+ "log",
+ "pliron",
+ "pliron-derive",
+ "pliron-llvm",
+ "reserved-oxide-symbols",
+ "rustc-hash",
+ "thiserror",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -598,6 +648,22 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mir-lower"
+version = "0.2.1"
+source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
+dependencies = [
+ "anyhow",
+ "dialect-mir",
+ "dialect-nvvm",
+ "llvm-export",
+ "pliron",
+ "pliron-derive",
+ "reserved-oxide-symbols",
+ "rustc-hash",
+ "thiserror",
+]
 
 [[package]]
 name = "once_cell"
@@ -632,13 +698,13 @@ dependencies = [
 [[package]]
 name = "pliron"
 version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron.git?rev=4750abfdc8823b30baffaf505ae7201a58522d34#4750abfdc8823b30baffaf505ae7201a58522d34"
+source = "git+https://github.com/pliron-org/pliron.git?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
 dependencies = [
  "awint",
  "combine",
  "downcast-rs",
  "dyn-clone",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
  "hi_sparse_bitset",
  "inventory",
  "linkme",
@@ -656,14 +722,14 @@ dependencies = [
 [[package]]
 name = "pliron-derive"
 version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron.git?rev=4750abfdc8823b30baffaf505ae7201a58522d34#4750abfdc8823b30baffaf505ae7201a58522d34"
+source = "git+https://github.com/pliron-org/pliron.git?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
 dependencies = [
  "combine",
  "convert_case",
  "proc-macro2",
  "quote",
  "rustc-hash",
- "syn 3.0.2",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -707,11 +773,12 @@ dependencies = [
 [[package]]
 name = "pliron-llvm"
 version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron.git?rev=4750abfdc8823b30baffaf505ae7201a58522d34#4750abfdc8823b30baffaf505ae7201a58522d34"
+source = "git+https://github.com/pliron-org/pliron.git?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
 dependencies = [
  "bitflags",
  "log",
  "pliron",
+ "rustc-hash",
  "thiserror",
 ]
 
@@ -773,6 +840,11 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "reserved-oxide-symbols"
+version = "0.2.1"
+source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
 
 [[package]]
 name = "rustc-hash"

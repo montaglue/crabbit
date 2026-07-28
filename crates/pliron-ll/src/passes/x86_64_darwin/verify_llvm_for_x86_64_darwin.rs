@@ -28,7 +28,7 @@ impl Pass for VerifyLlvmForX86_64DarwinPass {
     }
 
     fn run(
-        &mut self,
+        &self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,

@@ -13,7 +13,7 @@ use crate::{
         attributes::{IntegerAttr, StringAttr},
         op_interfaces::{
             IsolatedFromAboveInterface, OneRegionInterface,
-            SymbolOpInterface, NOpdsInterface, NResultsInterface,
+            SymbolOpInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
         },
         types::{IntegerType, Signedness},
     },
@@ -62,6 +62,7 @@ dict_key!(ATTR_KEY_X86_64_STACK_SIZE, "x86_64_stack_size");
 
 #[def_op("x86_64.func")]
 #[derive_op_interface_impl(
+    NRegionsInterface<1>,
     OneRegionInterface,
     SymbolOpInterface,
     IsolatedFromAboveInterface,

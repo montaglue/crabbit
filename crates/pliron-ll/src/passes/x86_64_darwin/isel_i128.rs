@@ -203,11 +203,13 @@ pub(super) fn lower_compare_value(
     if is_128_bit_integer(ctx, compare.lhs_ty) {
         return lower_compare_128(ctx, entry, compare, next_vreg);
     }
+    let lhs_ty = super::llvm_to_x86_64_isel::compare_operand_ty(ctx, compare.predicate.clone(), compare.lhs_ty);
+    let rhs_ty = super::llvm_to_x86_64_isel::compare_operand_ty(ctx, compare.predicate.clone(), compare.rhs_ty);
     let lhs = materialize_typed(
         ctx,
         entry,
         *compare.lhs,
-        compare.lhs_ty,
+        lhs_ty,
         next_vreg,
         "icmp lhs",
     )?;
@@ -215,7 +217,7 @@ pub(super) fn lower_compare_value(
         ctx,
         entry,
         *compare.rhs,
-        compare.rhs_ty,
+        rhs_ty,
         next_vreg,
         "icmp rhs",
     )?;

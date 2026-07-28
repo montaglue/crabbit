@@ -27,7 +27,7 @@ impl Pass for LlvmAarch64DarwinAbiPass {
     }
 
     fn run(
-        &mut self,
+        &self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,

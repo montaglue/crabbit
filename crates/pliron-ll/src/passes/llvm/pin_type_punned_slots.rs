@@ -9,6 +9,7 @@
 //! semantically a no-op, but an opaque (non-promotable) use of the slot that
 //! keeps mem2reg away from it.
 
+use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, OneResultInterface as _};
 use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 
@@ -34,7 +35,7 @@ impl Pass for LLVMPinTypePunnedSlotsPass {
     }
 
     fn run(
-        &mut self,
+        &self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,
@@ -125,11 +126,12 @@ mod tests {
                 self,
                 attributes::IntegerAttr,
                 op_interfaces::OneRegionInterface,
+                ops::ConstantOp,
                 types::{IntegerType, Signedness},
             },
             llvm::{
                 attributes::LinkageAttr,
-                ops::{AllocaOp, ConstantOp, FuncOp, LoadOp, ReturnOp},
+                ops::{AllocaOp, FuncOp, LoadOp, ReturnOp},
                 types::{FuncType, StructType},
             },
         },

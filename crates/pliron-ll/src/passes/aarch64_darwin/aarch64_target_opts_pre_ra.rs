@@ -11,7 +11,7 @@ impl Pass for Aarch64TargetOptsPreRaPass {
         "aarch64-target-opts-pre-ra"
     }
 
-    fn run(&mut self, _root: Ptr<Operation>, _ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, _root: Ptr<Operation>, _ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         Ok(changed())
     }
 }

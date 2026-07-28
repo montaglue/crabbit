@@ -2,6 +2,7 @@
 //! value forwarding, block-local store-to-load forwarding, dead store
 //! elimination and dead code elimination. All rewrites are CFG-neutral.
 
+use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
 use pliron_llvm::op_interfaces::CastOpInterface as _;
 use crate::ll::ops::CStrOp;
@@ -21,8 +22,7 @@ use crate::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, ConstantOp,
-                ExtractValueOp, FCmpOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
+                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, FCmpOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
                 LShrOp, LoadOp, MulOp, OrOp, PtrToIntOp, SDivOp, SExtOp, SRemOp, ShlOp,
                 PoisonOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
             },
@@ -54,7 +54,7 @@ impl Pass for LLVMSimplifyPass {
         "llvm-simplify"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let pure_ops = pure_op_ids();
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {

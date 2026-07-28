@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// Pointer/reference-like MIR place type.
-#[def_type("mir.ptr")]
+#[def_type("cmir.ptr")]
 #[derive(Hash, PartialEq, Eq, Debug, Clone)]
 pub struct PtrType {
     elem: TypeHandle,

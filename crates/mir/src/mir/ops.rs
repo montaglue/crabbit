@@ -48,23 +48,23 @@ use crate::{
     printable::{self, Printable},
 };
 
-dict_key!(ATTR_KEY_MIR_ALLOCA_ELEM_TYPE, "mir_alloca_elem_type");
-dict_key!(ATTR_KEY_MIR_CONSTANT_VALUE, "mir_constant_value");
-dict_key!(ATTR_KEY_MIR_CALLEE, "mir_callee");
-dict_key!(ATTR_KEY_MIR_CSTR_VALUE, "mir_cstr_value");
-dict_key!(ATTR_KEY_MIR_SYMBOL, "mir_symbol");
+dict_key!(ATTR_KEY_MIR_ALLOCA_ELEM_TYPE, "cmir_alloca_elem_type");
+dict_key!(ATTR_KEY_MIR_CONSTANT_VALUE, "cmir_constant_value");
+dict_key!(ATTR_KEY_MIR_CALLEE, "cmir_callee");
+dict_key!(ATTR_KEY_MIR_CSTR_VALUE, "cmir_cstr_value");
+dict_key!(ATTR_KEY_MIR_SYMBOL, "cmir_symbol");
 dict_key!(
     ATTR_KEY_MIR_EXTRACTVALUE_INDICES,
-    "mir_extractvalue_indices"
+    "cmir_extractvalue_indices"
 );
-dict_key!(ATTR_KEY_MIR_INSERTVALUE_INDICES, "mir_insertvalue_indices");
+dict_key!(ATTR_KEY_MIR_INSERTVALUE_INDICES, "cmir_insertvalue_indices");
 
 // ============================================================================
 // Function operation
 // ============================================================================
 
 /// Rust MIR function.
-#[def_op("mir.func")]
+#[def_op("cmir.func")]
 #[derive_op_interface_impl(
     OneRegionInterface,
     FunctionLikeInterface,
@@ -73,7 +73,7 @@ dict_key!(ATTR_KEY_MIR_INSERTVALUE_INDICES, "mir_insertvalue_indices");
     NOpdsInterface<0>,
     NResultsInterface<0>
 )]
-#[derive_attr_get_set(mir_func_type : TypeAttr)]
+#[derive_attr_get_set(cmir_func_type : TypeAttr)]
 pub struct FuncOp;
 
 impl FuncOp {
@@ -86,12 +86,12 @@ impl FuncOp {
 
         let func = FuncOp { op };
         func.set_symbol_name(ctx, name);
-        func.set_attr_mir_func_type(ctx, TypeAttr::new(ty.into()));
+        func.set_attr_cmir_func_type(ctx, TypeAttr::new(ty.into()));
         func
     }
 
     pub fn get_func_type(&self, ctx: &Context) -> TypeHandle {
-        self.get_attr_mir_func_type(ctx).unwrap().get_type(ctx)
+        self.get_attr_cmir_func_type(ctx).unwrap().get_type(ctx)
     }
 
     pub fn get_entry_block(&self, ctx: &Context) -> Ptr<BasicBlock> {
@@ -159,7 +159,7 @@ impl Parsable for FuncOp {
                 let ctx = &mut *state_stream.state.ctx;
                 let func = FuncOp { op };
                 func.set_symbol_name(ctx, name);
-                func.set_attr_mir_func_type(ctx, TypeAttr::new(func_type));
+                func.set_attr_cmir_func_type(ctx, TypeAttr::new(func_type));
                 OpObj::new(func)
             })
             .into()
@@ -173,7 +173,7 @@ impl_verify_succ!(FuncOp);
 // ============================================================================
 
 /// Integer constant.
-#[def_op("mir.constant")]
+#[def_op("cmir.constant")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct ConstantOp;
 
@@ -181,7 +181,7 @@ impl ConstantOp {
     pub fn new(ctx: &mut Context, attr: AttrObj) -> Self {
         let ty =
             attr_cast::<dyn crate::dialects::builtin::attr_interfaces::TypedAttrInterface>(&*attr)
-                .expect("mir.constant requires a typed attribute")
+                .expect("cmir.constant requires a typed attribute")
                 .get_type(ctx);
         let op = Operation::new(ctx, Self::get_concrete_op_info(), vec![ty], vec![], vec![], 0);
         let constant = ConstantOp { op };
@@ -258,7 +258,7 @@ impl Parsable for ConstantOp {
 impl_verify_succ!(ConstantOp);
 
 /// Pointer to a null-terminated string literal.
-#[def_op("mir.cstr")]
+#[def_op("cmir.cstr")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct CStrOp;
 
@@ -337,7 +337,7 @@ impl Parsable for CStrOp {
 impl_verify_succ!(CStrOp);
 
 /// Address of a symbol visible to later object emission.
-#[def_op("mir.addressof")]
+#[def_op("cmir.addressof")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct AddressOfOp;
 
@@ -417,7 +417,7 @@ impl Parsable for AddressOfOp {
 impl_verify_succ!(AddressOfOp);
 
 /// Undefined aggregate or scalar value used as a construction seed.
-#[def_op("mir.undef")]
+#[def_op("cmir.undef")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct UndefOp;
 
@@ -474,7 +474,7 @@ impl Parsable for UndefOp {
 impl_verify_succ!(UndefOp);
 
 /// Stack slot for a MIR local/place.
-#[def_op("mir.alloca")]
+#[def_op("cmir.alloca")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct AllocaOp;
 
@@ -546,7 +546,7 @@ impl Parsable for AllocaOp {
 impl_verify_succ!(AllocaOp);
 
 /// Load from a MIR pointer/place.
-#[def_op("mir.load")]
+#[def_op("cmir.load")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct LoadOp;
 
@@ -611,7 +611,7 @@ impl Parsable for LoadOp {
 impl_verify_succ!(LoadOp);
 
 /// Store to a MIR pointer/place.
-#[def_op("mir.store")]
+#[def_op("cmir.store")]
 #[derive_op_interface_impl(NResultsInterface<0>)]
 pub struct StoreOp;
 
@@ -684,7 +684,7 @@ impl Parsable for StoreOp {
 impl_verify_succ!(StoreOp);
 
 /// Compute a pointer advanced by a byte offset.
-#[def_op("mir.ptr_offset")]
+#[def_op("cmir.ptr_offset")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct PtrOffsetOp;
 
@@ -920,26 +920,26 @@ macro_rules! def_mir_cmp_op {
     };
 }
 
-def_mir_binary_op!(AddOp, "mir.add");
-def_mir_binary_op!(SubOp, "mir.sub");
-def_mir_binary_op!(MulOp, "mir.mul");
-def_mir_binary_op!(ShlOp, "mir.shl");
-def_mir_binary_op!(ShrOp, "mir.shr");
-def_mir_binary_op!(DivOp, "mir.div");
-def_mir_binary_op!(RemOp, "mir.rem");
-def_mir_binary_op!(BitAndOp, "mir.bitand");
-def_mir_binary_op!(BitOrOp, "mir.bitor");
-def_mir_binary_op!(BitXorOp, "mir.bitxor");
+def_mir_binary_op!(AddOp, "cmir.add");
+def_mir_binary_op!(SubOp, "cmir.sub");
+def_mir_binary_op!(MulOp, "cmir.mul");
+def_mir_binary_op!(ShlOp, "cmir.shl");
+def_mir_binary_op!(ShrOp, "cmir.shr");
+def_mir_binary_op!(DivOp, "cmir.div");
+def_mir_binary_op!(RemOp, "cmir.rem");
+def_mir_binary_op!(BitAndOp, "cmir.bitand");
+def_mir_binary_op!(BitOrOp, "cmir.bitor");
+def_mir_binary_op!(BitXorOp, "cmir.bitxor");
 
-def_mir_cmp_op!(EqOp, "mir.eq");
-def_mir_cmp_op!(NeOp, "mir.ne");
-def_mir_cmp_op!(LtOp, "mir.lt");
-def_mir_cmp_op!(LeOp, "mir.le");
-def_mir_cmp_op!(GtOp, "mir.gt");
-def_mir_cmp_op!(GeOp, "mir.ge");
+def_mir_cmp_op!(EqOp, "cmir.eq");
+def_mir_cmp_op!(NeOp, "cmir.ne");
+def_mir_cmp_op!(LtOp, "cmir.lt");
+def_mir_cmp_op!(LeOp, "cmir.le");
+def_mir_cmp_op!(GtOp, "cmir.gt");
+def_mir_cmp_op!(GeOp, "cmir.ge");
 
 /// Cast between scalar MIR types.
-#[def_op("mir.cast")]
+#[def_op("cmir.cast")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct CastOp;
 
@@ -1009,7 +1009,7 @@ impl Parsable for CastOp {
 impl_verify_succ!(CastOp);
 
 /// Extract a field from an aggregate MIR value.
-#[def_op("mir.extractvalue")]
+#[def_op("cmir.extractvalue")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct ExtractValueOp;
 
@@ -1096,7 +1096,7 @@ impl Parsable for ExtractValueOp {
 impl_verify_succ!(ExtractValueOp);
 
 /// Insert a value into an aggregate MIR value.
-#[def_op("mir.insertvalue")]
+#[def_op("cmir.insertvalue")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct InsertValueOp;
 
@@ -1191,7 +1191,7 @@ impl_verify_succ!(InsertValueOp);
 // ============================================================================
 
 /// MIR return.
-#[def_op("mir.return")]
+#[def_op("cmir.return")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>)]
 pub struct ReturnOp;
 
@@ -1254,7 +1254,7 @@ impl Parsable for ReturnOp {
 impl_verify_succ!(ReturnOp);
 
 /// MIR unconditional branch.
-#[def_op("mir.goto")]
+#[def_op("cmir.goto")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>)]
 pub struct GotoOp;
 
@@ -1340,7 +1340,7 @@ impl Parsable for GotoOp {
 impl_verify_succ!(GotoOp);
 
 /// MIR conditional branch.
-#[def_op("mir.cond_br")]
+#[def_op("cmir.cond_br")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>, OperandSegmentInterface)]
 pub struct CondBrOp;
 
@@ -1474,7 +1474,7 @@ impl Parsable for CondBrOp {
 impl_verify_succ!(CondBrOp);
 
 /// MIR unreachable terminator.
-#[def_op("mir.unreachable")]
+#[def_op("cmir.unreachable")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>, NOpdsInterface<0>)]
 pub struct UnreachableOp;
 
@@ -1525,7 +1525,7 @@ impl_verify_succ!(UnreachableOp);
 // ============================================================================
 
 /// Direct MIR call.
-#[def_op("mir.call")]
+#[def_op("cmir.call")]
 pub struct CallOp;
 
 impl CallOp {
@@ -1719,7 +1719,7 @@ mod tests {
 
         let input = "builtin.module @m {
   ^entry():
-    op0 = mir.constant builtin.integer <35: ui64>
+    op0 = cmir.constant builtin.integer <35: ui64>
 }";
         let state_stream = state_stream_from_iterator(
             input.chars(),
@@ -1737,7 +1737,7 @@ mod tests {
             parsed
                 .disp(&ctx)
                 .to_string()
-                .contains("mir.constant builtin.integer <35: ui64>")
+                .contains("cmir.constant builtin.integer <35: ui64>")
         );
     }
 }

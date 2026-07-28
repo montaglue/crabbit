@@ -6,6 +6,7 @@
 #![cfg(target_os = "macos")]
 
 #[allow(unused_imports)]
+use pliron::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 #[allow(unused_imports)]
 use pliron_llvm::op_interfaces::{BinArithOp as _, IntBinArithOpWithOverflowFlag as _};
@@ -25,7 +26,7 @@ use pliron_ll::{
         llvm::{
             attributes::{ICmpPredicateAttr, LinkageAttr},
             ops::{
-                AddOp, BrOp, CallOp, CondBrOp, ConstantOp, FuncOp, ICmpOp, MulOp, ReturnOp, SubOp,
+                AddOp, BrOp, CallOp, CondBrOp, FuncOp, ICmpOp, MulOp, ReturnOp, SubOp,
             },
             types::FuncType,
         },

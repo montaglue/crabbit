@@ -11,7 +11,7 @@ impl Pass for X86_64BranchRelaxPass {
         "x86-64-branch-relax"
     }
 
-    fn run(&mut self, _root: Ptr<Operation>, _ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, _root: Ptr<Operation>, _ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         Ok(changed())
     }
 }

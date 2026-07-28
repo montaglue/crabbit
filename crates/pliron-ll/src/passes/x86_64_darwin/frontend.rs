@@ -1,3 +1,4 @@
+use crate::dialects::builtin::ops::ConstantOp;
 use pliron::derive::op_interface;
 use pliron::derive::op_interface_impl;
 
@@ -18,11 +19,11 @@ use crate::{
             attributes::LinkageAttr as LlvmLinkageAttr,
             ops::{
                 AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
-                ConstantOp, ExtractValueOp, FuncOp, GetElementPtrOp, ICmpOp, InsertValueOp,
+                ExtractValueOp, FuncOp, GetElementPtrOp, ICmpOp, InsertValueOp,
                 IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp,
                 SRemOp,
                 ShlOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, UnreachableOp, XorOp,
-                ZExtOp,
+                SExtOp, ZExtOp,
             },
             types::{FuncType, PointerType, VoidType},
         },
@@ -191,6 +192,7 @@ impl_valid_op!(
     PtrToIntOp,
     BitcastOp,
     ZExtOp,
+    SExtOp,
     TruncOp,
     GetElementPtrOp,
     ICmpOp,

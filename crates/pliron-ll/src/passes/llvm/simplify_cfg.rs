@@ -3,6 +3,7 @@
 //! straight-line block pairs and bypass empty forwarding blocks.
 //!
 
+use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -35,7 +36,7 @@ impl Pass for LLVMSimplifyCfgPass {
         "llvm-simplify-cfg"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;
@@ -405,7 +406,7 @@ mod tests {
             },
             llvm::{
                 attributes::LinkageAttr,
-                ops::{ConstantOp, ReturnOp},
+                ops::{ReturnOp},
                 types::FuncType,
             },
         },

@@ -4,6 +4,7 @@
 //! internal functions that are no longer referenced anywhere in the module
 //! are removed.
 
+use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{
     AtMostOneRegionInterface as _, CallOpCallable, CallOpInterface as _,
 };
@@ -62,7 +63,7 @@ impl Pass for LLVMInlinePass {
         "llvm-inline"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let funcs = collect_functions(ctx, root);
         let by_symbol: FxHashMap<Identifier, FuncOp> = funcs
             .iter()
@@ -481,7 +482,7 @@ mod tests {
             },
             llvm::{
                 self,
-                ops::{AddOp, ConstantOp, ReturnOp},
+                ops::{AddOp, ReturnOp},
                 types::FuncType,
             },
         },

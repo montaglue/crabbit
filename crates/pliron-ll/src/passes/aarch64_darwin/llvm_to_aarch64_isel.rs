@@ -5,6 +5,7 @@
 //! labels, and machine CFG edge blocks. Independent domains live in sibling
 //! modules; this file coordinates function and instruction lowering.
 
+use crate::dialects::builtin::ops::ConstantOp;
 use std::collections::HashMap;
 
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _, OneOpdInterface as _};
@@ -32,11 +33,10 @@ use crate::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, ConstantOp,
-                ExtractValueOp, FuncOp as LlvmFuncOp, GetElementPtrOp, GlobalOp as LlvmGlobalOp,
+                AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, ExtractValueOp, FuncOp as LlvmFuncOp, GetElementPtrOp, GlobalOp as LlvmGlobalOp,
                 ICmpOp, InsertValueOp, IntToPtrOp, LoadOp, PoisonOp, PtrToIntOp, ReturnOp, StoreOp,
                 TruncOp,
-                UndefOp, UnreachableOp, ZExtOp,
+                SExtOp, UndefOp, UnreachableOp, ZExtOp,
             },
         },
     },
@@ -79,7 +79,7 @@ impl Pass for LlvmToAarch64IselPass {
     }
 
     fn run(
-        &mut self,
+        &self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,
@@ -448,6 +448,74 @@ fn lower_function(
             } else if let Some(cast) = op_obj.downcast_ref::<ZExtOp>() {
                 let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
                 values.insert(cast.get_result(ctx), value);
+            } else if let Some(cast) = op_obj.downcast_ref::<SExtOp>() {
+                // Registers hold values zero-extended to 64 bits, so extend
+                // the source's W low bits with (x ^ 2^(W-1)) - 2^(W-1) and
+                // re-mask to the destination width to restore the invariant.
+                let result = cast.get_result(ctx);
+                let operand = cast.get_operand(ctx);
+                let value = lookup_value(ctx, &values, operand)?;
+                match integer_trunc_mask(ctx, operand.get_type(ctx)) {
+                    None => {
+                        // 64-bit source: the register already carries the
+                        // full sign pattern.
+                        values.insert(result, value);
+                    }
+                    Some(src_mask) => {
+                        let sign_bit = (src_mask >> 1) + 1;
+                        let dst_mask = integer_trunc_mask(ctx, result.get_type(ctx));
+                        if let LoweredValue::Imm(imm) = value {
+                            let extended =
+                                ((imm as u64) ^ sign_bit).wrapping_sub(sign_bit);
+                            let masked = dst_mask.map_or(extended, |mask| extended & mask);
+                            values.insert(result, LoweredValue::Imm(masked as u128));
+                        } else {
+                            let src = materialize(
+                                ctx,
+                                insert_block,
+                                value,
+                                &mut next_vreg,
+                                "sext input",
+                            )?;
+                            let sign_reg = fresh_vreg(&mut next_vreg);
+                            materialize_u64_immediate(ctx, insert_block, sign_reg.clone(), sign_bit);
+                            let flipped = fresh_vreg(&mut next_vreg);
+                            aarch64_ops::binary(
+                                ctx,
+                                aarch64_ops::XorOp::OPCODE,
+                                flipped.clone(),
+                                src,
+                                sign_reg.clone(),
+                            )
+                            .insert_at_back(insert_block, ctx);
+                            let extended = fresh_vreg(&mut next_vreg);
+                            aarch64_ops::binary(
+                                ctx,
+                                aarch64_ops::SubOp::OPCODE,
+                                extended.clone(),
+                                flipped,
+                                sign_reg,
+                            )
+                            .insert_at_back(insert_block, ctx);
+                            if let Some(mask) = dst_mask {
+                                let mask_reg = fresh_vreg(&mut next_vreg);
+                                materialize_u64_immediate(ctx, insert_block, mask_reg.clone(), mask);
+                                let dst = fresh_vreg(&mut next_vreg);
+                                aarch64_ops::binary(
+                                    ctx,
+                                    aarch64_ops::AndOp::OPCODE,
+                                    dst.clone(),
+                                    extended,
+                                    mask_reg,
+                                )
+                                .insert_at_back(insert_block, ctx);
+                                values.insert(result, LoweredValue::Reg(dst));
+                            } else {
+                                values.insert(result, LoweredValue::Reg(extended));
+                            }
+                        }
+                    }
+                }
             } else if let Some(cast) = op_obj.downcast_ref::<TruncOp>() {
                 let result = cast.get_result(ctx);
                 let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
@@ -810,11 +878,15 @@ fn lower_function(
                         aarch64_ops::b(ctx, false_target).insert_at_back(insert_block, ctx);
                         continue;
                     }
+                    let lhs_ty =
+                        compare_operand_ty(ctx, compare.predicate.clone(), compare.lhs_ty);
+                    let rhs_ty =
+                        compare_operand_ty(ctx, compare.predicate.clone(), compare.rhs_ty);
                     let lhs = materialize_typed(
                         ctx,
                         insert_block,
                         *compare.lhs,
-                        compare.lhs_ty,
+                        lhs_ty,
                         &mut next_vreg,
                         "icmp lhs",
                     )?;
@@ -822,7 +894,7 @@ fn lower_function(
                         ctx,
                         insert_block,
                         *compare.rhs,
-                        compare.rhs_ty,
+                        rhs_ty,
                         &mut next_vreg,
                         "icmp rhs",
                     )?;
@@ -1635,6 +1707,40 @@ pub(super) fn opcode(kind: BinaryKind) -> Aarch64Opcode {
 }
 
 /// The AArch64 condition code that tests `predicate` after a `cmp`.
+/// The register type to materialize a compare operand as. Signed predicates
+/// must see sign-extended operands, but mir-lower emits signless integer
+/// types (LLVM convention) where the *predicate*, not the type, carries the
+/// comparison's signedness. Re-type sub-64-bit operands as signed so
+/// [normalize_integer_reg] sign-extends them.
+pub(super) fn compare_operand_ty(
+    ctx: &mut Context,
+    predicate: ICmpPredicateAttr,
+    ty: TypeHandle,
+) -> TypeHandle {
+    if !matches!(
+        predicate,
+        ICmpPredicateAttr::SLT
+            | ICmpPredicateAttr::SLE
+            | ICmpPredicateAttr::SGT
+            | ICmpPredicateAttr::SGE
+    ) {
+        return ty;
+    }
+    let width = {
+        let ty_ref = ty.deref(ctx);
+        match ty_ref.downcast_ref::<crate::dialects::builtin::types::IntegerType>() {
+            Some(int_ty) if int_ty.width() < 64 => int_ty.width(),
+            _ => return ty,
+        }
+    };
+    crate::dialects::builtin::types::IntegerType::get(
+        ctx,
+        width,
+        crate::dialects::builtin::types::Signedness::Signed,
+    )
+    .into()
+}
+
 pub(super) fn condition_code(predicate: ICmpPredicateAttr) -> ConditionCode {
     match predicate {
         ICmpPredicateAttr::EQ => ConditionCode::Eq,

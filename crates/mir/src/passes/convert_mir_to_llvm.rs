@@ -51,7 +51,7 @@ use crate::mir::{ops as mir_ops, types::PtrType as MirPtrType};
 dict_key!(
     /// Machine-level linkage recorded on a `mir.func` by the importer,
     /// carried onto the `llvm.func` during conversion.
-    ATTR_KEY_MIR_FUNC_LINKAGE, "mir_func_linkage"
+    ATTR_KEY_MIR_FUNC_LINKAGE, "cmir_func_linkage"
 );
 
 // ============================================================================
@@ -136,7 +136,7 @@ fn convert_function_type(ctx: &mut Context, ty: TypeHandle) -> TypedHandle<FuncT
     let ty_ref = ty.deref(ctx);
     let func_ty = ty_ref
         .downcast_ref::<FunctionType>()
-        .expect("mir.func must carry a builtin.function type");
+        .expect("cmir.func must carry a builtin.function type");
     let arg_types = func_ty.arg_types();
     let results = func_ty.res_types();
     drop(ty_ref);
@@ -838,7 +838,7 @@ mod tests {
         assert!(text.contains("ExternalLinkage"), "{text}");
         assert!(text.contains("llvm.add"));
         assert!(text.contains("llvm.return"));
-        assert!(!text.contains("mir."));
+        assert!(!text.contains("cmir."));
     }
 
     #[test]
@@ -873,7 +873,7 @@ mod tests {
         assert!(text.contains("llvm.alloca"));
         assert!(text.contains("llvm.store"));
         assert!(text.contains("llvm.load"));
-        assert!(!text.contains("mir."));
+        assert!(!text.contains("cmir."));
     }
 
     #[test]
@@ -920,8 +920,8 @@ mod tests {
         // The zext/trunc pair covers both widening and narrowing; exact
         // printed signatures are pliron's cast format and asserted above by
         // op counts.
-        assert!(!text.contains("mir.cast"));
-        assert!(!text.contains("mir.ptr"));
+        assert!(!text.contains("cmir.cast"));
+        assert!(!text.contains("cmir.ptr"));
     }
 
     #[test]
@@ -954,8 +954,8 @@ mod tests {
         let text = format!("{}", module.get_operation().disp(&ctx));
         assert!(text.contains("llvm.udiv"));
         assert!(text.contains("llvm.urem"));
-        assert!(!text.contains("mir.div"));
-        assert!(!text.contains("mir.rem"));
+        assert!(!text.contains("cmir.div"));
+        assert!(!text.contains("cmir.rem"));
     }
 
     #[test]
@@ -999,7 +999,7 @@ mod tests {
         assert!(text.contains("@returns_i64"), "{text}");
         assert!(text.contains("@returns_nothing"), "{text}");
         assert_eq!(text.matches("llvm.call").count(), 2);
-        assert!(!text.contains("mir.call"));
+        assert!(!text.contains("cmir.call"));
     }
 
     #[test]
@@ -1050,6 +1050,6 @@ mod tests {
         assert!(text.contains("llvm.inttoptr"));
         assert!(text.contains("llvm.insert_value"));
         assert!(text.contains("llvm.extract_value"));
-        assert!(!text.contains("mir."));
+        assert!(!text.contains("cmir."));
     }
 }

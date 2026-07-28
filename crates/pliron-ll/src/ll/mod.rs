@@ -15,7 +15,7 @@ use pliron::{
 };
 
 pub fn register(ctx: &mut Context) {
-    Dialect::register(ctx, &DialectName::try_new("ll").unwrap());
+    Dialect::register(ctx, &DialectName::new("ll"));
 }
 
 /// The raw-byte initializer of a global, if it has one. Byte initializers are

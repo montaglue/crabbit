@@ -49,7 +49,7 @@ impl Pass for VerifyPass {
         "verify"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         // Verify the root operation and all nested operations recursively
         root.deref(ctx).verify(ctx)?;
         Ok(changed())

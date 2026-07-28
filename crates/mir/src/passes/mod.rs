@@ -1,1 +1,1 @@
-pub mod convert_mir_to_llvm;
+pub mod lower_dialect_mir;

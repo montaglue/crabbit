@@ -5,7 +5,7 @@
 use combine::Parser;
 use pliron::derive::{def_op, derive_op_interface_impl};
 use pliron::{
-    builtin::{attributes::StringAttr, op_interfaces::OneResultInterface},
+    builtin::{attributes::StringAttr, op_interfaces::{NResultsInterface, OneResultInterface}},
     context::Context,
     identifier::Identifier,
     impl_verify_succ,
@@ -26,7 +26,7 @@ pliron::dict_key!(ATTR_KEY_LL_CSTR_VALUE, "ll_cstr_value");
 /// MIR importer for string constants before they get a layout in the object's
 /// literal pool.
 #[def_op("ll.cstr")]
-#[derive_op_interface_impl(OneResultInterface)]
+#[derive_op_interface_impl(NResultsInterface<1>, OneResultInterface)]
 pub struct CStrOp;
 
 impl CStrOp {

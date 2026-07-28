@@ -13,6 +13,7 @@
 //! Integer accesses whose signedness differs from the leaf type are
 //! adapted with `llvm.bitcast` so every rewritten slot sees one type.
 
+use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
 use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 use crate::{
@@ -28,7 +29,7 @@ use crate::{
             ops::GepIndex,
             op_interfaces::IsDeclaration,
             ops::{
-                AllocaOp, BitcastOp, ConstantOp, ExtractValueOp, GetElementPtrOp, InsertValueOp,
+                AllocaOp, BitcastOp, ExtractValueOp, GetElementPtrOp, InsertValueOp,
                 LoadOp, StoreOp, UndefOp,
             },
             types::{ArrayType, PointerType, StructType},
@@ -59,7 +60,7 @@ impl Pass for LLVMSroaPass {
         "llvm-sroa"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;

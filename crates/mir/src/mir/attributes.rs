@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// Indices for MIR aggregate insert/extract operations.
-#[def_attribute("mir.insert_extract_value_indices")]
+#[def_attribute("cmir.insert_extract_value_indices")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct InsertExtractValueIndicesAttr(pub Vec<u32>);
 

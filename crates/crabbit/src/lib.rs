@@ -12,6 +12,10 @@ extern crate rustc_symbol_mangling;
 #[allow(unused_extern_crates)]
 extern crate rustc_driver;
 
+// The MIR importer targeting cuda-oxide's dialect-mir. The legacy cmir
+// importer and dialect are retired; their sources are detached from the
+// build pending deletion.
+#[path = "importer_oxide.rs"]
 pub mod importer;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
@@ -21,16 +25,16 @@ use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
 use rustc_session::config::{OutputFilenames, OutputType};
-use pliron::opts::mem2reg::Mem2RegPass;
+
 
 use crate::{
-    conversion::pass::{AnalysisManager, PMConfig, Pass, Passes},
+    conversion::pass::{AnalysisManager, Mem2RegPass, PMConfig, Pass, Passes},
     passes::llvm::inline::LLVMInlinePass,
     passes::llvm::pin_type_punned_slots::LLVMPinTypePunnedSlotsPass,
     passes::llvm::simplify::LLVMSimplifyPass,
     passes::llvm::simplify_cfg::LLVMSimplifyCfgPass,
     passes::llvm::sroa::LLVMSroaPass,
-    passes::{aarch64_darwin, convert_mir_to_llvm::convert_mir_to_llvm_pass, x86_64_darwin},
+    passes::{aarch64_darwin, x86_64_darwin},
     printable::Printable,
     trace::{StairTraceFile, StairTraceMeta},
 };
@@ -151,9 +155,16 @@ impl ObjectTarget {
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
 /// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
-fn pipeline(target: ObjectTarget) -> Passes {
+fn pipeline(target: ObjectTarget, internal_symbols: Vec<String>) -> Passes {
     let mut passes = Passes::default();
-    passes.add_pass(convert_mir_to_llvm_pass());
+    passes.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
+    // mir-lower emits llvm.funcs without linkage; crabbit's llvm passes and
+    // the object backends require every function to carry one.
+    passes.add_pass(
+        crabbit_mir::passes::lower_dialect_mir::StampFunctionLinkagePass::new(
+            internal_symbols,
+        ),
+    );
     // Inline the module-internal call graph, then fold/clean and merge the
     // inlined blocks. simplify runs again after the CFG cleanup because
     // merging blocks turns cross-block load/store chains into block-local
@@ -231,10 +242,11 @@ fn emit_object(
     let mut config = PMConfig::default();
     config.print_after_all = true;
     config.ir_printing_dir = Some(dump_dir.clone());
-    analyses.set_config(config);
+    let mut pipeline = pipeline(target, imported.internal_symbols.clone());
+    pipeline.set_config(config);
 
     let initial_dump = imported.module.disp(&imported.ctx).to_string();
-    let run_result = pipeline(target).run(imported.module, &mut imported.ctx, &mut analyses);
+    let run_result = pipeline.run(imported.module, &mut imported.ctx, &mut analyses);
 
     let dumps = collect_pass_dumps(&dump_dir);
     let _ = std::fs::remove_dir_all(&dump_dir);
@@ -323,10 +335,9 @@ pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
 
 pub mod trace;
 
-pub use crabbit_mir::mir;
 
 pub mod passes {
-    pub use crabbit_mir::passes::convert_mir_to_llvm;
+    pub use crabbit_mir::passes::lower_dialect_mir;
     pub use pliron_ll::passes::{
         aarch64_darwin, dominance_frontier, hot_path, llvm, verify, x86_64_darwin,
     };
@@ -335,7 +346,8 @@ pub mod passes {
 pub use pliron_ll::conversion;
 
 pub mod dialects {
-    pub use crate::mir;
+    // cuda-oxide's MIR port, registered as dialect `mir`.
+    pub use crabbit_mir::dialect_mir;
     pub use pliron_llvm as llvm;
     pub use pliron::builtin;
     pub use pliron_ll::{aarch64, ll, macho, x86_64};

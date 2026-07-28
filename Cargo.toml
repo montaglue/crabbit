@@ -13,18 +13,23 @@ repository = "https://github.com/montaglue/crabbit"
 # `version` is required alongside `path` so that `cargo publish` can resolve
 # this dependency against crates.io once the local path is stripped from the
 # packaged manifest. Locally, cargo still prefers the path.
-# Upstream pliron, unpatched, pinned to the commit this workspace is
-# verified against. `version` is kept so `cargo publish` can resolve the
-# dependency against crates.io once a release containing this API exists.
-pliron = { git = "https://github.com/pliron-org/pliron.git", rev = "4750abfdc8823b30baffaf505ae7201a58522d34", version = "0.16.0" }
+# Upstream pliron, unpatched, pinned to the exact rev NVlabs/cuda-oxide
+# pins (both workspaces must agree on one pliron or types do not unify).
+# `version` is kept so `cargo publish` can resolve the dependency against
+# crates.io once a release containing this API exists.
+pliron = { git = "https://github.com/pliron-org/pliron.git", rev = "222dd962a124cba8ec5f119ae6e0ecf202630854", version = "0.16.0" }
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
-pliron-llvm = { git = "https://github.com/pliron-org/pliron.git", rev = "4750abfdc8823b30baffaf505ae7201a58522d34", version = "0.16.0", default-features = false }
-# NOT YET PUBLISHED to crates.io (lives in the sibling `pliron-inspect` repo).
-# Every crate that depends on `pliron-ll` transitively depends on this, so
-# `cargo publish` will fail for the whole workspace until it has a published
-# version to pin here.
+pliron-llvm = { git = "https://github.com/pliron-org/pliron.git", rev = "222dd962a124cba8ec5f119ae6e0ecf202630854", version = "0.16.0", default-features = false }
+# Our own sibling repo (montaglue/pliron-inspect), consumed by path while
+# both projects move together; NOT yet published to crates.io.
 pliron-inspect-driver = { path = "../pliron-inspect/crates/driver", version = "0.1.0" }
+# cuda-oxide's MIR-on-pliron port, straight from unpatched NVlabs upstream,
+# pinned to the commit this workspace is verified against. NOT published to
+# crates.io. Their dialect also registers as `mir`, so a Context can hold
+# either this dialect or crabbit's own `cmir`, never both.
+dialect-mir = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b099f64c1a32869b74be99f4f88242fb68655b51", version = "0.2.1" }
+mir-lower = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b099f64c1a32869b74be99f4f88242fb68655b51", version = "0.2.1" }
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }

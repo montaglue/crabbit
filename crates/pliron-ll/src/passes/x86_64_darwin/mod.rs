@@ -21,6 +21,7 @@ mod macho;
 mod util;
 pub mod verify_llvm_for_x86_64_darwin;
 
+use crate::dialects::builtin::ops::ConstantOp;
 use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
@@ -104,7 +105,7 @@ mod tests {
                 attributes::LinkageAttr,
                 ops::GepIndex,
                 ops::{
-                    AddOp, AllocaOp, BrOp, CondBrOp, ConstantOp, FuncOp, GetElementPtrOp, LoadOp,
+                    AddOp, AllocaOp, BrOp, CondBrOp, FuncOp, GetElementPtrOp, LoadOp,
                     ReturnOp, StoreOp,
                 },
                 types::{ArrayType, FuncType},
