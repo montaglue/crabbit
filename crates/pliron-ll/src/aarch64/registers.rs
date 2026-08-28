@@ -58,12 +58,25 @@ pub enum Register {
 impl Register {
     /// Parses the compatibility spelling used by the existing attribute-based
     /// instruction dialect. Virtual GPRs use `vrN`, never `vN`: `vN` is the
-    /// architectural SIMD/FP register namespace.
+    /// architectural SIMD/FP register namespace. Virtual FP registers spell
+    /// their class explicitly: `vdN` (64-bit) and `vsN` (32-bit).
     pub fn parse(text: &str) -> Option<Self> {
         if let Some(number) = text.strip_prefix("vr") {
             return number.parse().ok().map(|id| Self::Virtual {
                 id: VirtualRegister(id),
                 class: RegisterClass::Gpr64,
+            });
+        }
+        if let Some(number) = text.strip_prefix("vd") {
+            return number.parse().ok().map(|id| Self::Virtual {
+                id: VirtualRegister(id),
+                class: RegisterClass::Fpr64,
+            });
+        }
+        if let Some(number) = text.strip_prefix("vs") {
+            return number.parse().ok().map(|id| Self::Virtual {
+                id: VirtualRegister(id),
+                class: RegisterClass::Fpr32,
             });
         }
         if text == "sp" {
@@ -100,9 +113,48 @@ impl Register {
         }
     }
 
+    /// A virtual 64-bit FP register (`d`-class).
+    pub const fn virtual_fpr64(id: u32) -> Self {
+        Self::Virtual {
+            id: VirtualRegister(id),
+            class: RegisterClass::Fpr64,
+        }
+    }
+
+    /// A virtual 32-bit FP register (`s`-class).
+    pub const fn virtual_fpr32(id: u32) -> Self {
+        Self::Virtual {
+            id: VirtualRegister(id),
+            class: RegisterClass::Fpr32,
+        }
+    }
+
     /// The 64-bit general-purpose register `x<number>`.
     pub const fn gpr(number: u8) -> Self {
         Self::Physical(PhysicalRegister::Gpr64(number))
+    }
+
+    /// The 64-bit FP register `d<number>`.
+    pub const fn fpr64(number: u8) -> Self {
+        Self::Physical(PhysicalRegister::Fpr64(number))
+    }
+
+    /// The 32-bit FP register `s<number>`.
+    pub const fn fpr32(number: u8) -> Self {
+        Self::Physical(PhysicalRegister::Fpr32(number))
+    }
+
+    /// The register file this register belongs to.
+    pub fn class(self) -> RegisterClass {
+        match self {
+            Self::Virtual { class, .. } => class,
+            Self::Physical(physical) => physical.class(),
+        }
+    }
+
+    /// Whether this register lives in the FP/SIMD register file.
+    pub fn is_fpr(self) -> bool {
+        matches!(self.class(), RegisterClass::Fpr64 | RegisterClass::Fpr32)
     }
 }
 
@@ -116,10 +168,21 @@ pub const FP: Register = Register::gpr(29);
 pub const X8: Register = Register::gpr(8);
 /// The intra-procedure-call scratch register, outside the allocatable set.
 pub const X16: Register = Register::gpr(16);
+/// The second intra-procedure-call scratch register, outside the
+/// allocatable set.
+pub const X17: Register = Register::gpr(17);
 
 impl fmt::Display for Register {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Virtual {
+                id,
+                class: RegisterClass::Fpr64,
+            } => write!(f, "vd{}", id.0),
+            Self::Virtual {
+                id,
+                class: RegisterClass::Fpr32,
+            } => write!(f, "vs{}", id.0),
             Self::Virtual { id, .. } => write!(f, "vr{}", id.0),
             Self::Physical(PhysicalRegister::Gpr64(number)) => write!(f, "x{number}"),
             Self::Physical(PhysicalRegister::Gpr32(number)) => write!(f, "w{number}"),
@@ -148,6 +211,26 @@ mod tests {
         assert_eq!(
             Register::parse("v7"),
             Some(Register::Physical(PhysicalRegister::Simd128(7)))
+        );
+    }
+
+    #[test]
+    fn virtual_fp_registers_round_trip_their_class() {
+        for (text, class) in [
+            ("vd3", RegisterClass::Fpr64),
+            ("vs4", RegisterClass::Fpr32),
+        ] {
+            let parsed = Register::parse(text).unwrap();
+            assert!(matches!(parsed, Register::Virtual { class: c, .. } if c == class));
+            assert_eq!(parsed.to_string(), text);
+        }
+        assert_eq!(
+            Register::parse("d8"),
+            Some(Register::Physical(PhysicalRegister::Fpr64(8)))
+        );
+        assert_eq!(
+            Register::parse("s8"),
+            Some(Register::Physical(PhysicalRegister::Fpr32(8)))
         );
     }
 }

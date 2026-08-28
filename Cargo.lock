@@ -74,6 +74,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "awint"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -384,7 +390,6 @@ dependencies = [
 [[package]]
 name = "dialect-mir"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
 dependencies = [
  "combine",
  "linkme",
@@ -397,7 +402,6 @@ dependencies = [
 [[package]]
 name = "dialect-nvvm"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
 dependencies = [
  "combine",
  "dialect-mir",
@@ -613,7 +617,6 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "llvm-export"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
 dependencies = [
  "bitflags",
  "combine",
@@ -652,7 +655,6 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mir-lower"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
 dependencies = [
  "anyhow",
  "dialect-mir",
@@ -697,8 +699,9 @@ dependencies = [
 
 [[package]]
 name = "pliron"
-version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron.git?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e51eb8628227038376c81dcb1752db90a90af24a1e38b27582c7dab235149d7"
 dependencies = [
  "awint",
  "combine",
@@ -706,6 +709,7 @@ dependencies = [
  "dyn-clone",
  "hashbrown 0.17.1",
  "hi_sparse_bitset",
+ "indexmap",
  "inventory",
  "linkme",
  "log",
@@ -715,21 +719,25 @@ dependencies = [
  "rustc-hash",
  "rustc_apfloat",
  "slotmap",
+ "smallvec",
  "spin",
  "thiserror",
+ "utf8-chars",
 ]
 
 [[package]]
 name = "pliron-derive"
-version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron.git?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f878ccd6bfd39a9373175774b96785daab296dc1870bc72ff7d285151f613a56"
 dependencies = [
  "combine",
  "convert_case",
+ "indexmap",
  "proc-macro2",
  "quote",
  "rustc-hash",
- "syn 2.0.119",
+ "syn 3.0.2",
 ]
 
 [[package]]
@@ -772,13 +780,13 @@ dependencies = [
 
 [[package]]
 name = "pliron-llvm"
-version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron.git?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "511535a077e4f72f83c437cde2636a6f525809a370b3078c0d1d5d53612ad052"
 dependencies = [
  "bitflags",
  "log",
  "pliron",
- "rustc-hash",
  "thiserror",
 ]
 
@@ -844,7 +852,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "reserved-oxide-symbols"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b099f64c1a32869b74be99f4f88242fb68655b51#b099f64c1a32869b74be99f4f88242fb68655b51"
 
 [[package]]
 name = "rustc-hash"
@@ -1082,6 +1089,15 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "utf8-chars"
+version = "3.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92498c67ea3511b37eccff13b573ed871faf0ce9c4056ab032bd01a681f445a0"
+dependencies = [
+ "arrayvec",
+]
 
 [[package]]
 name = "utf8parse"

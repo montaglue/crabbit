@@ -19,9 +19,10 @@ use crate::{
     dialects::{
         aarch64::{
             attributes::{AbiLocation, ConditionCode, FunctionAbi, FunctionAbiAttr},
+            encoding::{fmov_imm8_for_f32_bits, fmov_imm8_for_f64_bits},
             op_interfaces::Aarch64Opcode,
             ops::{self as aarch64_ops, FuncOp as Aarch64FuncOp},
-            registers::{LR, Register, X8, X16},
+            registers::{LR, Register, RegisterClass, X8, X16},
         },
         builtin::{
             attributes::IntegerAttr,
@@ -30,13 +31,18 @@ use crate::{
             },
         },
         llvm::{
-            attributes::ICmpPredicateAttr,
+            attributes::{FCmpPredicateAttr, ICmpPredicateAttr},
             op_interfaces::IsDeclaration,
             ops::{
-                AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, ExtractValueOp, FuncOp as LlvmFuncOp, GetElementPtrOp, GlobalOp as LlvmGlobalOp,
-                ICmpOp, InsertValueOp, IntToPtrOp, LoadOp, PoisonOp, PtrToIntOp, ReturnOp, StoreOp,
+                AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, ExtractValueOp, FAddOp,
+                FCmpOp, FDivOp, FMulOp,
+                FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp, FRemOp, FSubOp,
+                FuncOp as LlvmFuncOp,
+                GetElementPtrOp, GlobalOp as LlvmGlobalOp,
+                ICmpOp, InsertValueOp, IntToPtrOp, LoadOp, PoisonOp, PtrToIntOp, ReturnOp,
+                SIToFPOp, StoreOp,
                 TruncOp,
-                SExtOp, UndefOp, UnreachableOp, ZExtOp,
+                SExtOp, UIToFPOp, UndefOp, UnreachableOp, ZExtOp,
             },
         },
     },
@@ -79,7 +85,7 @@ impl Pass for LlvmToAarch64IselPass {
     }
 
     fn run(
-        &self,
+        &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,
@@ -89,11 +95,24 @@ impl Pass for LlvmToAarch64IselPass {
         let llvm_ops: Vec<_> = body.deref(ctx).iter(ctx).collect();
 
         let mut globals = HashMap::<crate::identifier::Identifier, Vec<u8>>::new();
+        let mut data_globals = std::collections::HashSet::<crate::identifier::Identifier>::new();
+        let mut tls_globals = std::collections::HashSet::<crate::identifier::Identifier>::new();
         for op_ptr in llvm_ops.iter().copied() {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(global) = op_obj.downcast_ref::<LlvmGlobalOp>() {
-                if let Some(bytes) = crate::ll::global_initializer_bytes(ctx, global) {
+                if crate::ll::global_is_thread_local(ctx, global) {
+                    // Thread-local (defined in `.tdata`/`.tbss` or an extern
+                    // TLS declaration): addressed through the thread pointer,
+                    // never by an ordinary data-section address.
+                    tls_globals.insert(global.get_symbol_name(ctx));
+                } else if let Some(bytes) = crate::ll::global_initializer_bytes(ctx, global) {
                     globals.insert(global.get_symbol_name(ctx), bytes);
+                } else {
+                    // A data-section definition (`ll.data`) or an extern
+                    // declaration with no initializer: both are addressed
+                    // via adrp+add, the latter resolving through an
+                    // undefined symbol-table entry.
+                    data_globals.insert(global.get_symbol_name(ctx));
                 }
             }
         }
@@ -102,12 +121,21 @@ impl Pass for LlvmToAarch64IselPass {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(llvm_func) = op_obj.downcast_ref::<LlvmFuncOp>() {
                 if !llvm_func.is_declaration(ctx) {
-                    lower_function(ctx, llvm_func, body, &globals)?;
+                    lower_function(ctx, llvm_func, body, &globals, &data_globals, &tls_globals)?;
                 }
             }
         }
 
         for op_ptr in llvm_ops {
+            // Data-section and TLS globals stay in the module: the object
+            // writers read them when laying out `.rodata`/`.data`/`.tdata`.
+            let op_obj = Operation::get_op_dyn(op_ptr, ctx);
+            if let Some(global) = op_obj.downcast_ref::<LlvmGlobalOp>()
+                && (data_globals.contains(&global.get_symbol_name(ctx))
+                    || tls_globals.contains(&global.get_symbol_name(ctx)))
+            {
+                continue;
+            }
             Operation::erase(op_ptr, ctx);
         }
         Ok(changed())
@@ -222,7 +250,9 @@ fn block_contains_call(ctx: &Context, block: Ptr<BasicBlock>) -> bool {
     let mut op = block.deref(ctx).get_head();
     while let Some(op_ptr) = op {
         let op_obj = Operation::get_op_dyn(op_ptr, ctx);
-        if op_obj.downcast_ref::<CallOp>().is_some() {
+        // `llvm.frem` lowers to a call to fmod/fmodf, so it clobbers the
+        // link register like any explicit call.
+        if op_obj.downcast_ref::<CallOp>().is_some() || op_obj.downcast_ref::<FRemOp>().is_some() {
             return true;
         }
         op = op_ptr.deref(ctx).get_next();
@@ -235,6 +265,8 @@ fn lower_function(
     llvm_func: &LlvmFuncOp,
     module_body: Ptr<crate::ir::basic_block::BasicBlock>,
     globals: &HashMap<crate::identifier::Identifier, Vec<u8>>,
+    data_globals: &std::collections::HashSet<crate::identifier::Identifier>,
+    tls_globals: &std::collections::HashSet<crate::identifier::Identifier>,
 ) -> STAIRResult<()> {
     // Branch probabilities on the LLVM-level CFG (explicit branch weights
     // plus static loop heuristics). They are transferred onto the machine
@@ -291,7 +323,14 @@ fn lower_function(
                 values.insert(arg, LoweredValue::RegPair(lo_vreg, hi_vreg));
             }
             AbiLocation::Gpr(reg) => {
-                let dst = fresh_vreg(&mut next_vreg);
+                // The register class of the incoming ABI register decides
+                // the promoted argument's file: FP arguments arrive in
+                // v0-v7 and stay in FP virtual registers.
+                let dst = match reg.class() {
+                    RegisterClass::Fpr64 => fresh_fpr(&mut next_vreg, FpKind::F64),
+                    RegisterClass::Fpr32 => fresh_fpr(&mut next_vreg, FpKind::F32),
+                    _ => fresh_vreg(&mut next_vreg),
+                };
                 arg_copies.push((dst, reg));
                 values.insert(arg, LoweredValue::Reg(dst));
             }
@@ -307,7 +346,7 @@ fn lower_function(
         aarch64_ops::str_pre_sp(ctx, LR, 16).insert_at_back(entry, ctx);
     }
     for (dst, src) in arg_copies {
-        aarch64_ops::mov(ctx, dst, src).insert_at_back(entry, ctx);
+        emit_move(ctx, entry, dst, src)?;
     }
 
     let llvm_entry = llvm_func
@@ -364,13 +403,27 @@ fn lower_function(
                 values.insert(alloca.get_result(ctx), LoweredValue::StackAddr(slot));
             } else if let Some(constant) = op_obj.downcast_ref::<ConstantOp>() {
                 let attr = constant.get_value(ctx);
-                let attr = attr
-                    .downcast_ref::<IntegerAttr>()
-                    .expect("constant verified to be integer");
-                values.insert(
-                    constant.get_result(ctx),
-                    LoweredValue::Imm(attr.value().to_u128()),
-                );
+                // FP constants carry their IEEE bit pattern in `Imm`; the
+                // result type at each use decides the register file.
+                let imm = if let Some(fp32) = attr
+                    .downcast_ref::<crate::dialects::builtin::attributes::FPSingleAttr>()
+                {
+                    pliron::utils::apfloat::Float::to_bits(fp32.0)
+                } else if let Some(fp64) = attr
+                    .downcast_ref::<crate::dialects::builtin::attributes::FPDoubleAttr>()
+                {
+                    pliron::utils::apfloat::Float::to_bits(fp64.0)
+                } else {
+                    let attr = attr
+                        .downcast_ref::<IntegerAttr>()
+                        .ok_or_else(|| {
+                            input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                                "constant of unsupported attribute kind {attr:?}"
+                            )))
+                        })?;
+                    attr.value().to_u128()
+                };
+                values.insert(constant.get_result(ctx), LoweredValue::Imm(imm));
             } else if let Some(cstr) = op_obj.downcast_ref::<CStrOp>() {
                 let label = format!(
                     "L_stair_cstr_{}_{}",
@@ -387,7 +440,29 @@ fn lower_function(
                 );
             } else if let Some(addr) = op_obj.downcast_ref::<AddressOfOp>() {
                 let symbol = addr.get_global_name(ctx);
-                if let Some(bytes) = globals.get(&symbol).cloned() {
+                if tls_globals.contains(&symbol) {
+                    // A thread-local global: local-exec model — the address is
+                    // the thread pointer plus a link-time-constant offset,
+                    // materialized as `mrs` + two TPREL adds.
+                    let dst = fresh_vreg(&mut next_vreg);
+                    aarch64_ops::mrs_tpidr(ctx, dst)
+                        .insert_at_back(insert_block, ctx);
+                    aarch64_ops::add_tprel_hi12(ctx, dst, dst, symbol.clone())
+                        .insert_at_back(insert_block, ctx);
+                    aarch64_ops::add_tprel_lo12_nc(ctx, dst, dst, symbol)
+                        .insert_at_back(insert_block, ctx);
+                    values.insert(addr.get_result(ctx), LoweredValue::Reg(dst));
+                } else if data_globals.contains(&symbol) {
+                    // A data-section global: materialize its address with an
+                    // adrp+add pair the linker resolves through page
+                    // relocations.
+                    let dst = fresh_vreg(&mut next_vreg);
+                    aarch64_ops::adrp(ctx, dst, symbol.clone())
+                        .insert_at_back(insert_block, ctx);
+                    aarch64_ops::add_lo12(ctx, dst, dst, symbol)
+                        .insert_at_back(insert_block, ctx);
+                    values.insert(addr.get_result(ctx), LoweredValue::Reg(dst));
+                } else if let Some(bytes) = globals.get(&symbol).cloned() {
                     values.insert(
                         addr.get_result(ctx),
                         LoweredValue::CStr {
@@ -452,14 +527,35 @@ fn lower_function(
                 // Registers hold values zero-extended to 64 bits, so extend
                 // the source's W low bits with (x ^ 2^(W-1)) - 2^(W-1) and
                 // re-mask to the destination width to restore the invariant.
+                // A 128-bit destination gets an explicit sign-extended high
+                // half: the pair fallback in `materialize_pair` sees only the
+                // signless post-mir-lower type and would zero it.
                 let result = cast.get_result(ctx);
                 let operand = cast.get_operand(ctx);
                 let value = lookup_value(ctx, &values, operand)?;
+                let result_is_i128 = is_128_bit_integer(ctx, result.get_type(ctx));
                 match integer_trunc_mask(ctx, operand.get_type(ctx)) {
                     None => {
                         // 64-bit source: the register already carries the
                         // full sign pattern.
-                        values.insert(result, value);
+                        if result_is_i128 {
+                            let lo = materialize(
+                                ctx,
+                                insert_block,
+                                value,
+                                &mut next_vreg,
+                                "sext input",
+                            )?;
+                            let hi = sign_extend_high_half(
+                                ctx,
+                                insert_block,
+                                lo.clone(),
+                                &mut next_vreg,
+                            );
+                            values.insert(result, LoweredValue::RegPair(lo, hi));
+                        } else {
+                            values.insert(result, value);
+                        }
                     }
                     Some(src_mask) => {
                         let sign_bit = (src_mask >> 1) + 1;
@@ -467,8 +563,12 @@ fn lower_function(
                         if let LoweredValue::Imm(imm) = value {
                             let extended =
                                 ((imm as u64) ^ sign_bit).wrapping_sub(sign_bit);
-                            let masked = dst_mask.map_or(extended, |mask| extended & mask);
-                            values.insert(result, LoweredValue::Imm(masked as u128));
+                            let masked = if result_is_i128 {
+                                extended as i64 as i128 as u128
+                            } else {
+                                dst_mask.map_or(extended, |mask| extended & mask) as u128
+                            };
+                            values.insert(result, LoweredValue::Imm(masked));
                         } else {
                             let src = materialize(
                                 ctx,
@@ -510,6 +610,14 @@ fn lower_function(
                                 )
                                 .insert_at_back(insert_block, ctx);
                                 values.insert(result, LoweredValue::Reg(dst));
+                            } else if result_is_i128 {
+                                let hi = sign_extend_high_half(
+                                    ctx,
+                                    insert_block,
+                                    extended.clone(),
+                                    &mut next_vreg,
+                                );
+                                values.insert(result, LoweredValue::RegPair(extended, hi));
                             } else {
                                 values.insert(result, LoweredValue::Reg(extended));
                             }
@@ -538,6 +646,11 @@ fn lower_function(
                         .insert_at_back(insert_block, ctx);
                         values.insert(result, LoweredValue::Reg(dst));
                     }
+                } else if let LoweredValue::RegPair(lo, _) = value {
+                    // 128-bit source, 64-bit result: the low half is the
+                    // whole value; keeping the pair would smuggle the old
+                    // high half into later widening uses.
+                    values.insert(result, LoweredValue::Reg(lo));
                 } else {
                     values.insert(result, value);
                 }
@@ -578,6 +691,34 @@ fn lower_function(
             } else if let Some(call) = op_obj.downcast_ref::<CallOp>() {
                 let callee = call.callee(ctx);
                 let args = call.args(ctx);
+                // Rust's saturating float-to-int `as` casts arrive as calls
+                // to mir-lower's `llvm_fpto{s,u}i_sat_*` intrinsic
+                // declarations; `fcvtzs`/`fcvtzu` implement them exactly
+                // (saturation at the bounds, NaN to 0), so inline them
+                // instead of emitting an unresolvable call.
+                if let CallOpCallable::Direct(name) = &callee
+                    && let Some((signed, _width)) =
+                        saturating_fp_to_int_intrinsic(name.as_ref())
+                {
+                    let [arg] = args.as_slice() else {
+                        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                            "saturating float-to-int intrinsic `{name}` expects one argument"
+                        ))));
+                    };
+                    let result = call.get_operation().deref(ctx).get_result(0);
+                    let lowered_value = lookup_value(ctx, &values, *arg)?;
+                    let lowered = fp_to_int(
+                        ctx,
+                        insert_block,
+                        lowered_value,
+                        arg.get_type(ctx),
+                        result.get_type(ctx),
+                        signed,
+                        &mut next_vreg,
+                    )?;
+                    values.insert(result, lowered);
+                    continue;
+                }
                 let callee_ptr = if let CallOpCallable::Indirect(callee_value) = &callee {
                     let lowered = lookup_value(ctx, &values, *callee_value)?;
                     Some(materialize_pointer(
@@ -605,33 +746,75 @@ fn lower_function(
                     }
                     _ => None,
                 };
-                let mut arg_regs = Vec::with_capacity(args.len());
+                // Assign argument locations in a single walk mirroring
+                // `assign_abi`: integers and pointers draw from x0-x7, FP
+                // scalars from v0-v7, and overflow goes to 8-byte outgoing
+                // stack slots in argument order.
+                let mut arg_moves: Vec<(Register, CallArgDst)> = Vec::new();
+                let mut next_gpr = 0u8;
+                let mut next_fpr = 0u8;
+                let mut next_stack = 0u64;
                 for arg in args {
                     let lowered = lookup_value(ctx, &values, arg)?;
-                    if is_128_bit_integer(ctx, arg.get_type(ctx)) {
+                    let arg_ty = arg.get_type(ctx);
+                    if let Some(fp) = fp_kind(ctx, arg_ty) {
+                        let src = materialize_fp(
+                            ctx,
+                            insert_block,
+                            lowered,
+                            fp,
+                            &mut next_vreg,
+                            "call argument",
+                        )?;
+                        if next_fpr < 8 {
+                            let dst = match fp {
+                                FpKind::F64 => Register::fpr64(next_fpr),
+                                FpKind::F32 => Register::fpr32(next_fpr),
+                            };
+                            next_fpr += 1;
+                            arg_moves.push((src, CallArgDst::Fpr(dst)));
+                        } else {
+                            arg_moves.push((src, CallArgDst::Stack(next_stack)));
+                            next_stack += 8;
+                        }
+                        continue;
+                    }
+                    let mut push_gpr = |src: Register,
+                                        arg_moves: &mut Vec<(Register, CallArgDst)>,
+                                        next_gpr: &mut u8,
+                                        next_stack: &mut u64| {
+                        if *next_gpr < 8 {
+                            arg_moves.push((src, CallArgDst::Gpr(*next_gpr)));
+                            *next_gpr += 1;
+                        } else {
+                            arg_moves.push((src, CallArgDst::Stack(*next_stack)));
+                            *next_stack += 8;
+                        }
+                    };
+                    if is_128_bit_integer(ctx, arg_ty) {
                         let (lo, hi) = materialize_pair(
                             ctx,
                             insert_block,
                             lowered,
-                            arg.get_type(ctx),
+                            arg_ty,
                             &mut next_vreg,
                             "call argument",
                         )?;
-                        arg_regs.push(lo);
-                        arg_regs.push(hi);
+                        push_gpr(lo, &mut arg_moves, &mut next_gpr, &mut next_stack);
+                        push_gpr(hi, &mut arg_moves, &mut next_gpr, &mut next_stack);
                     } else {
-                        arg_regs.push(materialize_typed(
+                        let src = materialize_typed(
                             ctx,
                             insert_block,
                             lowered,
-                            arg.get_type(ctx),
+                            arg_ty,
                             &mut next_vreg,
                             "call argument",
-                        )?);
+                        )?;
+                        push_gpr(src, &mut arg_moves, &mut next_gpr, &mut next_stack);
                     }
                 }
-                let stack_arg_count = arg_regs.len().saturating_sub(8);
-                let outgoing_stack_size = align_to_16((stack_arg_count as u64) * 8);
+                let outgoing_stack_size = align_to_16(next_stack);
                 if outgoing_stack_size > 0 {
                     aarch64_ops::sub_sp_imm(ctx, outgoing_stack_size)
                         .insert_at_back(insert_block, ctx);
@@ -641,13 +824,24 @@ fn lower_function(
                     // the allocatable set, so it survives the argument moves.
                     aarch64_ops::mov(ctx, X16, *callee_ptr).insert_at_back(insert_block, ctx);
                 }
-                for (idx, src) in arg_regs.into_iter().enumerate() {
-                    if idx < 8 {
-                        aarch64_ops::mov(ctx, Register::gpr(idx as u8), src)
-                            .insert_at_back(insert_block, ctx);
-                    } else {
-                        aarch64_ops::str_sp_offset(ctx, src, ((idx - 8) as u64) * 8)
-                            .insert_at_back(insert_block, ctx);
+                for (src, dst) in arg_moves {
+                    match dst {
+                        CallArgDst::Gpr(number) => {
+                            aarch64_ops::mov(ctx, Register::gpr(number), src)
+                                .insert_at_back(insert_block, ctx);
+                        }
+                        CallArgDst::Fpr(reg) => {
+                            emit_move(ctx, insert_block, reg, src)?;
+                        }
+                        CallArgDst::Stack(offset) => {
+                            let opcode = match src.class() {
+                                RegisterClass::Fpr64 => aarch64_ops::StrdSpOffsetOp::OPCODE,
+                                RegisterClass::Fpr32 => aarch64_ops::StrsSpOffsetOp::OPCODE,
+                                _ => aarch64_ops::StrSpOffsetOp::OPCODE,
+                            };
+                            aarch64_ops::str_sp_offset_sized(ctx, opcode, src, offset)
+                                .insert_at_back(insert_block, ctx);
+                        }
                     }
                 }
                 if let Some(slot) = indirect_result_slot {
@@ -670,6 +864,15 @@ fn lower_function(
                 }
                 if let Some(result) = result {
                     let lowered = match result_location.unwrap() {
+                        ResultLocation::Fpr(fp) => {
+                            let dst = fresh_fpr(&mut next_vreg, fp);
+                            let src = match fp {
+                                FpKind::F64 => Register::fpr64(0),
+                                FpKind::F32 => Register::fpr32(0),
+                            };
+                            emit_move(ctx, insert_block, dst, src)?;
+                            LoweredValue::Reg(dst)
+                        }
                         ResultLocation::ScalarX0 => {
                             let dst = fresh_vreg(&mut next_vreg);
                             aarch64_ops::mov(ctx, dst, Register::gpr(0))
@@ -710,6 +913,142 @@ fn lower_function(
                     };
                     values.insert(result, lowered);
                 }
+            } else if let Some(kind) = float_binary_kind(&*op_obj) {
+                let op_ref = op_ptr.deref(ctx);
+                let result = op_ref.get_result(0);
+                let lhs = op_ref.get_operand(0);
+                let rhs = op_ref.get_operand(1);
+                drop(op_ref);
+                let fp = fp_kind(ctx, result.get_type(ctx)).ok_or_else(|| {
+                    input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                        "float arithmetic on non-scalar-float type {}",
+                        pliron::printable::Printable::disp(&result.get_type(ctx), ctx)
+                    )))
+                })?;
+                let lhs_value = lookup_value(ctx, &values, lhs)?;
+                let rhs_value = lookup_value(ctx, &values, rhs)?;
+                let lhs = materialize_fp(ctx, insert_block, lhs_value, fp, &mut next_vreg, "fp lhs")?;
+                let rhs = materialize_fp(ctx, insert_block, rhs_value, fp, &mut next_vreg, "fp rhs")?;
+                if kind == FloatBinaryKind::Rem {
+                    // No hardware remainder: call the C runtime's
+                    // fmod/fmodf through the standard FP argument registers.
+                    let (a0, a1, callee) = match fp {
+                        FpKind::F64 => (Register::fpr64(0), Register::fpr64(1), "fmod"),
+                        FpKind::F32 => (Register::fpr32(0), Register::fpr32(1), "fmodf"),
+                    };
+                    emit_move(ctx, insert_block, a0, lhs)?;
+                    emit_move(ctx, insert_block, a1, rhs)?;
+                    aarch64_ops::call(ctx, callee.try_into().unwrap())
+                        .insert_at_back(insert_block, ctx);
+                    let dst = fresh_fpr(&mut next_vreg, fp);
+                    emit_move(ctx, insert_block, dst, a0)?;
+                    values.insert(result, LoweredValue::Reg(dst));
+                    continue;
+                }
+                let opcode = match (kind, fp) {
+                    (FloatBinaryKind::Add, FpKind::F64) => aarch64_ops::FaddDOp::OPCODE,
+                    (FloatBinaryKind::Add, FpKind::F32) => aarch64_ops::FaddSOp::OPCODE,
+                    (FloatBinaryKind::Sub, FpKind::F64) => aarch64_ops::FsubDOp::OPCODE,
+                    (FloatBinaryKind::Sub, FpKind::F32) => aarch64_ops::FsubSOp::OPCODE,
+                    (FloatBinaryKind::Mul, FpKind::F64) => aarch64_ops::FmulDOp::OPCODE,
+                    (FloatBinaryKind::Mul, FpKind::F32) => aarch64_ops::FmulSOp::OPCODE,
+                    (FloatBinaryKind::Div, FpKind::F64) => aarch64_ops::FdivDOp::OPCODE,
+                    (FloatBinaryKind::Div, FpKind::F32) => aarch64_ops::FdivSOp::OPCODE,
+                    (FloatBinaryKind::Rem, _) => unreachable!("handled above"),
+                };
+                let dst = fresh_fpr(&mut next_vreg, fp);
+                aarch64_ops::binary(ctx, opcode, dst, lhs, rhs).insert_at_back(insert_block, ctx);
+                values.insert(result, LoweredValue::Reg(dst));
+            } else if let Some(fneg) = op_obj.downcast_ref::<FNegOp>() {
+                let result = fneg.get_result(ctx);
+                let fp = fp_kind(ctx, result.get_type(ctx)).ok_or_else(|| {
+                    input_error_noloc!(Aarch64Err::UnsupportedType(
+                        "fneg on non-scalar-float type".to_string()
+                    ))
+                })?;
+                let value = lookup_value(ctx, &values, fneg.get_operand(ctx))?;
+                let src = materialize_fp(ctx, insert_block, value, fp, &mut next_vreg, "fneg input")?;
+                let opcode = match fp {
+                    FpKind::F64 => aarch64_ops::FnegDOp::OPCODE,
+                    FpKind::F32 => aarch64_ops::FnegSOp::OPCODE,
+                };
+                let dst = fresh_fpr(&mut next_vreg, fp);
+                aarch64_ops::unary(ctx, opcode, dst, src).insert_at_back(insert_block, ctx);
+                values.insert(result, LoweredValue::Reg(dst));
+            } else if let Some(fcmp) = op_obj.downcast_ref::<FCmpOp>() {
+                // Unlike icmp (kept symbolic so branches can fuse cmp with
+                // b.cond), fcmp lowers eagerly to a 0/1 GPR at its program
+                // point: nzcv cannot be carried across blocks anyway.
+                let lhs = fcmp.get_operation().deref(ctx).get_operand(0);
+                let rhs = fcmp.get_operation().deref(ctx).get_operand(1);
+                let bit = lower_fcmp(
+                    ctx,
+                    insert_block,
+                    &values,
+                    fcmp.predicate(ctx),
+                    lhs,
+                    rhs,
+                    &mut next_vreg,
+                )?;
+                values.insert(fcmp.get_result(ctx), bit);
+            } else if let Some(cast) = op_obj.downcast_ref::<SIToFPOp>() {
+                let (value, result) = (cast.get_operand(ctx), cast.get_result(ctx));
+                let lowered = int_to_fp(
+                    ctx, insert_block, &values, value, result, true, &mut next_vreg,
+                )?;
+                values.insert(result, lowered);
+            } else if let Some(cast) = op_obj.downcast_ref::<UIToFPOp>() {
+                let (value, result) = (cast.get_operand(ctx), cast.get_result(ctx));
+                let lowered = int_to_fp(
+                    ctx, insert_block, &values, value, result, false, &mut next_vreg,
+                )?;
+                values.insert(result, lowered);
+            } else if let Some(cast) = op_obj.downcast_ref::<FPToSIOp>() {
+                let (value, result) = (cast.get_operand(ctx), cast.get_result(ctx));
+                let src_ty = value.get_type(ctx);
+                let lowered_value = lookup_value(ctx, &values, value)?;
+                let lowered = fp_to_int(
+                    ctx,
+                    insert_block,
+                    lowered_value,
+                    src_ty,
+                    result.get_type(ctx),
+                    true,
+                    &mut next_vreg,
+                )?;
+                values.insert(result, lowered);
+            } else if let Some(cast) = op_obj.downcast_ref::<FPToUIOp>() {
+                let (value, result) = (cast.get_operand(ctx), cast.get_result(ctx));
+                let src_ty = value.get_type(ctx);
+                let lowered_value = lookup_value(ctx, &values, value)?;
+                let lowered = fp_to_int(
+                    ctx,
+                    insert_block,
+                    lowered_value,
+                    src_ty,
+                    result.get_type(ctx),
+                    false,
+                    &mut next_vreg,
+                )?;
+                values.insert(result, lowered);
+            } else if let Some(cast) = op_obj.downcast_ref::<FPExtOp>() {
+                let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
+                let src = materialize_fp(
+                    ctx, insert_block, value, FpKind::F32, &mut next_vreg, "fpext input",
+                )?;
+                let dst = fresh_fpr(&mut next_vreg, FpKind::F64);
+                aarch64_ops::unary(ctx, aarch64_ops::FcvtDSOp::OPCODE, dst, src)
+                    .insert_at_back(insert_block, ctx);
+                values.insert(cast.get_result(ctx), LoweredValue::Reg(dst));
+            } else if let Some(cast) = op_obj.downcast_ref::<FPTruncOp>() {
+                let value = lookup_value(ctx, &values, cast.get_operand(ctx))?;
+                let src = materialize_fp(
+                    ctx, insert_block, value, FpKind::F64, &mut next_vreg, "fptrunc input",
+                )?;
+                let dst = fresh_fpr(&mut next_vreg, FpKind::F32);
+                aarch64_ops::unary(ctx, aarch64_ops::FcvtSDOp::OPCODE, dst, src)
+                    .insert_at_back(insert_block, ctx);
+                values.insert(cast.get_result(ctx), LoweredValue::Reg(dst));
             } else if let Some(kind) = binary_kind(&*op_obj) {
                 let op_ref = op_ptr.deref(ctx);
                 let result = op_ref.get_result(0);
@@ -737,11 +1076,19 @@ fn lower_function(
                     values.insert(result, LoweredValue::Imm(imm));
                     continue;
                 }
+                // Arithmetic shift right needs a sign-extended left operand:
+                // the (signless) type does not carry the signedness, the op
+                // does.
+                let lhs_ty = if kind == BinaryKind::AShr {
+                    signed_variant_ty(ctx, lhs.get_type(ctx))
+                } else {
+                    lhs.get_type(ctx)
+                };
                 let lhs = materialize_typed(
                     ctx,
                     insert_block,
                     lhs_value,
-                    lhs.get_type(ctx),
+                    lhs_ty,
                     &mut next_vreg,
                     "binary lhs",
                 )?;
@@ -939,6 +1286,190 @@ pub(super) fn fresh_vreg(next_vreg: &mut usize) -> Register {
     reg
 }
 
+/// The scalar floating-point width of a value: `f64` maps to the `d`
+/// register file, `f32` to the `s` file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FpKind {
+    F32,
+    F64,
+}
+
+impl FpKind {
+    pub(super) fn class(self) -> RegisterClass {
+        match self {
+            Self::F32 => RegisterClass::Fpr32,
+            Self::F64 => RegisterClass::Fpr64,
+        }
+    }
+}
+
+pub(super) fn fp_kind(ctx: &Context, ty: TypeHandle) -> Option<FpKind> {
+    let ty_ref = ty.deref(ctx);
+    if ty_ref
+        .downcast_ref::<crate::dialects::builtin::types::FP32Type>()
+        .is_some()
+    {
+        return Some(FpKind::F32);
+    }
+    if ty_ref
+        .downcast_ref::<crate::dialects::builtin::types::FP64Type>()
+        .is_some()
+    {
+        return Some(FpKind::F64);
+    }
+    None
+}
+
+pub(super) fn fresh_fpr(next_vreg: &mut usize, kind: FpKind) -> Register {
+    let reg = match kind {
+        FpKind::F64 => Register::virtual_fpr64(*next_vreg as u32),
+        FpKind::F32 => Register::virtual_fpr32(*next_vreg as u32),
+    };
+    *next_vreg += 1;
+    reg
+}
+
+/// A register-class-aware copy: GPR-to-GPR uses `mov`, FP-to-FP the matching
+/// `fmov` form, and cross-file copies the bit-preserving `fmov` between the
+/// register files.
+pub(super) fn emit_move(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    dst: Register,
+    src: Register,
+) -> STAIRResult<()> {
+    use RegisterClass::{Fpr32, Fpr64, Gpr64};
+    let op = match (dst.class(), src.class()) {
+        (Gpr64, Gpr64) => aarch64_ops::mov(ctx, dst, src),
+        (Fpr64, Fpr64) => aarch64_ops::fmov_rr(ctx, aarch64_ops::FmovDOp::OPCODE, dst, src),
+        (Fpr32, Fpr32) => aarch64_ops::fmov_rr(ctx, aarch64_ops::FmovSOp::OPCODE, dst, src),
+        (Fpr64, Gpr64) => aarch64_ops::unary(ctx, aarch64_ops::FmovDXOp::OPCODE, dst, src),
+        (Gpr64, Fpr64) => aarch64_ops::unary(ctx, aarch64_ops::FmovXDOp::OPCODE, dst, src),
+        (Fpr32, Gpr64) => aarch64_ops::unary(ctx, aarch64_ops::FmovSWOp::OPCODE, dst, src),
+        (Gpr64, Fpr32) => aarch64_ops::unary(ctx, aarch64_ops::FmovWSOp::OPCODE, dst, src),
+        (dst_class, src_class) => {
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                "register copy between incompatible classes {dst_class:?} <- {src_class:?}"
+            ))));
+        }
+    };
+    op.insert_at_back(block, ctx);
+    Ok(())
+}
+
+/// Materialize the FP value with bit pattern `bits` into a fresh FP register:
+/// an `fmov` immediate when the pattern is VFPExpandImm-representable, a GPR
+/// materialization plus cross-file `fmov` for cheap patterns (zero or a
+/// single 16-bit chunk), and a literal-pool load otherwise.
+fn materialize_fp_constant(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    bits: u64,
+    kind: FpKind,
+    next_vreg: &mut usize,
+) -> Register {
+    let dst = fresh_fpr(next_vreg, kind);
+    let imm8 = match kind {
+        FpKind::F64 => fmov_imm8_for_f64_bits(bits),
+        FpKind::F32 => fmov_imm8_for_f32_bits(bits as u32),
+    };
+    if let Some(imm8) = imm8 {
+        let opcode = match kind {
+            FpKind::F64 => aarch64_ops::FmovImmDOp::OPCODE,
+            FpKind::F32 => aarch64_ops::FmovImmSOp::OPCODE,
+        };
+        aarch64_ops::fmov_imm(ctx, opcode, dst, imm8 as u64).insert_at_back(block, ctx);
+        return dst;
+    }
+    // A pattern whose GPR materialization is at most one instruction (zero,
+    // or a single 16-bit chunk) is cheaper through the integer file than
+    // through the literal pool.
+    let chunks = (0..4)
+        .filter(|chunk| (bits >> (chunk * 16)) & 0xffff != 0)
+        .count();
+    if chunks <= 1 {
+        let gpr = fresh_vreg(next_vreg);
+        materialize_u64_immediate(ctx, block, gpr, bits);
+        let opcode = match kind {
+            FpKind::F64 => aarch64_ops::FmovDXOp::OPCODE,
+            FpKind::F32 => aarch64_ops::FmovSWOp::OPCODE,
+        };
+        aarch64_ops::unary(ctx, opcode, dst, gpr).insert_at_back(block, ctx);
+        return dst;
+    }
+    // Arbitrary bit pattern: place it in the literal pool and load it. The
+    // label is content-addressed, so repeated constants share one entry.
+    let (label, bytes, load_opcode) = match kind {
+        FpKind::F64 => (
+            format!("L_stair_fp64_{bits:016x}"),
+            bits.to_le_bytes().to_vec(),
+            aarch64_ops::LdrdRegOffsetOp::OPCODE,
+        ),
+        FpKind::F32 => (
+            format!("L_stair_fp32_{:08x}", bits as u32),
+            (bits as u32).to_le_bytes().to_vec(),
+            aarch64_ops::LdrsRegOffsetOp::OPCODE,
+        ),
+    };
+    let addr = fresh_vreg(next_vreg);
+    aarch64_ops::adr_literal(ctx, addr, label, bytes).insert_at_back(block, ctx);
+    aarch64_ops::ldr_reg_offset_sized(ctx, load_opcode, dst, addr, 0).insert_at_back(block, ctx);
+    dst
+}
+
+/// Materialize `value` into an FP register of `kind`'s class. Values already
+/// in the right FP class pass through; GPR-resident values (bitcasts, packed
+/// aggregate fields, stack-argument loads) cross the register files with
+/// `fmov`; immediates carry their IEEE bit pattern.
+pub(super) fn materialize_fp(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    value: LoweredValue,
+    kind: FpKind,
+    next_vreg: &mut usize,
+    context: &str,
+) -> STAIRResult<Register> {
+    match value {
+        LoweredValue::Reg(reg) if reg.class() == kind.class() => Ok(reg),
+        LoweredValue::Reg(reg) if reg.is_fpr() => Err(input_error_noloc!(
+            Aarch64Err::UnsupportedOp(format!(
+                "cannot materialize {context}: FP register {reg} has the wrong width for {kind:?}"
+            ))
+        )),
+        LoweredValue::Imm(bits) => Ok(materialize_fp_constant(
+            ctx,
+            block,
+            bits as u64,
+            kind,
+            next_vreg,
+        )),
+        LoweredValue::Undef => {
+            Ok(materialize_fp_constant(ctx, block, 0, kind, next_vreg))
+        }
+        other => {
+            // Anything else (a GPR register, an aggregate wrapper, ...)
+            // materializes to its 64-bit bit pattern first and then crosses
+            // into the FP file.
+            let gpr = materialize(ctx, block, other, next_vreg, context)?;
+            let dst = fresh_fpr(next_vreg, kind);
+            let opcode = match kind {
+                FpKind::F64 => aarch64_ops::FmovDXOp::OPCODE,
+                FpKind::F32 => aarch64_ops::FmovSWOp::OPCODE,
+            };
+            aarch64_ops::unary(ctx, opcode, dst, gpr).insert_at_back(block, ctx);
+            Ok(dst)
+        }
+    }
+}
+
+/// Where one materialized call argument goes: an integer argument register,
+/// an FP argument register, or an 8-byte outgoing stack slot.
+enum CallArgDst {
+    Gpr(u8),
+    Fpr(Register),
+    Stack(u64),
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum LoweredValue {
     Reg(Register),
@@ -1084,6 +1615,9 @@ pub(super) fn materialize_typed(
         let (lo, _) = materialize_pair(ctx, entry, value, ty, next_vreg, context)?;
         return Ok(lo);
     }
+    if let Some(kind) = fp_kind(ctx, ty) {
+        return materialize_fp(ctx, entry, value, kind, next_vreg, context);
+    }
     let context = format!(
         "{context} (type {})",
         pliron::printable::Printable::disp(&ty, ctx)
@@ -1131,34 +1665,16 @@ pub(super) fn materialize_pair(
             Ok((lo, hi))
         }
         LoweredValue::Reg(lo) => {
-            let hi = fresh_vreg(next_vreg);
-            if integer_width_and_signedness(ctx, ty)
+            let hi = if integer_width_and_signedness(ctx, ty)
                 .map(|(_, signed)| signed)
                 .unwrap_or(false)
             {
-                let sign = fresh_vreg(next_vreg);
-                materialize_u64_immediate(ctx, entry, sign, 63);
-                aarch64_ops::binary(
-                    ctx,
-                    aarch64_ops::LsrOp::OPCODE,
-                    hi.clone(),
-                    lo.clone(),
-                    sign,
-                )
-                .insert_at_back(entry, ctx);
-                let mask = fresh_vreg(next_vreg);
-                materialize_u64_immediate(ctx, entry, mask, 0u64.wrapping_sub(1));
-                aarch64_ops::binary(
-                    ctx,
-                    aarch64_ops::MulOp::OPCODE,
-                    hi.clone(),
-                    hi.clone(),
-                    mask,
-                )
-                .insert_at_back(entry, ctx);
+                sign_extend_high_half(ctx, entry, lo.clone(), next_vreg)
             } else {
-                materialize_u64_immediate(ctx, entry, hi, 0);
-            }
+                let hi = fresh_vreg(next_vreg);
+                materialize_u64_immediate(ctx, entry, hi.clone(), 0);
+                hi
+            };
             Ok((lo, hi))
         }
         other => {
@@ -1170,6 +1686,32 @@ pub(super) fn materialize_pair(
     }
 }
 
+/// The sign-extension high half of a 64-bit register: `(lo >> 63) * -1`,
+/// i.e. all zeros or all ones depending on `lo`'s sign bit.
+fn sign_extend_high_half(
+    ctx: &mut Context,
+    entry: Ptr<crate::ir::basic_block::BasicBlock>,
+    lo: Register,
+    next_vreg: &mut usize,
+) -> Register {
+    let sign = fresh_vreg(next_vreg);
+    materialize_u64_immediate(ctx, entry, sign.clone(), 63);
+    let hi = fresh_vreg(next_vreg);
+    aarch64_ops::binary(ctx, aarch64_ops::LsrOp::OPCODE, hi.clone(), lo, sign)
+        .insert_at_back(entry, ctx);
+    let mask = fresh_vreg(next_vreg);
+    materialize_u64_immediate(ctx, entry, mask.clone(), 0u64.wrapping_sub(1));
+    aarch64_ops::binary(
+        ctx,
+        aarch64_ops::MulOp::OPCODE,
+        hi.clone(),
+        hi.clone(),
+        mask,
+    )
+    .insert_at_back(entry, ctx);
+    hi
+}
+
 pub(super) fn materialize(
     ctx: &mut Context,
     entry: Ptr<crate::ir::basic_block::BasicBlock>,
@@ -1178,6 +1720,18 @@ pub(super) fn materialize(
     context: &str,
 ) -> STAIRResult<Register> {
     match value {
+        // A value living in the FP file used as an integer (bitcast, packed
+        // aggregate field): move its bit pattern across the register files.
+        LoweredValue::Reg(reg) if reg.is_fpr() => {
+            let dst = fresh_vreg(next_vreg);
+            let opcode = if reg.class() == RegisterClass::Fpr64 {
+                aarch64_ops::FmovXDOp::OPCODE
+            } else {
+                aarch64_ops::FmovWSOp::OPCODE
+            };
+            aarch64_ops::unary(ctx, opcode, dst, reg).insert_at_back(entry, ctx);
+            Ok(dst)
+        }
         LoweredValue::Reg(reg) => Ok(reg),
         LoweredValue::RegPair(lo, _) => Ok(lo),
         LoweredValue::Imm(imm) => {
@@ -1463,6 +2017,9 @@ pub(super) fn block_arg_value(
             fresh_vreg(next_vreg),
         ));
     }
+    if let Some(kind) = fp_kind(ctx, ty) {
+        return Ok(LoweredValue::Reg(fresh_fpr(next_vreg, kind)));
+    }
     if is_aggregate_ty(ctx, ty) {
         let fields = struct_fields(ctx, ty)?;
         let mut lowered = Vec::with_capacity(fields.len());
@@ -1509,6 +2066,12 @@ pub(super) fn is_stack_scalar_ty(ctx: &Context, ty: TypeHandle) -> bool {
         .is_some()
         || ty_ref
             .downcast_ref::<crate::dialects::llvm::types::PointerType>()
+            .is_some()
+        || ty_ref
+            .downcast_ref::<crate::dialects::builtin::types::FP32Type>()
+            .is_some()
+        || ty_ref
+            .downcast_ref::<crate::dialects::builtin::types::FP64Type>()
             .is_some()
 }
 
@@ -1623,6 +2186,7 @@ pub(super) fn fold_binary(
             BinaryKind::Xor => lhs ^ rhs,
             BinaryKind::Shl => lhs.wrapping_shl(rhs as u32),
             BinaryKind::Shr => lhs.wrapping_shr(rhs as u32),
+            BinaryKind::AShr => (lhs as i128).wrapping_shr(rhs as u32) as u128,
         };
         return Some(result);
     }
@@ -1670,6 +2234,9 @@ pub(super) fn fold_binary(
         BinaryKind::Xor => lhs ^ rhs,
         BinaryKind::Shl => lhs.wrapping_shl(rhs as u32),
         BinaryKind::Shr => lhs.wrapping_shr(rhs as u32),
+        BinaryKind::AShr => {
+            (sign_extend_immediate(lhs, width) as i64).wrapping_shr(rhs as u32) as u64
+        }
     };
     Some((result & mask) as u128)
 }
@@ -1703,6 +2270,7 @@ pub(super) fn opcode(kind: BinaryKind) -> Aarch64Opcode {
         BinaryKind::Xor => aarch64_ops::XorOp::OPCODE,
         BinaryKind::Shl => aarch64_ops::ShlOp::OPCODE,
         BinaryKind::Shr => aarch64_ops::LsrOp::OPCODE,
+        BinaryKind::AShr => aarch64_ops::AsrOp::OPCODE,
     }
 }
 
@@ -1726,6 +2294,239 @@ pub(super) fn compare_operand_ty(
     ) {
         return ty;
     }
+    let width = {
+        let ty_ref = ty.deref(ctx);
+        match ty_ref.downcast_ref::<crate::dialects::builtin::types::IntegerType>() {
+            Some(int_ty) if int_ty.width() < 64 => int_ty.width(),
+            _ => return ty,
+        }
+    };
+    crate::dialects::builtin::types::IntegerType::get(
+        ctx,
+        width,
+        crate::dialects::builtin::types::Signedness::Signed,
+    )
+    .into()
+}
+
+// Floating-point lowering helpers ---------------------------------------------
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FloatBinaryKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+fn float_binary_kind(op: &dyn Op) -> Option<FloatBinaryKind> {
+    if op.downcast_ref::<FAddOp>().is_some() {
+        Some(FloatBinaryKind::Add)
+    } else if op.downcast_ref::<FSubOp>().is_some() {
+        Some(FloatBinaryKind::Sub)
+    } else if op.downcast_ref::<FMulOp>().is_some() {
+        Some(FloatBinaryKind::Mul)
+    } else if op.downcast_ref::<FDivOp>().is_some() {
+        Some(FloatBinaryKind::Div)
+    } else if op.downcast_ref::<FRemOp>().is_some() {
+        Some(FloatBinaryKind::Rem)
+    } else {
+        None
+    }
+}
+
+/// The condition code holding after `fcmp` for a predicate that maps to a
+/// single test. On AArch64 an unordered comparison sets nzcv to `0011`
+/// (C and V), which makes exactly `one`/`ueq` unrepresentable as one code.
+fn fcmp_condition_code(predicate: &FCmpPredicateAttr) -> Option<ConditionCode> {
+    Some(match predicate {
+        FCmpPredicateAttr::OEQ => ConditionCode::Eq,
+        FCmpPredicateAttr::OGT => ConditionCode::Gt,
+        FCmpPredicateAttr::OGE => ConditionCode::Ge,
+        FCmpPredicateAttr::OLT => ConditionCode::Mi,
+        FCmpPredicateAttr::OLE => ConditionCode::Ls,
+        FCmpPredicateAttr::ORD => ConditionCode::Vc,
+        FCmpPredicateAttr::UNE => ConditionCode::Ne,
+        FCmpPredicateAttr::UGT => ConditionCode::Hi,
+        FCmpPredicateAttr::UGE => ConditionCode::Pl,
+        FCmpPredicateAttr::ULT => ConditionCode::Lt,
+        FCmpPredicateAttr::ULE => ConditionCode::Le,
+        FCmpPredicateAttr::UNO => ConditionCode::Vs,
+        _ => return None,
+    })
+}
+
+/// Lower an `llvm.fcmp` to a 0/1 GPR value.
+fn lower_fcmp(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    values: &HashMap<Value, LoweredValue>,
+    predicate: FCmpPredicateAttr,
+    lhs: Value,
+    rhs: Value,
+    next_vreg: &mut usize,
+) -> STAIRResult<LoweredValue> {
+    if matches!(predicate, FCmpPredicateAttr::False) {
+        return Ok(LoweredValue::Imm(0));
+    }
+    if matches!(predicate, FCmpPredicateAttr::True) {
+        return Ok(LoweredValue::Imm(1));
+    }
+    let fp = fp_kind(ctx, lhs.get_type(ctx)).ok_or_else(|| {
+        input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+            "fcmp on non-scalar-float type {}",
+            pliron::printable::Printable::disp(&lhs.get_type(ctx), ctx)
+        )))
+    })?;
+    let lhs_value = lookup_value(ctx, values, lhs)?;
+    let rhs_value = lookup_value(ctx, values, rhs)?;
+    let lhs = materialize_fp(ctx, block, lhs_value, fp, next_vreg, "fcmp lhs")?;
+    let rhs = materialize_fp(ctx, block, rhs_value, fp, next_vreg, "fcmp rhs")?;
+    let fcmp_opcode = match fp {
+        FpKind::F64 => aarch64_ops::FcmpDOp::OPCODE,
+        FpKind::F32 => aarch64_ops::FcmpSOp::OPCODE,
+    };
+    aarch64_ops::fcmp(ctx, fcmp_opcode, lhs, rhs).insert_at_back(block, ctx);
+    if let Some(cond) = fcmp_condition_code(&predicate) {
+        let dst = fresh_vreg(next_vreg);
+        aarch64_ops::cset(ctx, dst, cond).insert_at_back(block, ctx);
+        return Ok(LoweredValue::Reg(dst));
+    }
+    // `one` (lt-or-gt, ordered) and `ueq` (eq-or-unordered) need two tests
+    // of the same nzcv, combined with `orr`.
+    let (first, second) = match predicate {
+        FCmpPredicateAttr::ONE => (ConditionCode::Mi, ConditionCode::Gt),
+        FCmpPredicateAttr::UEQ => (ConditionCode::Eq, ConditionCode::Vs),
+        _ => unreachable!("all other predicates map to a single condition code"),
+    };
+    let first_bit = fresh_vreg(next_vreg);
+    aarch64_ops::cset(ctx, first_bit, first).insert_at_back(block, ctx);
+    let second_bit = fresh_vreg(next_vreg);
+    aarch64_ops::cset(ctx, second_bit, second).insert_at_back(block, ctx);
+    let dst = fresh_vreg(next_vreg);
+    aarch64_ops::binary(ctx, aarch64_ops::OrOp::OPCODE, dst, first_bit, second_bit)
+        .insert_at_back(block, ctx);
+    Ok(LoweredValue::Reg(dst))
+}
+
+/// Lower `llvm.sitofp` / `llvm.uitofp`. Sources up to 64 bits go through
+/// `scvtf`/`ucvtf` on the 64-bit register (sub-64-bit sources are first
+/// sign- or zero-extended to 64 bits, which preserves their value).
+fn int_to_fp(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    values: &HashMap<Value, LoweredValue>,
+    value: Value,
+    result: Value,
+    signed: bool,
+    next_vreg: &mut usize,
+) -> STAIRResult<LoweredValue> {
+    let src_ty = value.get_type(ctx);
+    if is_128_bit_integer(ctx, src_ty) {
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
+            "128-bit integer to floating-point conversion".to_string()
+        )));
+    }
+    let fp = fp_kind(ctx, result.get_type(ctx)).ok_or_else(|| {
+        input_error_noloc!(Aarch64Err::UnsupportedType(
+            "int-to-float conversion to a non-scalar-float type".to_string()
+        ))
+    })?;
+    let lowered = lookup_value(ctx, values, value)?;
+    // The predicate-style signedness lives on the op, not the (signless)
+    // type: re-type sub-64-bit sources so materialization extends correctly.
+    let src_ty = if signed {
+        signed_variant_ty(ctx, src_ty)
+    } else {
+        src_ty
+    };
+    let src = materialize_typed(ctx, block, lowered, src_ty, next_vreg, "int-to-float input")?;
+    let opcode = match (signed, fp) {
+        (true, FpKind::F64) => aarch64_ops::ScvtfDXOp::OPCODE,
+        (true, FpKind::F32) => aarch64_ops::ScvtfSXOp::OPCODE,
+        (false, FpKind::F64) => aarch64_ops::UcvtfDXOp::OPCODE,
+        (false, FpKind::F32) => aarch64_ops::UcvtfSXOp::OPCODE,
+    };
+    let dst = fresh_fpr(next_vreg, fp);
+    aarch64_ops::unary(ctx, opcode, dst, src).insert_at_back(block, ctx);
+    Ok(LoweredValue::Reg(dst))
+}
+
+/// Lower a float-to-int conversion through `fcvtzs`/`fcvtzu`, which saturate
+/// at the destination width and convert NaN to 0 — exactly Rust's `as`-cast
+/// semantics (mir-lower routes those here as `llvm_fptosi_sat_*` /
+/// `llvm_fptoui_sat_*` calls). Only 32- and 64-bit destinations have a
+/// hardware form with the right saturation bounds.
+fn fp_to_int(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    value: LoweredValue,
+    src_ty: TypeHandle,
+    result_ty: TypeHandle,
+    signed: bool,
+    next_vreg: &mut usize,
+) -> STAIRResult<LoweredValue> {
+    let fp = fp_kind(ctx, src_ty).ok_or_else(|| {
+        input_error_noloc!(Aarch64Err::UnsupportedType(
+            "float-to-int conversion from a non-scalar-float type".to_string()
+        ))
+    })?;
+    let width = integer_width_and_signedness(ctx, result_ty)
+        .map(|(width, _)| width)
+        .ok_or_else(|| {
+            input_error_noloc!(Aarch64Err::UnsupportedType(
+                "float-to-int conversion to a non-integer type".to_string()
+            ))
+        })?;
+    let use_64 = match width {
+        64 => true,
+        32 => false,
+        other => {
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                "saturating float-to-int conversion to i{other} (only 32- and 64-bit \
+                 destinations have a matching fcvtz form)"
+            ))));
+        }
+    };
+    let src = materialize_fp(ctx, block, value, fp, next_vreg, "float-to-int input")?;
+    let opcode = match (signed, use_64, fp) {
+        (true, true, FpKind::F64) => aarch64_ops::FcvtzsXDOp::OPCODE,
+        (true, false, FpKind::F64) => aarch64_ops::FcvtzsWDOp::OPCODE,
+        (true, true, FpKind::F32) => aarch64_ops::FcvtzsXSOp::OPCODE,
+        (true, false, FpKind::F32) => aarch64_ops::FcvtzsWSOp::OPCODE,
+        (false, true, FpKind::F64) => aarch64_ops::FcvtzuXDOp::OPCODE,
+        (false, false, FpKind::F64) => aarch64_ops::FcvtzuWDOp::OPCODE,
+        (false, true, FpKind::F32) => aarch64_ops::FcvtzuXSOp::OPCODE,
+        (false, false, FpKind::F32) => aarch64_ops::FcvtzuWSOp::OPCODE,
+    };
+    let dst = fresh_vreg(next_vreg);
+    aarch64_ops::unary(ctx, opcode, dst, src).insert_at_back(block, ctx);
+    Ok(LoweredValue::Reg(dst))
+}
+
+/// The `llvm_fptosi_sat_iN_fM` / `llvm_fptoui_sat_iN_fM` intrinsic family
+/// mir-lower declares for Rust's saturating float-to-int `as` casts. Parses
+/// the destination width and signedness; the source float type comes from
+/// the argument.
+pub(super) fn saturating_fp_to_int_intrinsic(name: &str) -> Option<(bool, u32)> {
+    let (signed, rest) = if let Some(rest) = name.strip_prefix("llvm_fptosi_sat_i") {
+        (true, rest)
+    } else if let Some(rest) = name.strip_prefix("llvm_fptoui_sat_i") {
+        (false, rest)
+    } else {
+        return None;
+    };
+    let (width, float_suffix) = rest.split_once('_')?;
+    if !matches!(float_suffix, "f16" | "f32" | "f64") {
+        return None;
+    }
+    Some((signed, width.parse().ok()?))
+}
+
+/// The signed spelling of a sub-64-bit integer type, so materialization
+/// sign-extends; wider and non-integer types pass through unchanged.
+pub(super) fn signed_variant_ty(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
     let width = {
         let ty_ref = ty.deref(ctx);
         match ty_ref.downcast_ref::<crate::dialects::builtin::types::IntegerType>() {

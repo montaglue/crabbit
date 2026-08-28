@@ -25,7 +25,7 @@ impl Pass for X86_64LegalizePass {
         "x86-64-legalize"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {
@@ -49,9 +49,9 @@ impl Pass for X86_64LegalizePass {
 fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
     let mnemonic = x86_64_ops::mnemonic(ctx, op).unwrap_or("<unknown>");
     for key in [
-        ATTR_KEY_X86_64_RD.as_str(),
-        ATTR_KEY_X86_64_RN.as_str(),
-        ATTR_KEY_X86_64_RM.as_str(),
+        ATTR_KEY_X86_64_RD.as_ref(),
+        ATTR_KEY_X86_64_RN.as_ref(),
+        ATTR_KEY_X86_64_RM.as_ref(),
     ] {
         let Some(register) = x86_64_ops::reg(ctx, op, key) else {
             continue;

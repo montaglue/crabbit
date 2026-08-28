@@ -371,6 +371,10 @@ impl Printable for FixupsAttr {
             }
             let kind = match fixup.kind {
                 FixupKind::Call26 => "call26",
+                FixupKind::AdrpPage21 => "adrp21",
+                FixupKind::AddLo12 => "addlo12",
+                FixupKind::TprelHi12 => "tprelhi12",
+                FixupKind::TprelLo12Nc => "tprello12nc",
             };
             write!(f, "{kind}:{}:{}", fixup.offset, fixup.symbol)?;
         }
@@ -386,6 +390,10 @@ fn parse_fixup<'a>(state_stream: &mut StateStream<'a>) -> ParseResult<'a, Binary
     let (kind, _commit) = kind_word.parse_stream(state_stream).into_result()?;
     let kind = match kind.as_str() {
         "call26" => FixupKind::Call26,
+        "adrp21" => FixupKind::AdrpPage21,
+        "addlo12" => FixupKind::AddLo12,
+        "tprelhi12" => FixupKind::TprelHi12,
+        "tprello12nc" => FixupKind::TprelLo12Nc,
         _ => input_err!(loc, "invalid AArch64 fixup kind `{kind}`")?,
     };
     let (offset, _commit) = token(':')

@@ -35,7 +35,7 @@ impl Pass for X86_64FrameLowerPass {
         "x86-64-frame-lower"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -145,7 +145,7 @@ mod tests {
             .map(|inst| {
                 (
                     x86_64_ops::mnemonic(ctx, inst).unwrap().to_string(),
-                    x86_64_ops::reg(ctx, inst, x86_64_ops::ATTR_KEY_X86_64_RD.as_str())
+                    x86_64_ops::reg(ctx, inst, x86_64_ops::ATTR_KEY_X86_64_RD.as_ref())
                         .map(|reg| reg.to_string()),
                 )
             })

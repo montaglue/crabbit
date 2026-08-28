@@ -40,7 +40,7 @@ impl Pass for LlvmAarch64AbiPass {
     }
 
     fn run(
-        &self,
+        &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,

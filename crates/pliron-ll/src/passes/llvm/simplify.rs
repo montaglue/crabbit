@@ -54,7 +54,7 @@ impl Pass for LLVMSimplifyPass {
         "llvm-simplify"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let pure_ops = pure_op_ids();
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {

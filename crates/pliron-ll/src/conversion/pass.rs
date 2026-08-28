@@ -1,10 +1,12 @@
-//! Pass infrastructure: pliron's own [pliron::pass_manager] module,
-//! re-exported under the crate's compatibility facade, plus the small
-//! conveniences (a sequential [Passes] runner, [PMConfig] IR printing) that
-//! upstream pliron only grew after the rev this workspace pins. The pin
-//! follows NVlabs/cuda-oxide, which crabbit consumes unpatched; when their
-//! pin moves past the upstream additions, these substitutes disappear in
-//! favor of the upstream types.
+//! Pass infrastructure: pliron's own [pliron::pass] module, re-exported
+//! under the crate's compatibility facade. Upstream 0.17 grew its own
+//! `Passes` runner and `PMConfig` printing hooks, but its `print_after_all`
+//! dumps every *leaf* pass with a global run counter, while crabbit's trace
+//! collection (crabbit/src/lib.rs) expects one `{n}-after-{name}.plir` dump
+//! per top-level pipeline entry (a nested target pipeline is a single
+//! entry). The local [Passes]/[PMConfig] pair below preserves exactly that
+//! dump granularity and naming, so it stays in place and shadows the
+//! upstream types in the glob re-export.
 //!
 //! `Pass::run` mutates the operation it is given and keeps its identity.
 //! Transformations that used to swap the root operation (instruction
@@ -18,7 +20,12 @@ use pliron::{
     printable::Printable,
 };
 
-pub use pliron::pass_manager::*;
+pub use pliron::pass::*;
+
+/// pliron's own mem2reg pass (its name, `mem2reg`, is what the pass dumps
+/// are keyed on). Re-exported here because callers historically got it from
+/// this facade, back when the pinned pliron rev only exposed a function.
+pub use pliron::opts::mem2reg::Mem2RegPass;
 
 /// A [PassResult] reporting that the IR changed — the common case for every
 /// pass here, none of which currently participate in analysis caching.
@@ -34,8 +41,8 @@ pub fn unchanged() -> PassResult {
     PassResult::default()
 }
 
-/// Pipeline printing configuration, mirroring upstream pliron's newer
-/// `PMConfig`: when `print_after_all` is set, [Passes::run] writes
+/// Pipeline printing configuration, mirroring upstream pliron's `PMConfig`:
+/// when `print_after_all` is set, [Passes::run] writes
 /// `{count}-after-{name}.plir` dumps into `ir_printing_dir`.
 #[derive(Default, Clone)]
 pub struct PMConfig {
@@ -43,8 +50,8 @@ pub struct PMConfig {
     pub ir_printing_dir: Option<std::path::PathBuf>,
 }
 
-/// A sequential pass runner, mirroring upstream pliron's newer `Passes`:
-/// runs each added [Pass] on the same root operation in order. Analyses are
+/// A sequential pass runner, mirroring upstream pliron's `Passes`: runs
+/// each added [Pass] on the same root operation in order. Analyses are
 /// conservatively discarded after every IR-changing pass.
 #[derive(Default)]
 pub struct Passes {
@@ -62,13 +69,13 @@ impl Passes {
     }
 
     pub fn run(
-        &self,
+        &mut self,
         op: Ptr<Operation>,
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
     ) -> pliron::result::Result<PassResult> {
         let mut aggregate = changed();
-        for (count, pass) in self.passes.iter().enumerate() {
+        for (count, pass) in self.passes.iter_mut().enumerate() {
             let result = pass.run(op, ctx, analyses)?;
             if matches!(result.ir_changed, pliron::irbuild::IRStatus::Changed) {
                 // No fine-grained invalidation: every cached analysis is
@@ -100,32 +107,11 @@ impl Pass for Passes {
     }
 
     fn run(
-        &self,
+        &mut self,
         op: Ptr<Operation>,
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
     ) -> pliron::result::Result<PassResult> {
         Passes::run(self, op, ctx, analyses)
-    }
-}
-
-/// [Pass] wrapper over [pliron::opts::mem2reg::mem2reg], which this pliron
-/// rev only exposes as a function (upstream grew a `Mem2RegPass` later).
-pub struct Mem2RegPass;
-
-impl Pass for Mem2RegPass {
-    fn name(&self) -> &str {
-        "mem2reg"
-    }
-
-    fn run(
-        &self,
-        op: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> pliron::result::Result<PassResult> {
-        let mut result = PassResult::default();
-        result.ir_changed = pliron::opts::mem2reg::mem2reg(op, ctx, analyses)?;
-        Ok(result)
     }
 }

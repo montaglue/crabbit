@@ -34,7 +34,7 @@ impl Pass for X86_64RegisterAllocatePass {
         "x86-64-register-allocate"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -522,11 +522,11 @@ mod tests {
         allocate_function(&mut ctx, func).unwrap();
         let insts: Vec<_> = entry.deref(&ctx).iter(&ctx).collect();
         assert_eq!(
-            x86_64_ops::reg(&ctx, insts[0], ATTR_KEY_X86_64_RD.as_str()).unwrap(),
+            x86_64_ops::reg(&ctx, insts[0], ATTR_KEY_X86_64_RD.as_ref()).unwrap(),
             registers::RBX
         );
         assert_eq!(
-            x86_64_ops::reg(&ctx, insts[2], ATTR_KEY_X86_64_RD.as_str()).unwrap(),
+            x86_64_ops::reg(&ctx, insts[2], ATTR_KEY_X86_64_RD.as_ref()).unwrap(),
             registers::RBX
         );
     }
@@ -601,7 +601,7 @@ mod tests {
         );
         // Uses take the first scratch registers; the def gets its own.
         assert_eq!(
-            x86_64_ops::reg(&ctx, insts[add_index], ATTR_KEY_X86_64_RD.as_str()).unwrap(),
+            x86_64_ops::reg(&ctx, insts[add_index], ATTR_KEY_X86_64_RD.as_ref()).unwrap(),
             registers::R15
         );
     }

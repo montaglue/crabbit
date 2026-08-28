@@ -6,9 +6,11 @@
 //! the [targets] registry.
 
 pub mod aarch64;
+pub mod codegen_opts;
 pub mod conversion;
 pub mod ll;
 pub mod macho;
+pub mod nvptx;
 pub mod passes;
 pub mod targets;
 pub mod triple;

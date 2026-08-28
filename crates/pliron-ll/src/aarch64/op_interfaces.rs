@@ -58,6 +58,17 @@ pub trait RegisterOperandsOpInterface {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum FixupKind {
     Call26,
+    /// ADRP's 21-bit page-relative immediate (bits 12..32 of the delta to
+    /// the target's 4KiB page).
+    AdrpPage21,
+    /// ADD's 12-bit immediate holding the low 12 bits of the target address.
+    AddLo12,
+    /// ADD (LSL 12) immediate holding bits 12..24 of the target's
+    /// TP-relative offset (local-exec TLS).
+    TprelHi12,
+    /// ADD immediate holding the low 12 bits of the target's TP-relative
+    /// offset (local-exec TLS, no overflow check).
+    TprelLo12Nc,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

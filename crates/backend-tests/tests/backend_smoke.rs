@@ -307,6 +307,137 @@ fn hello_world_aarch64_crate_compiles_and_prints_with_codegen_dylib() {
     }
 }
 
+#[test]
+fn fp_aarch64_crate_computes_floats_and_dynamic_shifts_with_codegen_dylib() {
+    let root = repo_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let backend = build_backend(&root, &cargo);
+
+    let fixture = fixture_manifest(&root, "fp-aarch64");
+    for profile in FixtureProfile::ALL {
+        let target_dir = fixture_target_dir(&root, "fp-aarch64", profile);
+        clear_target_dir(&target_dir, "fp");
+
+        let fixture_status = compile_fixture(
+            &cargo,
+            &fixture,
+            "fp-aarch64",
+            &backend,
+            &target_dir,
+            profile,
+            &[],
+        );
+
+        assert!(
+            fixture_status.success(),
+            "fp fixture did not compile with crabbit dylib in {} mode",
+            profile.name()
+        );
+
+        let executable = executable_path(&target_dir, profile, "fp-aarch64");
+        let output = Command::new(&executable)
+            .output()
+            .expect("failed to run fp executable");
+        assert!(
+            output.status.success(),
+            "fp executable exited unsuccessfully in {} mode: {}\nstdout: {}\nstderr: {}",
+            profile.name(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"fp ok\n");
+    }
+}
+
+#[test]
+fn int128_aarch64_crate_computes_128_bit_overflow_and_collects_with_codegen_dylib() {
+    let root = repo_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let backend = build_backend(&root, &cargo);
+
+    let fixture = fixture_manifest(&root, "int128-aarch64");
+    for profile in FixtureProfile::ALL {
+        let target_dir = fixture_target_dir(&root, "int128-aarch64", profile);
+        clear_target_dir(&target_dir, "int128");
+
+        let fixture_status = compile_fixture(
+            &cargo,
+            &fixture,
+            "int128-aarch64",
+            &backend,
+            &target_dir,
+            profile,
+            &[],
+        );
+
+        assert!(
+            fixture_status.success(),
+            "int128 fixture did not compile with crabbit dylib in {} mode",
+            profile.name()
+        );
+
+        let executable = executable_path(&target_dir, profile, "int128-aarch64");
+        let output = Command::new(&executable)
+            .output()
+            .expect("failed to run int128 executable");
+        assert!(
+            output.status.success(),
+            "int128 executable exited unsuccessfully in {} mode: {}\nstdout: {}\nstderr: {}",
+            profile.name(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"int128 ok\n");
+    }
+}
+
+#[test]
+fn hashmap_aarch64_crate_builds_and_reads_back_with_codegen_dylib() {
+    let root = repo_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let backend = build_backend(&root, &cargo);
+
+    let fixture = fixture_manifest(&root, "hashmap-aarch64");
+    for profile in FixtureProfile::ALL {
+        let target_dir = fixture_target_dir(&root, "hashmap-aarch64", profile);
+        clear_target_dir(&target_dir, "hashmap");
+
+        let fixture_status = compile_fixture(
+            &cargo,
+            &fixture,
+            "hashmap-aarch64",
+            &backend,
+            &target_dir,
+            profile,
+            &[],
+        );
+
+        assert!(
+            fixture_status.success(),
+            "hashmap fixture did not compile with crabbit dylib in {} mode",
+            profile.name()
+        );
+
+        // HashMap::new goes through std's `#[thread_local]` RandomState KEYS,
+        // so a correct run proves the ELF TLS path end to end.
+        let executable = executable_path(&target_dir, profile, "hashmap-aarch64");
+        let output = Command::new(&executable)
+            .output()
+            .expect("failed to run hashmap executable");
+        assert!(
+            output.status.success(),
+            "hashmap executable exited unsuccessfully in {} mode: {}\nstdout: {}\nstderr: {}",
+            profile.name(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"hashmap ok len=2 crab=bitte\n");
+    }
+}
+
 /// Feed `input` to `executable` on stdin and return its captured stdout.
 fn run_with_stdin(executable: &Path, args: &[&str], input: &str) -> std::process::Output {
     let mut child = Command::new(executable)

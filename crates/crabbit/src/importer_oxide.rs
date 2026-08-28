@@ -24,8 +24,7 @@ use crate::{
         builtin::op_interfaces::OneRegionInterface,
         builtin::{
             attributes::{FPDoubleAttr, FPSingleAttr, IdentifierAttr, IntegerAttr},
-            op_interfaces::SymbolOpInterface,
-            op_interfaces::{ATTR_KEY_SYM_NAME, OneResultInterface},
+            op_interfaces::{ATTR_KEY_SYM_NAME, SymbolOpInterface},
             types::{FP32Type, FP64Type, FunctionType, IntegerType, Signedness, UnitType},
         },
         llvm::{self, attributes::LinkageAttr},
@@ -61,10 +60,6 @@ pub struct ImportedCrate {
     pub kernel_module: Ptr<Operation>,
     pub kernel_count: usize,
     pub unsupported: Vec<ImportError>,
-    /// Symbols of `mir.func` definitions that must get internal linkage on
-    /// the lowered `llvm.func` (mir-lower does not carry linkage; crabbit's
-    /// StampFunctionLinkagePass applies these after lowering).
-    pub internal_symbols: Vec<String>,
 }
 
 pub const KERNEL_EXPORT_PREFIX: &str = "__stair_kernel_";
@@ -167,14 +162,12 @@ pub fn import_crate<'tcx>(tcx: TyCtxt<'tcx>) -> ImportedCrate {
                 item: tcx.def_path_str(entry_def_id),
                 reason: "the Rust entry point cannot be marked #[kernel]".to_string(),
             });
-            let internal_symbols = collect_internal_symbols(&ctx, module_body);
             return ImportedCrate {
                 ctx,
                 module,
                 kernel_module,
                 kernel_count,
                 unsupported,
-                internal_symbols,
             };
         }
         let rust_main = function_symbol(tcx, &mut legaliser, entry_def_id);
@@ -188,38 +181,13 @@ pub fn import_crate<'tcx>(tcx: TyCtxt<'tcx>) -> ImportedCrate {
 
     declare_default_allocator_shims(tcx, &mut ctx, module_body);
 
-    let internal_symbols = collect_internal_symbols(&ctx, module_body);
     ImportedCrate {
         ctx,
         module,
         kernel_module,
         kernel_count,
         unsupported,
-        internal_symbols,
     }
-}
-
-/// Symbols of `mir.func` definitions that [set_internal_linkage] marked with
-/// the `mir_func_linkage` attribute. mir-lower drops unknown attributes, so
-/// the set is carried on [ImportedCrate] and re-applied to the lowered
-/// `llvm.func` ops by crabbit's StampFunctionLinkagePass.
-fn collect_internal_symbols(ctx: &Context, module_body: Ptr<BasicBlock>) -> Vec<String> {
-    let key = ox::func_linkage_key();
-    module_body
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| {
-            let op_obj = Operation::get_op_dyn(op, ctx);
-            let symbol_op = op_cast::<dyn SymbolOpInterface>(&*op_obj)?;
-            let symbol = symbol_op.get_symbol_name(ctx).to_string();
-            drop(op_obj);
-            op.deref(ctx)
-                .attributes
-                .get::<LinkageAttr>(&key)
-                .filter(|attr| matches!(**attr, LinkageAttr::InternalLinkage))
-                .map(|_| symbol)
-        })
-        .collect()
 }
 
 fn is_codegen_body(tcx: TyCtxt<'_>, def_id: rustc_hir::def_id::DefId) -> bool {
@@ -533,32 +501,230 @@ fn declare_static_global<'tcx>(
     module_body: Ptr<BasicBlock>,
     symbol: crate::identifier::Identifier,
     def_id: rustc_span::def_id::DefId,
-    ty: Ty<'tcx>,
 ) -> Result<(), String> {
     if symbol_exists(ctx, module_body, &symbol.to_string()) {
         return Ok(());
     }
-    let pointee = pointee_ty(ty)?;
-    let global_ty = convert_ty(tcx, ctx, pointee)?;
-    let global_ty = llvm_decl_type(ctx, global_ty);
+    // A local static is defined here from its evaluated initializer; a foreign
+    // one is only declared (a `llvm.global` with no initializer), so its
+    // address resolves through an undefined symbol-table entry at link time.
+    if def_id.is_local()
+        && let Ok(alloc) = tcx.eval_static_initializer(def_id)
+    {
+        return emit_allocation_global(
+            tcx,
+            ctx,
+            module_body,
+            symbol,
+            alloc.inner(),
+            LinkageAttr::ExternalLinkage,
+            false,
+        );
+    }
+    let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+    let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, 0).into();
     let global = llvm::ops::GlobalOp::new(ctx, symbol, global_ty);
     global.set_attr_llvm_global_linkage(ctx, LinkageAttr::ExternalLinkage);
-    if let Some(bytes) = static_initializer_bytes(tcx, def_id) {
-        pliron_ll::ll::set_global_initializer_bytes(ctx, &global, bytes);
-    }
     global.get_operation().insert_at_back(module_body, ctx);
     Ok(())
 }
 
-fn static_initializer_bytes<'tcx>(
+/// Declare or define the storage of a `#[thread_local]` static (the target
+/// of [Rvalue::ThreadLocalRef]). Same shape as [declare_static_global] —
+/// a local static is defined from its evaluated initializer, a foreign one
+/// (e.g. std's `RandomState::new::KEYS`, exported from libstd's `.tdata`)
+/// is only declared — but the emitted `llvm.global` carries the
+/// [ll.tls](pliron_ll::ll::TlsAttr) marker, so the backend materializes its
+/// address through the thread pointer and places the initializer in the TLS
+/// template sections.
+fn declare_thread_local_global<'tcx>(
     tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    symbol: crate::identifier::Identifier,
     def_id: rustc_span::def_id::DefId,
-) -> Option<Vec<u8>> {
-    let alloc = tcx.eval_static_initializer(def_id).ok()?;
-    let alloc = alloc.inner();
-    let range = rustc_mir::interpret::alloc_range(Size::ZERO, alloc.size());
-    let bytes = alloc.get_bytes_strip_provenance(&tcx, range).ok()?;
-    Some(bytes.to_vec())
+) -> Result<(), String> {
+    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+        return Ok(());
+    }
+    if def_id.is_local()
+        && let Ok(alloc) = tcx.eval_static_initializer(def_id)
+    {
+        return emit_allocation_global(
+            tcx,
+            ctx,
+            module_body,
+            symbol,
+            alloc.inner(),
+            LinkageAttr::ExternalLinkage,
+            true,
+        );
+    }
+    let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+    let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, 0).into();
+    let global = llvm::ops::GlobalOp::new(ctx, symbol, global_ty);
+    global.set_attr_llvm_global_linkage(ctx, LinkageAttr::ExternalLinkage);
+    pliron_ll::ll::set_global_thread_local(ctx, &global);
+    global.get_operation().insert_at_back(module_body, ctx);
+    Ok(())
+}
+
+/// Define `symbol` as an [ll.data](pliron_ll::ll::DataAttr) global carrying
+/// `alloc`'s raw bytes and pointer relocations, mirroring rustc's
+/// `Allocation` (bytes + provenance). The global is inserted before its
+/// relocation targets are resolved so cyclic allocation graphs (e.g. a static
+/// referencing itself through another static) terminate.
+fn emit_allocation_global<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    symbol: crate::identifier::Identifier,
+    alloc: &rustc_mir::interpret::Allocation,
+    linkage: LinkageAttr,
+    thread_local: bool,
+) -> Result<(), String> {
+    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+        return Ok(());
+    }
+    let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+    let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, alloc.len() as u64).into();
+    let global = llvm::ops::GlobalOp::new(ctx, symbol, global_ty);
+    global.set_attr_llvm_global_linkage(ctx, linkage);
+    if thread_local {
+        pliron_ll::ll::set_global_thread_local(ctx, &global);
+    }
+    global.get_operation().insert_at_back(module_body, ctx);
+
+    // Uninitialized ranges (e.g. padding) read as whatever the raw buffer
+    // holds, matching what rustc's own codegen emits for globals.
+    let bytes = alloc
+        .inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len())
+        .to_vec();
+    let ptr_size = tcx.data_layout.pointer_size().bytes() as usize;
+    let mut relocs = Vec::new();
+    for (offset, provenance) in alloc.provenance().ptrs().iter() {
+        let slot = offset.bytes() as usize;
+        // rustc encodes a provenance-carrying slot as `target_offset` raw
+        // bytes (the pointer value is `target_base + target_offset`, and the
+        // base is only re-added at relocation time), so the stored value is
+        // exactly the relocation addend — the same derivation as
+        // rustc_codegen_llvm's `const_alloc_to_llvm`.
+        let addend = rustc_mir::interpret::read_target_uint(
+            tcx.data_layout.endian,
+            &bytes[slot..slot + ptr_size],
+        )
+        .map_err(|error| format!("cannot read relocation pointer bytes: {error}"))?
+            as u64;
+        // A type-id "pointer" is not an address: its slot bytes already hold
+        // the hash segment, so no relocation is needed.
+        if matches!(
+            tcx.global_alloc(provenance.alloc_id()),
+            rustc_mir::interpret::GlobalAlloc::TypeId { .. }
+        ) {
+            continue;
+        }
+        let target = data_global_for_alloc(tcx, ctx, module_body, provenance.alloc_id())?;
+        relocs.push(pliron_ll::ll::DataReloc {
+            offset: slot as u64,
+            symbol: target.to_string(),
+            addend: addend as i64,
+        });
+    }
+    pliron_ll::ll::set_global_data(
+        ctx,
+        &global,
+        pliron_ll::ll::DataAttr {
+            bytes,
+            align: alloc.align.bytes(),
+            mutable: alloc.mutability.is_mut(),
+            relocs,
+        },
+    );
+    Ok(())
+}
+
+/// The module symbol whose address is the runtime address of `alloc_id`,
+/// emitting the backing global (and, recursively, everything it points to)
+/// on first use.
+fn data_global_for_alloc<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    alloc_id: rustc_mir::interpret::AllocId,
+) -> Result<crate::identifier::Identifier, String> {
+    let mut legaliser = Legaliser::default();
+    match tcx.global_alloc(alloc_id) {
+        rustc_mir::interpret::GlobalAlloc::Memory(alloc) => {
+            let symbol = legaliser.legalise(&format!("__crabbit_{alloc_id:?}"));
+            emit_allocation_global(
+                tcx,
+                ctx,
+                module_body,
+                symbol.clone(),
+                alloc.inner(),
+                LinkageAttr::InternalLinkage,
+                false,
+            )?;
+            Ok(symbol)
+        }
+        rustc_mir::interpret::GlobalAlloc::Static(def_id) => {
+            let symbol = legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, def_id)).name);
+            declare_static_global(tcx, ctx, module_body, symbol.clone(), def_id)?;
+            Ok(symbol)
+        }
+        rustc_mir::interpret::GlobalAlloc::Function { instance } => {
+            let symbol = legaliser.legalise(tcx.symbol_name(instance).name);
+            if should_import_instance(tcx, instance) {
+                import_upstream_instance(tcx, ctx, module_body, instance).map_err(|error| {
+                    format!("while importing fn-pointer target {symbol}: {error}")
+                })?;
+                // A data relocation resolves through the symbol table, unlike
+                // module-internal calls (which encode resolves directly), so
+                // the imported copy must be visible there — but *weak*: an
+                // LLVM-built rlib may export the same monomorphization
+                // (share-generics) as a strong global, and both copies
+                // implement the same function.
+                set_function_linkage(ctx, module_body, &symbol, LinkageAttr::WeakODRLinkage);
+                Ok(symbol)
+            } else {
+                // No importable MIR: forward through a local thunk (the same
+                // scheme as reify_fn_pointer), exported so the relocation can
+                // target it.
+                let thunk = emit_fn_ptr_thunk(tcx, ctx, module_body, symbol, instance)?;
+                set_function_linkage(ctx, module_body, &thunk, LinkageAttr::ExternalLinkage);
+                Ok(thunk)
+            }
+        }
+        rustc_mir::interpret::GlobalAlloc::VTable(ty, dyn_ty) => {
+            let vtable_alloc_id = tcx.vtable_allocation((
+                ty,
+                dyn_ty.principal().map(|principal| {
+                    tcx.instantiate_bound_regions_with_erased(principal)
+                }),
+            ));
+            let rustc_mir::interpret::GlobalAlloc::Memory(alloc) =
+                tcx.global_alloc(vtable_alloc_id)
+            else {
+                return Err(format!(
+                    "vtable allocation for {ty:?} is not a memory allocation"
+                ));
+            };
+            let symbol = legaliser.legalise(&format!("__crabbit_{vtable_alloc_id:?}"));
+            emit_allocation_global(
+                tcx,
+                ctx,
+                module_body,
+                symbol.clone(),
+                alloc.inner(),
+                LinkageAttr::InternalLinkage,
+                false,
+            )?;
+            Ok(symbol)
+        }
+        rustc_mir::interpret::GlobalAlloc::TypeId { ty } => Err(format!(
+            "unsupported MIR constant: type-id allocation for {ty:?} has no runtime address"
+        )),
+    }
 }
 
 /// Hex rendering of a payload for use in a symbol name; the payload itself is
@@ -794,6 +960,19 @@ fn literal_string_constant<'tcx>(
 
     let snippet = tcx.sess.source_map().span_to_snippet(constant.span).ok()?;
     parse_rust_string_literal(snippet.trim())
+}
+
+/// Evaluate a (monomorphized) `&str` constant that is not a source literal,
+/// e.g. a promoted `type_name` string, into its UTF-8 contents.
+fn evaluated_str_constant<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: rustc_middle::ty::TypingEnv<'tcx>,
+    span: rustc_span::Span,
+    constant: rustc_mir::Const<'tcx>,
+) -> Option<String> {
+    let value = constant.eval(tcx, typing_env, span).ok()?;
+    let bytes = value.try_get_slice_bytes_for_diagnostics(tcx)?;
+    std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
 fn literal_byte_string_constant<'tcx>(
@@ -1207,6 +1386,19 @@ fn import_terminator<'tcx>(
                 return Ok(());
             }
 
+            // A virtual call: the callee resolves to a vtable slot instead of
+            // a symbol, so the function pointer is loaded from the receiver's
+            // vtable at `index * ptr_size` (the index already counts the
+            // drop/size/align header, as in rustc_codegen_ssa's
+            // `VirtualIndex`), and the receiver's data half becomes the first
+            // argument.
+            let virtual_slot = call_instance(tcx, state, body, func).and_then(|instance| {
+                match instance.def {
+                    InstanceKind::Virtual(_, index) => Some(index as u64),
+                    _ => None,
+                }
+            });
+
             // An indirect call: the callee is a function-pointer value rather
             // than a (constant or zero-sized function-item) `FnDef`.
             let callee_value = if call_fn_def(tcx, state, body, func).is_some() {
@@ -1224,7 +1416,16 @@ fn import_terminator<'tcx>(
                 });
 
             let mut call_args = Vec::with_capacity(args.len());
+            let mut vtable_ptr = None;
             for (idx, arg) in args.iter().enumerate() {
+                if idx == 0 && virtual_slot.is_some() {
+                    let receiver =
+                        import_operand(tcx, ctx, state, insert_block, body, &arg.node)?;
+                    let (data, vtable) = split_dyn_receiver(ctx, insert_block, receiver)?;
+                    vtable_ptr = Some(vtable);
+                    lower_abi_call_arg(ctx, insert_block, data, &mut call_args)?;
+                    continue;
+                }
                 let value = import_operand(tcx, ctx, state, insert_block, body, &arg.node)?;
                 if untuple_last && idx + 1 == args.len() {
                     let tuple_ty = mono_ty(tcx, state, arg.node.ty(body, tcx));
@@ -1275,7 +1476,26 @@ fn import_terminator<'tcx>(
             let mut external_enum_result = None;
             let mut result_type = result_type;
 
-            let call = if let Some(callee_value) = callee_value {
+            let call = if let Some(slot) = virtual_slot {
+                let vtable = vtable_ptr
+                    .ok_or_else(|| "virtual call without a receiver argument".to_string())?;
+                let usize_ty: TypeHandle = usize_ty(ctx).into();
+                let ptr_size = tcx.data_layout.pointer_size().bytes();
+                let offset = integer_constant(ctx, usize_ty, (slot * ptr_size) as u128)?;
+                offset.get_operation().insert_at_back(insert_block, ctx);
+                let fn_slot =
+                    stair_mir::ops::PtrOffsetOp::new(ctx, vtable, offset.get_result(ctx));
+                fn_slot.get_operation().insert_at_back(insert_block, ctx);
+                let ptr_ty = llvm_ptr_ty(ctx);
+                let fn_ptr = stair_mir::ops::LoadOp::new(ctx, fn_slot.get_result(ctx), ptr_ty);
+                fn_ptr.get_operation().insert_at_back(insert_block, ctx);
+                stair_mir::ops::CallOp::new_indirect(
+                    ctx,
+                    fn_ptr.get_result(ctx),
+                    call_args,
+                    result_type,
+                )
+            } else if let Some(callee_value) = callee_value {
                 stair_mir::ops::CallOp::new_indirect(ctx, callee_value, call_args, result_type)
             } else {
                 let callee = call_callee(tcx, state, body, func)?;
@@ -1459,6 +1679,125 @@ fn mono_generic_args<'tcx>(
     })
 }
 
+/// Require a SIMD vector type to be exactly 8 bytes (a NEON D register),
+/// the only shape the scalar SWAR lowering handles.
+fn require_8_byte_vector<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    name: &str,
+    vector_ty: Ty<'tcx>,
+) -> Result<(), String> {
+    let size = layout_size_of_ty(tcx, vector_ty)?;
+    if size != 8 {
+        return Err(format!(
+            "unsupported {name} intrinsic vector size: {size} bytes (only 64-bit vectors are \
+             lowered)"
+        ));
+    }
+    Ok(())
+}
+
+/// The u64 bit pattern of an 8-byte SIMD vector value. Scalars are cast
+/// directly; aggregate representations round-trip through a stack slot.
+fn simd_value_bits(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    value: Value,
+) -> Result<Value, String> {
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    if value.get_type(ctx).deref(ctx).is::<IntegerType>() {
+        return Ok(cast_value_to_type(ctx, insert_block, value, u64_ty));
+    }
+    let slot = stair_mir::ops::AllocaOp::new(ctx, u64_ty);
+    slot.get_operation().insert_at_back(insert_block, ctx);
+    let slot = slot.get_result(ctx);
+    let store = stair_mir::ops::StoreOp::new(ctx, value, slot);
+    store.get_operation().insert_at_back(insert_block, ctx);
+    let load = stair_mir::ops::LoadOp::new(ctx, slot, u64_ty);
+    load.get_operation().insert_at_back(insert_block, ctx);
+    Ok(load.get_result(ctx))
+}
+
+/// Store a u64 bit pattern into `destination`, whose type is an 8-byte SIMD
+/// vector: spill the bits and reload them with the destination's real
+/// layout, then store the place.
+fn store_simd_bits<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    state: &FunctionImportState<'tcx>,
+    insert_block: Ptr<BasicBlock>,
+    body: &Body<'tcx>,
+    destination: &Place<'tcx>,
+    bits: Value,
+) -> Result<(), String> {
+    let dest_rust_ty = mono_ty(tcx, state, destination.ty(body, tcx).ty);
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    let slot = stair_mir::ops::AllocaOp::new(ctx, u64_ty);
+    slot.get_operation().insert_at_back(insert_block, ctx);
+    let slot = slot.get_result(ctx);
+    let store = stair_mir::ops::StoreOp::new(ctx, bits, slot);
+    store.get_operation().insert_at_back(insert_block, ctx);
+    let value = load_value_from_real_layout(tcx, ctx, insert_block, dest_rust_ty, slot)?;
+    store_place(tcx, ctx, state, insert_block, body, destination, value)
+}
+
+/// Split a `dyn` method receiver into its (data pointer, vtable pointer)
+/// halves. Mirrors rustc_codegen_ssa's virtual-call handling: peel
+/// `DispatchFromDyn` newtype wrappers (`Pin<&mut dyn ..>`, `Box<dyn ..>`
+/// converted as single-field structs) until the fat pointer itself, then
+/// take its two fields.
+fn split_dyn_receiver(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    mut receiver: Value,
+) -> Result<(Value, Value), String> {
+    loop {
+        let ty = receiver.get_type(ctx);
+        let (num_fields, field_tys) = {
+            let ty_ref = ty.deref(ctx);
+            let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() else {
+                return Err(format!(
+                    "unsupported dyn receiver type: {}",
+                    ty_ref.disp(ctx)
+                ));
+            };
+            let fields: Vec<TypeHandle> = (0..struct_ty.num_fields())
+                .map(|index| struct_ty.field_type(index))
+                .collect();
+            (fields.len(), fields)
+        };
+        match num_fields {
+            2 => {
+                let data = emit_op(
+                    stair_mir::ops::ExtractValueOp::new(ctx, receiver, vec![0], field_tys[0])
+                        .get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let vtable = emit_op(
+                    stair_mir::ops::ExtractValueOp::new(ctx, receiver, vec![1], field_tys[1])
+                        .get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                return Ok((data, vtable));
+            }
+            1 => {
+                receiver = emit_op(
+                    stair_mir::ops::ExtractValueOp::new(ctx, receiver, vec![0], field_tys[0])
+                        .get_operation(),
+                    ctx,
+                    insert_block,
+                );
+            }
+            other => {
+                return Err(format!(
+                    "unsupported dyn receiver shape: {other}-field struct"
+                ));
+            }
+        }
+    }
+}
+
 fn should_import_instance<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> bool {
     match instance.def {
         // Tuple-variant constructor bodies are synthesized by `instance_mir`.
@@ -1470,7 +1809,12 @@ fn should_import_instance<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
         InstanceKind::DropGlue(_, Some(_))
         | InstanceKind::ClosureOnceShim { .. }
         | InstanceKind::CloneShim(_, _)
-        | InstanceKind::FnPtrShim(_, _) => true,
+        | InstanceKind::FnPtrShim(_, _)
+        // Vtable and reify shims (receiver/ABI adapters referenced from
+        // vtables and fn-pointer casts) exist in no upstream object; their
+        // MIR is synthesized like the other shims.
+        | InstanceKind::VTableShim(_)
+        | InstanceKind::ReifyShim(_, _) => true,
         _ => false,
     }
 }
@@ -1500,7 +1844,7 @@ fn is_noop_intrinsic_call<'tcx>(
         tcx.def_path_str(def_id)
             .contains("core::intrinsics::assert_inhabited")
     }) || call_symbol(tcx, state, body, func)
-        .is_ok_and(|symbol| symbol.as_str().contains("assert_inhabited"))
+        .is_ok_and(|symbol| symbol.as_ref().contains("assert_inhabited"))
 }
 
 /// Lower well-known codegen intrinsic calls that have no MIR body. Returns
@@ -1732,39 +2076,447 @@ fn lower_known_intrinsic_call<'tcx>(
                 .downcast_ref::<IntegerType>()
                 .map(|ty| ty.width())
                 .ok_or_else(|| "cttz on non-integer type".to_string())?;
-            if width > 64 {
-                return Err("unsupported 128-bit cttz intrinsic".to_string());
-            }
-            // cttz(x) = popcount(((x & -x) - 1) masked to the input width);
-            // for x == 0 the mask makes this the input width, as required.
-            let x = widen_to_u64(ctx, insert_block, input)?;
-            let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
-            let zero = integer_constant(ctx, u64_ty, 0)?;
-            zero.get_operation().insert_at_back(insert_block, ctx);
-            let neg = stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), x).get_operation();
-            neg.insert_at_back(insert_block, ctx);
-            let neg = neg.deref(ctx).get_result(0);
-            let low_bit = stair_mir::ops::BitAndOp::new(ctx, x, neg).get_operation();
-            low_bit.insert_at_back(insert_block, ctx);
-            let low_bit = low_bit.deref(ctx).get_result(0);
-            let one = integer_constant(ctx, u64_ty, 1)?;
-            one.get_operation().insert_at_back(insert_block, ctx);
-            let below =
-                stair_mir::ops::SubOp::new(ctx, low_bit, one.get_result(ctx)).get_operation();
-            below.insert_at_back(insert_block, ctx);
-            let below = below.deref(ctx).get_result(0);
-            let width_mask =
-                integer_constant(ctx, u64_ty, u64::MAX as u128 >> (64 - width as usize))?;
-            width_mask.get_operation().insert_at_back(insert_block, ctx);
-            let masked = stair_mir::ops::BitAndOp::new(ctx, below, width_mask.get_result(ctx))
-                .get_operation();
-            masked.insert_at_back(insert_block, ctx);
-            let masked = masked.deref(ctx).get_result(0);
-            let total = emit_popcount64(ctx, insert_block, masked)?;
+            let total = if width == 128 {
+                emit_cttz128(ctx, insert_block, input)?
+            } else if width > 64 {
+                return Err(format!("unsupported {width}-bit cttz intrinsic"));
+            } else {
+                let x = widen_to_u64(ctx, insert_block, input)?;
+                emit_cttz64(ctx, insert_block, x, width)?
+            };
             let dest_ty =
                 convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
             let result = cast_value_to_type(ctx, insert_block, total, dest_ty);
             store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        "ctlz" | "ctlz_nonzero" => {
+            if args.len() != 1 {
+                return Err(format!("unsupported ctlz intrinsic arity: {}", args.len()));
+            }
+            let input = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let width = input
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .map(|ty| ty.width())
+                .ok_or_else(|| "ctlz on non-integer type".to_string())?;
+            let total = if width == 128 {
+                emit_ctlz128(ctx, insert_block, input)?
+            } else if width > 64 {
+                return Err(format!("unsupported {width}-bit ctlz intrinsic"));
+            } else {
+                let x = widen_to_u64(ctx, insert_block, input)?;
+                emit_ctlz64(ctx, insert_block, x, width)?
+            };
+            let dest_ty =
+                convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
+            let result = cast_value_to_type(ctx, insert_block, total, dest_ty);
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        "rotate_left" | "rotate_right" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported rotate intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let input = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let width = input
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .map(|ty| ty.width())
+                .ok_or_else(|| "rotate on non-integer type".to_string())?;
+            if width > 64 || !width.is_power_of_two() {
+                return Err(format!("unsupported {width}-bit rotate intrinsic"));
+            }
+            let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+            let constant = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+                let op = integer_constant(ctx, u64_ty, bits)?;
+                op.get_operation().insert_at_back(insert_block, ctx);
+                Ok(op.get_result(ctx))
+            };
+            let width_mask = (u64::MAX >> (64 - width as usize)) as u128;
+            let mut x = widen_to_u64(ctx, insert_block, input)?;
+            if width < 64 {
+                // Widening may sign-extend; the rotate must only see the low
+                // `width` bits.
+                let mask = constant(ctx, width_mask)?;
+                x = emit_op(
+                    stair_mir::ops::BitAndOp::new(ctx, x, mask).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+            }
+            let shift = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            let shift = widen_to_u64(ctx, insert_block, shift)?;
+            // Rotation is modular: k = shift & (width - 1); the opposite
+            // shift is (width - k) & (width - 1), which is 0 when k is 0 so
+            // both halves degenerate to the untouched value.
+            let modulus_mask = constant(ctx, (width - 1) as u128)?;
+            let k = emit_op(
+                stair_mir::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let width_value = constant(ctx, width as u128)?;
+            let complement = emit_op(
+                stair_mir::ops::SubOp::new(ctx, width_value, k).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let inv = emit_op(
+                stair_mir::ops::BitAndOp::new(ctx, complement, modulus_mask).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let (left_amount, right_amount) = if name == "rotate_left" {
+                (k, inv)
+            } else {
+                (inv, k)
+            };
+            let left = emit_op(
+                stair_mir::ops::ShlOp::new(ctx, x, left_amount).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let right = emit_op(
+                stair_mir::ops::ShrOp::new(ctx, x, right_amount).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let mut rotated = emit_op(
+                stair_mir::ops::BitOrOp::new(ctx, left, right).get_operation(),
+                ctx,
+                insert_block,
+            );
+            if width < 64 {
+                let mask = constant(ctx, width_mask)?;
+                rotated = emit_op(
+                    stair_mir::ops::BitAndOp::new(ctx, rotated, mask).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+            }
+            let dest_ty =
+                convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
+            let result = cast_value_to_type(ctx, insert_block, rotated, dest_ty);
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        // `copy(src, dst, count)` allows overlap (memmove);
+        // `copy_nonoverlapping` does not (memcpy).
+        "copy" | "copy_nonoverlapping" => {
+            if args.len() != 3 {
+                return Err(format!(
+                    "unsupported copy intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let src = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let dst = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            let count = import_operand(tcx, ctx, state, insert_block, body, &args[2].node)?;
+            let elem = instance.args.type_at(0);
+            let elem_size = layout_size_of_ty(tcx, mono_ty(tcx, state, elem))?;
+            let byte_count = scale_index(ctx, insert_block, count, elem_size)?;
+            let helper: crate::identifier::Identifier = if name == "copy" {
+                "memmove".try_into().unwrap()
+            } else {
+                "memcpy".try_into().unwrap()
+            };
+            let ptr_ty = llvm_ptr_ty(ctx);
+            let usize_ty: TypeHandle = usize_ty(ctx).into();
+            declare_external_function(
+                ctx,
+                state.module_body,
+                helper.clone(),
+                vec![ptr_ty, ptr_ty, usize_ty],
+                Some(ptr_ty),
+            );
+            let call = stair_mir::ops::CallOp::new_direct(
+                ctx,
+                helper,
+                vec![dst, src, byte_count],
+                Some(ptr_ty),
+            );
+            call.get_operation().insert_at_back(insert_block, ctx);
+            Ok(true)
+        }
+        "typed_swap_nonoverlapping" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported typed_swap_nonoverlapping intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let size = layout_size_of_ty(tcx, mono_ty(tcx, state, instance.args.type_at(0)))?;
+            if size == 0 {
+                return Ok(true);
+            }
+            let x = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let y = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            // Swap through a stack temporary with three memcpys; the operands
+            // are guaranteed non-overlapping.
+            let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+            let temp_ty: TypeHandle = llvm::types::ArrayType::get(ctx, byte_ty, size).into();
+            let temp = stair_mir::ops::AllocaOp::new(ctx, temp_ty);
+            temp.get_operation().insert_at_back(insert_block, ctx);
+            let temp_ptr = temp.get_result(ctx);
+            let memcpy: crate::identifier::Identifier = "memcpy".try_into().unwrap();
+            let ptr_ty = llvm_ptr_ty(ctx);
+            let usize_ty: TypeHandle = usize_ty(ctx).into();
+            declare_external_function(
+                ctx,
+                state.module_body,
+                memcpy.clone(),
+                vec![ptr_ty, ptr_ty, usize_ty],
+                Some(ptr_ty),
+            );
+            let size_value = integer_constant(ctx, usize_ty, size as u128)?;
+            size_value.get_operation().insert_at_back(insert_block, ctx);
+            let size_value = size_value.get_result(ctx);
+            for (to, from) in [(temp_ptr, x), (x, y), (y, temp_ptr)] {
+                let call = stair_mir::ops::CallOp::new_direct(
+                    ctx,
+                    memcpy.clone(),
+                    vec![to, from, size_value],
+                    Some(ptr_ty),
+                );
+                call.get_operation().insert_at_back(insert_block, ctx);
+            }
+            Ok(true)
+        }
+        // NEON 64-bit vector intrinsics reached through std's hashbrown group
+        // scan (`uint8x8_t`/`int8x8_t`: 8 byte lanes in 64 bits). The backend
+        // has no vector registers, so the lanes are computed as scalar SWAR /
+        // per-lane code on the vector's u64 bit pattern; the D-register
+        // vectors are 8 bytes, so a u64 round-trips their layout exactly.
+        "simd_splat" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "unsupported simd_splat intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let vector_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            require_8_byte_vector(tcx, "simd_splat", vector_ty)?;
+            let lane = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            if lane
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .map(|ty| ty.width())
+                != Some(8)
+            {
+                return Err("unsupported simd_splat lane type (expected u8)".to_string());
+            }
+            let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+            let lane = widen_to_u64(ctx, insert_block, lane)?;
+            let byte_mask = integer_constant(ctx, u64_ty, 0xff)?;
+            byte_mask.get_operation().insert_at_back(insert_block, ctx);
+            let lane = emit_op(
+                stair_mir::ops::BitAndOp::new(ctx, lane, byte_mask.get_result(ctx))
+                    .get_operation(),
+                ctx,
+                insert_block,
+            );
+            let spread = integer_constant(ctx, u64_ty, 0x0101_0101_0101_0101)?;
+            spread.get_operation().insert_at_back(insert_block, ctx);
+            let bits = emit_op(
+                stair_mir::ops::MulOp::new(ctx, lane, spread.get_result(ctx)).get_operation(),
+                ctx,
+                insert_block,
+            );
+            store_simd_bits(tcx, ctx, state, insert_block, body, destination, bits)?;
+            Ok(true)
+        }
+        "simd_or" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported simd_or intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let vector_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            require_8_byte_vector(tcx, "simd_or", vector_ty)?;
+            let lhs = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let rhs = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            let lhs = simd_value_bits(ctx, insert_block, lhs)?;
+            let rhs = simd_value_bits(ctx, insert_block, rhs)?;
+            let bits = emit_op(
+                stair_mir::ops::BitOrOp::new(ctx, lhs, rhs).get_operation(),
+                ctx,
+                insert_block,
+            );
+            store_simd_bits(tcx, ctx, state, insert_block, body, destination, bits)?;
+            Ok(true)
+        }
+        "simd_extract" | "simd_extract_dyn" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported simd_extract intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let vector_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            require_8_byte_vector(tcx, "simd_extract", vector_ty)?;
+            // Only the single-lane `uint64x1_t -> u64` form: the lane index
+            // can only be zero, so the extract is the bit pattern itself.
+            let lane_size = layout_size_of_ty(
+                tcx,
+                mono_ty(tcx, state, instance.args.type_at(1)),
+            )?;
+            if lane_size != 8 {
+                return Err(format!(
+                    "unsupported simd_extract lane size: {lane_size} bytes (expected a \
+                     single-lane 64-bit vector)"
+                ));
+            }
+            let vector = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let bits = simd_value_bits(ctx, insert_block, vector)?;
+            let dest_ty =
+                convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
+            let result = cast_value_to_type(ctx, insert_block, bits, dest_ty);
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        "simd_eq" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported simd_eq intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let vector_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            require_8_byte_vector(tcx, "simd_eq", vector_ty)?;
+            let lhs = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let rhs = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            let lhs = simd_value_bits(ctx, insert_block, lhs)?;
+            let rhs = simd_value_bits(ctx, insert_block, rhs)?;
+            // Byte-wise equality mask via the SWAR zero-byte trick on the
+            // xor: `(t - 0x01..) & !t & 0x80..` marks equal lanes with 0x80,
+            // then the mark is smeared down to fill the lane with 0xff.
+            let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+            let constant = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+                let op = integer_constant(ctx, u64_ty, bits)?;
+                op.get_operation().insert_at_back(insert_block, ctx);
+                Ok(op.get_result(ctx))
+            };
+            let t = emit_op(
+                stair_mir::ops::BitXorOp::new(ctx, lhs, rhs).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let low_ones = constant(ctx, 0x0101_0101_0101_0101)?;
+            let minus = emit_op(
+                stair_mir::ops::SubOp::new(ctx, t, low_ones).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let all_ones = constant(ctx, u64::MAX as u128)?;
+            let not_t = emit_op(
+                stair_mir::ops::BitXorOp::new(ctx, t, all_ones).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let and1 = emit_op(
+                stair_mir::ops::BitAndOp::new(ctx, minus, not_t).get_operation(),
+                ctx,
+                insert_block,
+            );
+            let high_bits = constant(ctx, 0x8080_8080_8080_8080)?;
+            let mut mask = emit_op(
+                stair_mir::ops::BitAndOp::new(ctx, and1, high_bits).get_operation(),
+                ctx,
+                insert_block,
+            );
+            for shift in [1u128, 2, 4] {
+                let amount = constant(ctx, shift)?;
+                let shifted = emit_op(
+                    stair_mir::ops::ShrOp::new(ctx, mask, amount).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                mask = emit_op(
+                    stair_mir::ops::BitOrOp::new(ctx, mask, shifted).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+            }
+            store_simd_bits(tcx, ctx, state, insert_block, body, destination, mask)?;
+            Ok(true)
+        }
+        "simd_lt" | "simd_ge" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported {name} intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let vector_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            require_8_byte_vector(tcx, name.as_str(), vector_ty)?;
+            let lhs = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let rhs = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            let lhs = simd_value_bits(ctx, insert_block, lhs)?;
+            let rhs = simd_value_bits(ctx, insert_block, rhs)?;
+            // Signed per-lane compare, one i8 lane at a time (correctness
+            // over speed; the group scan only runs on 8 lanes).
+            let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+            let i8_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Signed).into();
+            let constant = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+                let op = integer_constant(ctx, u64_ty, bits)?;
+                op.get_operation().insert_at_back(insert_block, ctx);
+                Ok(op.get_result(ctx))
+            };
+            let zero = constant(ctx, 0)?;
+            let mut result = zero;
+            for lane in 0..8u32 {
+                let amount = constant(ctx, (lane * 8) as u128)?;
+                let lhs_lane = emit_op(
+                    stair_mir::ops::ShrOp::new(ctx, lhs, amount).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let lhs_lane = cast_value_to_type(ctx, insert_block, lhs_lane, i8_ty);
+                let rhs_lane = emit_op(
+                    stair_mir::ops::ShrOp::new(ctx, rhs, amount).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let rhs_lane = cast_value_to_type(ctx, insert_block, rhs_lane, i8_ty);
+                let cond = if name == "simd_lt" {
+                    stair_mir::ops::LtOp::new(ctx, lhs_lane, rhs_lane).get_operation()
+                } else {
+                    stair_mir::ops::GeOp::new(ctx, lhs_lane, rhs_lane).get_operation()
+                };
+                let cond = emit_op(cond, ctx, insert_block);
+                let cond = cast_value_to_type(ctx, insert_block, cond, u64_ty);
+                // true -> 0xff in this lane: (0 - cond) & 0xff, shifted home.
+                let neg = emit_op(
+                    stair_mir::ops::SubOp::new(ctx, zero, cond).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let byte_mask = constant(ctx, 0xff)?;
+                let lane_mask = emit_op(
+                    stair_mir::ops::BitAndOp::new(ctx, neg, byte_mask).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let placed = emit_op(
+                    stair_mir::ops::ShlOp::new(ctx, lane_mask, amount).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                result = emit_op(
+                    stair_mir::ops::BitOrOp::new(ctx, result, placed).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+            }
+            store_simd_bits(tcx, ctx, state, insert_block, body, destination, result)?;
             Ok(true)
         }
         "saturating_add" | "saturating_sub" => {
@@ -1946,6 +2698,191 @@ fn widen_to_u64(
     Ok(cast_value_to_type(ctx, insert_block, value, u64_ty))
 }
 
+/// Branch-free trailing-zero count of the low `width` bits of a u64 value:
+/// `popcount(((x & -x) - 1) & width_mask)`. For `x == 0` the mask makes this
+/// exactly `width`, as the `cttz` intrinsic requires.
+fn emit_cttz64(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    x: Value,
+    width: u32,
+) -> Result<Value, String> {
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    let zero = integer_constant(ctx, u64_ty, 0)?;
+    zero.get_operation().insert_at_back(insert_block, ctx);
+    let neg = emit_op(
+        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), x).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let low_bit = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, x, neg).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let one = integer_constant(ctx, u64_ty, 1)?;
+    one.get_operation().insert_at_back(insert_block, ctx);
+    let below = emit_op(
+        stair_mir::ops::SubOp::new(ctx, low_bit, one.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let width_mask = integer_constant(ctx, u64_ty, u64::MAX as u128 >> (64 - width as usize))?;
+    width_mask.get_operation().insert_at_back(insert_block, ctx);
+    let masked = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, below, width_mask.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    emit_popcount64(ctx, insert_block, masked)
+}
+
+/// 128-bit trailing-zero count on 64-bit halves:
+/// `cttz(x) = cttz64(lo) + (lo == 0 ? cttz64(hi) : 0)`. `cttz64` already
+/// yields 64 for a zero half, so the total is 128 for `x == 0`.
+fn emit_cttz128(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    input: Value,
+) -> Result<Value, String> {
+    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+    let bits = cast_value_to_type(ctx, insert_block, input, u128_ty);
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    let lo = cast_value_to_type(ctx, insert_block, bits, u64_ty);
+    let sixty_four = integer_constant(ctx, u128_ty, 64)?;
+    sixty_four.get_operation().insert_at_back(insert_block, ctx);
+    let hi_wide = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, bits, sixty_four.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let hi = cast_value_to_type(ctx, insert_block, hi_wide, u64_ty);
+
+    let lo_count = emit_cttz64(ctx, insert_block, lo, 64)?;
+    let hi_count = emit_cttz64(ctx, insert_block, hi, 64)?;
+
+    // (lo == 0 ? hi_count : 0) as `(0 - (lo == 0)) & hi_count`, branch-free.
+    let zero = integer_constant(ctx, u64_ty, 0)?;
+    zero.get_operation().insert_at_back(insert_block, ctx);
+    let lo_is_zero = emit_op(
+        stair_mir::ops::EqOp::new(ctx, lo, zero.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let lo_is_zero = cast_value_to_type(ctx, insert_block, lo_is_zero, u64_ty);
+    let mask = emit_op(
+        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), lo_is_zero).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let extra = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, mask, hi_count).get_operation(),
+        ctx,
+        insert_block,
+    );
+    Ok(emit_op(
+        stair_mir::ops::AddOp::new(ctx, lo_count, extra).get_operation(),
+        ctx,
+        insert_block,
+    ))
+}
+
+/// Branch-free leading-zero count of the low `width` bits of `x` (a u64
+/// value with any widening garbage cleared as part of the MSB alignment).
+fn emit_ctlz64(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    mut x: Value,
+    width: u32,
+) -> Result<Value, String> {
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    // Align the operand's MSB with bit 63 so a 64-bit count is exact
+    // (and clears any widening garbage above `width` on the way).
+    if width < 64 {
+        let up = integer_constant(ctx, u64_ty, (64 - width) as u128)?;
+        up.get_operation().insert_at_back(insert_block, ctx);
+        x = emit_op(
+            stair_mir::ops::ShlOp::new(ctx, x, up.get_result(ctx)).get_operation(),
+            ctx,
+            insert_block,
+        );
+    }
+    // Smear the highest set bit rightward; the complement then has
+    // ones exactly in the leading-zero positions.
+    for shift in [1u128, 2, 4, 8, 16, 32] {
+        let amount = integer_constant(ctx, u64_ty, shift)?;
+        amount.get_operation().insert_at_back(insert_block, ctx);
+        let shifted = emit_op(
+            stair_mir::ops::ShrOp::new(ctx, x, amount.get_result(ctx)).get_operation(),
+            ctx,
+            insert_block,
+        );
+        x = emit_op(
+            stair_mir::ops::BitOrOp::new(ctx, x, shifted).get_operation(),
+            ctx,
+            insert_block,
+        );
+    }
+    let ones = integer_constant(ctx, u64_ty, u64::MAX as u128)?;
+    ones.get_operation().insert_at_back(insert_block, ctx);
+    let inverted = emit_op(
+        stair_mir::ops::BitXorOp::new(ctx, x, ones.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    emit_popcount64(ctx, insert_block, inverted)
+}
+
+/// Branch-free 128-bit leading-zero count, mirroring [emit_cttz128] with the
+/// halves' roles swapped: `ctlz(x) = ctlz64(hi) + (hi == 0 ? ctlz64(lo) : 0)`
+/// (`ctlz64` of a zero half yields 64, so the total reaches 128 for zero).
+fn emit_ctlz128(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    input: Value,
+) -> Result<Value, String> {
+    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+    let bits = cast_value_to_type(ctx, insert_block, input, u128_ty);
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    let lo = cast_value_to_type(ctx, insert_block, bits, u64_ty);
+    let sixty_four = integer_constant(ctx, u128_ty, 64)?;
+    sixty_four.get_operation().insert_at_back(insert_block, ctx);
+    let hi_wide = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, bits, sixty_four.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let hi = cast_value_to_type(ctx, insert_block, hi_wide, u64_ty);
+
+    let hi_count = emit_ctlz64(ctx, insert_block, hi, 64)?;
+    let lo_count = emit_ctlz64(ctx, insert_block, lo, 64)?;
+
+    // (hi == 0 ? lo_count : 0) as `(0 - (hi == 0)) & lo_count`, branch-free.
+    let zero = integer_constant(ctx, u64_ty, 0)?;
+    zero.get_operation().insert_at_back(insert_block, ctx);
+    let hi_is_zero = emit_op(
+        stair_mir::ops::EqOp::new(ctx, hi, zero.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let hi_is_zero = cast_value_to_type(ctx, insert_block, hi_is_zero, u64_ty);
+    let mask = emit_op(
+        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), hi_is_zero).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let extra = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, mask, lo_count).get_operation(),
+        ctx,
+        insert_block,
+    );
+    Ok(emit_op(
+        stair_mir::ops::AddOp::new(ctx, hi_count, extra).get_operation(),
+        ctx,
+        insert_block,
+    ))
+}
+
 /// Branch-free 64-bit population count.
 fn emit_popcount64(
     ctx: &mut Context,
@@ -2035,6 +2972,15 @@ fn set_internal_linkage(
     if std::env::var_os("STAIR_DEBUG_EXPORT_ALL").is_some() {
         return;
     }
+    set_function_linkage(ctx, module_body, symbol, LinkageAttr::InternalLinkage);
+}
+
+fn set_function_linkage(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    symbol: &crate::identifier::Identifier,
+    linkage: LinkageAttr,
+) {
     let func = module_body.deref(ctx).iter(ctx).find(|op| {
         let op_obj = Operation::get_op_dyn(*op, ctx);
         op_cast::<dyn SymbolOpInterface>(&*op_obj)
@@ -2042,13 +2988,13 @@ fn set_internal_linkage(
     });
     if let Some(func) = func {
         if let Some(llvm_func) = Operation::get_op::<llvm::ops::FuncOp>(func, ctx) {
-            llvm_func.set_attr_llvm_function_linkage(ctx, LinkageAttr::InternalLinkage);
+            llvm_func.set_attr_llvm_function_linkage(ctx, linkage);
         } else {
             // A `mir.func`: mir-lower's propagate_linkage_attr carries this
             // key onto the lowered `llvm.func`.
             func.deref_mut(ctx)
                 .attributes
-                .set(ox::func_linkage_key(), LinkageAttr::InternalLinkage);
+                .set(ox::func_linkage_key(), linkage);
         }
     }
 }
@@ -2057,7 +3003,7 @@ fn symbol_exists(ctx: &Context, module_body: Ptr<BasicBlock>, symbol: &str) -> b
     module_body.deref(ctx).iter(ctx).any(|op| {
         let op_obj = Operation::get_op_dyn(op, ctx);
         op_cast::<dyn SymbolOpInterface>(&*op_obj)
-            .is_some_and(|symbol_op| symbol_op.get_symbol_name(ctx).as_str() == symbol)
+            .is_some_and(|symbol_op| symbol_op.get_symbol_name(ctx).as_ref() == symbol)
     })
 }
 
@@ -2261,6 +3207,20 @@ fn lower_abi_call_arg(
     }
 }
 
+fn lower_overflow_binary(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    op: BinOp,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    if is_unsigned_integer_value(ctx, lhs) {
+        lower_unsigned_overflow_binary(ctx, insert_block, op, lhs, rhs)
+    } else {
+        lower_signed_overflow_binary(ctx, insert_block, op, lhs, rhs)
+    }
+}
+
 fn lower_unsigned_overflow_binary(
     ctx: &mut Context,
     insert_block: Ptr<BasicBlock>,
@@ -2268,10 +3228,6 @@ fn lower_unsigned_overflow_binary(
     lhs: Value,
     rhs: Value,
 ) -> Result<Value, String> {
-    if !is_unsigned_integer_value(ctx, lhs) {
-        return Err(format!("unsupported signed MIR overflow binary op: {op:?}"));
-    }
-
     if matches!(op, BinOp::MulWithOverflow) {
         return lower_unsigned_mul_overflow(ctx, insert_block, lhs, rhs);
     }
@@ -2293,6 +3249,185 @@ fn lower_unsigned_overflow_binary(
     };
     overflow.insert_at_back(insert_block, ctx);
     let overflow_value = overflow.deref(ctx).get_result(0);
+    Ok(pack_overflow_result(
+        ctx,
+        insert_block,
+        wrapped_value,
+        overflow_value,
+    ))
+}
+
+fn lower_signed_overflow_binary(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    op: BinOp,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let ty = lhs.get_type(ctx);
+    if !ty
+        .deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|int_ty| int_ty.signedness() == Signedness::Signed)
+    {
+        return Err(format!(
+            "unsupported non-integer MIR overflow binary op: {op:?}"
+        ));
+    }
+
+    if matches!(op, BinOp::MulWithOverflow) {
+        return lower_signed_mul_overflow(ctx, insert_block, lhs, rhs);
+    }
+
+    let wrapped = match op {
+        BinOp::AddWithOverflow => stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation(),
+        BinOp::SubWithOverflow => stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation(),
+        other => return Err(format!("unsupported MIR overflow binary op: {other:?}")),
+    };
+    wrapped.insert_at_back(insert_block, ctx);
+    let wrapped_value = wrapped.deref(ctx).get_result(0);
+
+    // Add overflows iff the operands share a sign and the result's differs:
+    // the sign bit of `(res ^ lhs) & (res ^ rhs)`. Sub overflows iff the
+    // operands' signs differ and the result's sign differs from lhs's: the
+    // sign bit of `(lhs ^ rhs) & (lhs ^ res)`.
+    let (xor_a, xor_b) = match op {
+        BinOp::AddWithOverflow => ((wrapped_value, lhs), (wrapped_value, rhs)),
+        BinOp::SubWithOverflow => ((lhs, rhs), (lhs, wrapped_value)),
+        _ => unreachable!(),
+    };
+    let a = stair_mir::ops::BitXorOp::new(ctx, xor_a.0, xor_a.1).get_operation();
+    a.insert_at_back(insert_block, ctx);
+    let a = a.deref(ctx).get_result(0);
+    let b = stair_mir::ops::BitXorOp::new(ctx, xor_b.0, xor_b.1).get_operation();
+    b.insert_at_back(insert_block, ctx);
+    let b = b.deref(ctx).get_result(0);
+    let sign = stair_mir::ops::BitAndOp::new(ctx, a, b).get_operation();
+    sign.insert_at_back(insert_block, ctx);
+    let sign = sign.deref(ctx).get_result(0);
+
+    let zero = integer_constant(ctx, ty, 0)?;
+    zero.get_operation().insert_at_back(insert_block, ctx);
+    // A signed lt: `ty` is a Signed integer type, so dialect-mir picks slt.
+    let overflow = stair_mir::ops::LtOp::new(ctx, sign, zero.get_result(ctx)).get_operation();
+    overflow.insert_at_back(insert_block, ctx);
+    let overflow_value = overflow.deref(ctx).get_result(0);
+    Ok(pack_overflow_result(
+        ctx,
+        insert_block,
+        wrapped_value,
+        overflow_value,
+    ))
+}
+
+fn lower_signed_mul_overflow(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let ty = lhs.get_type(ctx);
+    let width = ty
+        .deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .map(|int_ty| int_ty.width())
+        .ok_or_else(|| "MIR mul-with-overflow on non-integer type".to_string())?;
+    if width == 128 {
+        return lower_signed_mul_overflow_128(ctx, insert_block, lhs, rhs);
+    }
+    if width > 64 {
+        return Err(format!(
+            "unsupported {width}-bit MIR mul-with-overflow"
+        ));
+    }
+
+    // Multiply at double width (sext: the operands are Signed), then check
+    // that the product survives a round-trip through the narrow type.
+    let wide_ty: TypeHandle = IntegerType::get(ctx, width * 2, Signedness::Signed).into();
+    let wide_lhs = cast_value_to_type(ctx, insert_block, lhs, wide_ty);
+    let wide_rhs = cast_value_to_type(ctx, insert_block, rhs, wide_ty);
+    let wide_mul = stair_mir::ops::MulOp::new(ctx, wide_lhs, wide_rhs);
+    wide_mul.get_operation().insert_at_back(insert_block, ctx);
+    let wide_value = wide_mul.get_operation().deref(ctx).get_result(0);
+    let wrapped_value = cast_value_to_type(ctx, insert_block, wide_value, ty);
+    let widened_back = cast_value_to_type(ctx, insert_block, wrapped_value, wide_ty);
+    let overflow = stair_mir::ops::NeOp::new(ctx, wide_value, widened_back);
+    overflow.get_operation().insert_at_back(insert_block, ctx);
+    let overflow_value = overflow.get_result(ctx);
+    Ok(pack_overflow_result(
+        ctx,
+        insert_block,
+        wrapped_value,
+        overflow_value,
+    ))
+}
+
+/// 128-bit signed mul-with-overflow. The wrapped product's bits are the same
+/// as the unsigned wrapping product; the exact 256-bit product's high half is
+/// recovered from the unsigned high half with the standard sign fixup
+/// `smulh(a, b) = umulh(a, b) - (a < 0 ? b : 0) - (b < 0 ? a : 0)` (all mod
+/// 2^128), and overflow holds iff that high half differs from the sign
+/// extension of the wrapped low half.
+fn lower_signed_mul_overflow_128(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+    let lhs_bits = cast_value_to_type(ctx, insert_block, lhs, u128_ty);
+    let rhs_bits = cast_value_to_type(ctx, insert_block, rhs, u128_ty);
+
+    let wrapped = emit_op(
+        stair_mir::ops::MulOp::new(ctx, lhs, rhs).get_operation(),
+        ctx,
+        insert_block,
+    );
+
+    let unsigned_high = emit_umulh128(ctx, insert_block, lhs_bits, rhs_bits)?;
+    // (a < 0 ? b : 0) as `sign_mask(a) & b`, branch-free.
+    let lhs_mask = emit_sign_mask128(ctx, insert_block, lhs_bits)?;
+    let rhs_mask = emit_sign_mask128(ctx, insert_block, rhs_bits)?;
+    let lhs_fix = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, lhs_mask, rhs_bits).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let rhs_fix = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, rhs_mask, lhs_bits).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let signed_high = emit_op(
+        stair_mir::ops::SubOp::new(ctx, unsigned_high, lhs_fix).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let signed_high = emit_op(
+        stair_mir::ops::SubOp::new(ctx, signed_high, rhs_fix).get_operation(),
+        ctx,
+        insert_block,
+    );
+
+    // Sign extension of the wrapped low half: all-ones iff it is negative.
+    let wrapped_bits = cast_value_to_type(ctx, insert_block, wrapped, u128_ty);
+    let expected_high = emit_sign_mask128(ctx, insert_block, wrapped_bits)?;
+    let overflow = emit_op(
+        stair_mir::ops::NeOp::new(ctx, signed_high, expected_high).get_operation(),
+        ctx,
+        insert_block,
+    );
+    Ok(pack_overflow_result(ctx, insert_block, wrapped, overflow))
+}
+
+/// Package a wrapped result and its overflow flag into the `(value, i8)`
+/// struct the importer uses for the MIR `*WithOverflow` result tuple.
+fn pack_overflow_result(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    wrapped_value: Value,
+    overflow_value: Value,
+) -> Value {
     let overflow_ty = bool_storage_ty(ctx);
     let overflow_value = cast_value_to_type(ctx, insert_block, overflow_value, overflow_ty);
 
@@ -2313,7 +3448,165 @@ fn lower_unsigned_overflow_binary(
     with_overflow
         .get_operation()
         .insert_at_back(insert_block, ctx);
-    Ok(with_overflow.get_result(ctx))
+    with_overflow.get_result(ctx)
+}
+
+/// Insert a freshly built operation and return its first result value.
+fn emit_op(op: Ptr<Operation>, ctx: &Context, insert_block: Ptr<BasicBlock>) -> Value {
+    op.insert_at_back(insert_block, ctx);
+    op.deref(ctx).get_result(0)
+}
+
+/// The high 128 bits of the exact 256-bit unsigned product `lhs * rhs` (both
+/// u128), via 64-bit half decomposition. With `a = a_hi·2^64 + a_lo` (halves
+/// < 2^64) the partial products `a_lo·b_lo`, `a_hi·b_lo`, `a_lo·b_hi`, and
+/// `a_hi·b_hi` are all exact in u128, as is the carry accumulation below, so
+/// no wider type is needed. This is the standard compiler-builtins-style
+/// decomposition for 128-bit mul-with-overflow, where no wider type exists
+/// to widen into.
+fn emit_umulh128(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+    let constant = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+        let op = integer_constant(ctx, u128_ty, bits)?;
+        op.get_operation().insert_at_back(insert_block, ctx);
+        Ok(op.get_result(ctx))
+    };
+    let mask = constant(ctx, u64::MAX as u128)?;
+    let sixty_four = constant(ctx, 64)?;
+
+    let a_lo = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, lhs, mask).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let a_hi = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, lhs, sixty_four).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let b_lo = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, rhs, mask).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let b_hi = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, rhs, sixty_four).get_operation(),
+        ctx,
+        insert_block,
+    );
+
+    let lo_lo = emit_op(
+        stair_mir::ops::MulOp::new(ctx, a_lo, b_lo).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let cross_a = emit_op(
+        stair_mir::ops::MulOp::new(ctx, a_hi, b_lo).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let cross_b = emit_op(
+        stair_mir::ops::MulOp::new(ctx, a_lo, b_hi).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let hi_hi = emit_op(
+        stair_mir::ops::MulOp::new(ctx, a_hi, b_hi).get_operation(),
+        ctx,
+        insert_block,
+    );
+
+    // carry = ((cross_a & M) + (cross_b & M) + (lo_lo >> 64)) >> 64: the
+    // carry out of bit 127 of the full product (sum of three values < 2^64,
+    // exact in u128).
+    let cross_a_lo = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, cross_a, mask).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let cross_b_lo = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, cross_b, mask).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let lo_lo_hi = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, lo_lo, sixty_four).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let mid_sum = emit_op(
+        stair_mir::ops::AddOp::new(ctx, cross_a_lo, cross_b_lo).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let mid_sum = emit_op(
+        stair_mir::ops::AddOp::new(ctx, mid_sum, lo_lo_hi).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let carry = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, mid_sum, sixty_four).get_operation(),
+        ctx,
+        insert_block,
+    );
+
+    // high = hi_hi + (cross_a >> 64) + (cross_b >> 64) + carry; the true
+    // high half is < 2^128, and no intermediate sum wraps.
+    let cross_a_hi = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, cross_a, sixty_four).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let cross_b_hi = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, cross_b, sixty_four).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let high = emit_op(
+        stair_mir::ops::AddOp::new(ctx, hi_hi, cross_a_hi).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let high = emit_op(
+        stair_mir::ops::AddOp::new(ctx, high, cross_b_hi).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let high = emit_op(
+        stair_mir::ops::AddOp::new(ctx, high, carry).get_operation(),
+        ctx,
+        insert_block,
+    );
+    Ok(high)
+}
+
+/// `0 - (value >> 127)` on u128: all-ones when the top bit of `value` is
+/// set, zero otherwise.
+fn emit_sign_mask128(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    value: Value,
+) -> Result<Value, String> {
+    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+    let shift = integer_constant(ctx, u128_ty, 127)?;
+    shift.get_operation().insert_at_back(insert_block, ctx);
+    let sign_bit = emit_op(
+        stair_mir::ops::ShrOp::new(ctx, value, shift.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let zero = integer_constant(ctx, u128_ty, 0)?;
+    zero.get_operation().insert_at_back(insert_block, ctx);
+    Ok(emit_op(
+        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), sign_bit).get_operation(),
+        ctx,
+        insert_block,
+    ))
 }
 
 fn lower_unsigned_mul_overflow(
@@ -2328,8 +3621,29 @@ fn lower_unsigned_mul_overflow(
         .downcast_ref::<IntegerType>()
         .map(|int_ty| int_ty.width())
         .ok_or_else(|| "MIR mul-with-overflow on non-integer type".to_string())?;
+    if width == 128 {
+        // No wider type exists: the product wraps in-register and overflow
+        // is exactly "the true high 128 bits are non-zero".
+        let wrapped = emit_op(
+            stair_mir::ops::MulOp::new(ctx, lhs, rhs).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let high = emit_umulh128(ctx, insert_block, lhs, rhs)?;
+        let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+        let zero = integer_constant(ctx, u128_ty, 0)?;
+        zero.get_operation().insert_at_back(insert_block, ctx);
+        let overflow = emit_op(
+            stair_mir::ops::NeOp::new(ctx, high, zero.get_result(ctx)).get_operation(),
+            ctx,
+            insert_block,
+        );
+        return Ok(pack_overflow_result(ctx, insert_block, wrapped, overflow));
+    }
     if width > 64 {
-        return Err("unsupported 128-bit MIR mul-with-overflow".to_string());
+        return Err(format!(
+            "unsupported {width}-bit MIR mul-with-overflow"
+        ));
     }
 
     let wide_ty: TypeHandle = IntegerType::get(ctx, width * 2, Signedness::Unsigned).into();
@@ -2345,27 +3659,47 @@ fn lower_unsigned_mul_overflow(
     let overflow = stair_mir::ops::GtOp::new(ctx, wide_value, narrow_max.get_result(ctx));
     overflow.get_operation().insert_at_back(insert_block, ctx);
     let overflow_value = overflow.get_operation().deref(ctx).get_result(0);
-    let overflow_ty = bool_storage_ty(ctx);
-    let overflow_value = cast_value_to_type(ctx, insert_block, overflow_value, overflow_ty);
-
-    let result_ty =
-        llvm::types::StructType::get_unnamed(ctx, vec![wrapped_value.get_type(ctx), overflow_ty])
-            .into();
-    let undef = stair_mir::ops::UndefOp::new(ctx, result_ty);
-    undef.get_operation().insert_at_back(insert_block, ctx);
-    let with_value =
-        stair_mir::ops::InsertValueOp::new(ctx, wrapped_value, undef.get_result(ctx), vec![0]);
-    with_value.get_operation().insert_at_back(insert_block, ctx);
-    let with_overflow = stair_mir::ops::InsertValueOp::new(
+    Ok(pack_overflow_result(
         ctx,
+        insert_block,
+        wrapped_value,
         overflow_value,
-        with_value.get_result(ctx),
-        vec![1],
-    );
-    with_overflow
-        .get_operation()
-        .insert_at_back(insert_block, ctx);
-    Ok(with_overflow.get_result(ctx))
+    ))
+}
+
+/// Lower MIR's three-way compare to `(lhs > rhs) as i8 - (lhs < rhs) as i8`.
+/// That byte is exactly `core::cmp::Ordering`'s direct tag (-1/0/1), so it is
+/// materialized as the enum blob the usual way: written into a stack
+/// temporary and loaded back as the real in-memory bytes.
+fn lower_three_way_cmp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    ordering_ty: Ty<'tcx>,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    // dialect-mir compares resolve signedness from the operand types.
+    let gt = stair_mir::ops::GtOp::new(ctx, lhs, rhs);
+    gt.get_operation().insert_at_back(insert_block, ctx);
+    let lt = stair_mir::ops::LtOp::new(ctx, lhs, rhs);
+    lt.get_operation().insert_at_back(insert_block, ctx);
+    let byte_ty = bool_storage_ty(ctx);
+    let gt = cast_value_to_type(ctx, insert_block, gt.get_result(ctx), byte_ty);
+    let lt = cast_value_to_type(ctx, insert_block, lt.get_result(ctx), byte_ty);
+    let tag = stair_mir::ops::SubOp::new(ctx, gt, lt).get_operation();
+    tag.insert_at_back(insert_block, ctx);
+    let tag = tag.deref(ctx).get_result(0);
+
+    let blob_ty = convert_ty(tcx, ctx, ordering_ty)?;
+    let slot = stair_mir::ops::AllocaOp::new(ctx, blob_ty);
+    slot.get_operation().insert_at_back(insert_block, ctx);
+    let slot = slot.get_result(ctx);
+    let store = stair_mir::ops::StoreOp::new(ctx, tag, slot);
+    store.get_operation().insert_at_back(insert_block, ctx);
+    let load = stair_mir::ops::LoadOp::new(ctx, slot, blob_ty);
+    load.get_operation().insert_at_back(insert_block, ctx);
+    Ok(load.get_result(ctx))
 }
 
 fn is_unsigned_integer_value(ctx: &Context, value: Value) -> bool {
@@ -2615,6 +3949,19 @@ fn import_rvalue<'tcx>(
         Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
             place_addr(tcx, ctx, state, insert_block, body, place)
         }
+        Rvalue::ThreadLocalRef(def_id) => {
+            // The address of the current thread's copy of a `#[thread_local]`
+            // static: emitted like a static's address, but the global carries
+            // the `ll.tls` marker so the backend goes through the thread
+            // pointer instead of a data-section relocation.
+            let mut legaliser = Legaliser::default();
+            let symbol = legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
+            declare_thread_local_global(tcx, ctx, state.module_body, symbol.clone(), *def_id)?;
+            let ty = convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, rvalue.ty(body, tcx)))?;
+            let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
+            op.get_operation().insert_at_back(insert_block, ctx);
+            Ok(op.get_result(ctx))
+        }
         Rvalue::BinaryOp(op, operands) => {
             let lhs = import_operand(tcx, ctx, state, insert_block, body, &operands.0)?;
             let rhs = import_operand(tcx, ctx, state, insert_block, body, &operands.1)?;
@@ -2630,7 +3977,11 @@ fn import_rvalue<'tcx>(
                 op,
                 BinOp::AddWithOverflow | BinOp::SubWithOverflow | BinOp::MulWithOverflow
             ) {
-                return lower_unsigned_overflow_binary(ctx, insert_block, *op, lhs, rhs);
+                return lower_overflow_binary(ctx, insert_block, *op, lhs, rhs);
+            }
+            if matches!(op, BinOp::Cmp) {
+                let ordering_ty = mono_ty(tcx, state, rvalue.ty(body, tcx));
+                return lower_three_way_cmp(tcx, ctx, insert_block, ordering_ty, lhs, rhs);
             }
             let op = match op {
                 BinOp::Add | BinOp::AddUnchecked => {
@@ -2643,7 +3994,7 @@ fn import_rvalue<'tcx>(
                     stair_mir::ops::MulOp::new(ctx, lhs, rhs).get_operation()
                 }
                 BinOp::Shr | BinOp::ShrUnchecked => {
-                    stair_mir::ops::ShrOp::new(ctx, lhs, rhs).get_operation()
+                    stair_mir::ops::SignAwareShrOp::new(ctx, lhs, rhs).get_operation()
                 }
                 BinOp::Shl | BinOp::ShlUnchecked => {
                     stair_mir::ops::ShlOp::new(ctx, lhs, rhs).get_operation()
@@ -2687,6 +4038,12 @@ fn import_rvalue<'tcx>(
             let cast = stair_mir::ops::CastOp::new(ctx, input, result_type);
             cast.get_operation().insert_at_back(insert_block, ctx);
             Ok(cast.get_result(ctx))
+        }
+        Rvalue::UnaryOp(rustc_mir::UnOp::Neg, operand) => {
+            let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
+            let neg = stair_mir::ops::NegOp::new(ctx, input);
+            neg.get_operation().insert_at_back(insert_block, ctx);
+            Ok(neg.get_result(ctx))
         }
         Rvalue::UnaryOp(rustc_mir::UnOp::Not, operand) => {
             let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
@@ -2957,7 +4314,7 @@ fn import_rvalue<'tcx>(
             let value = import_operand(tcx, ctx, state, insert_block, body, operand)?;
             let elem_ty = mono_ty(tcx, state, operand.ty(body, tcx));
             let elem_ty = convert_ty(tcx, ctx, elem_ty)?;
-            let len = array_len(tcx, *len)?;
+            let len = array_len(tcx, mono_ty_const(tcx, state, *len))?;
             let aggregate_ty = llvm::types::ArrayType::get(ctx, elem_ty, len).into();
             let undef = stair_mir::ops::UndefOp::new(ctx, aggregate_ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
@@ -3082,14 +4439,30 @@ fn import_transmute<'tcx>(
 
     if !is_enum_ty(src_ty) && !is_enum_ty(dst_ty) {
         let result_ty = convert_immediate_ty(tcx, ctx, dst_ty)?;
-        let cast = stair_mir::ops::CastOp::new(ctx, value, result_ty);
-        cast.get_operation().insert_at_back(insert_block, ctx);
-        return Ok(cast.get_result(ctx));
+        if value.get_type(ctx) == result_ty {
+            return Ok(value);
+        }
+        // A direct cast is only meaningful between scalar (integer, pointer,
+        // float) representations. Aggregate reinterpretations (e.g.
+        // `[T; N] -> [MaybeUninit<T>; N]`) must go through memory below: a
+        // struct-to-struct "bitcast" does not remap the value's pieces.
+        let is_scalar = |ctx: &Context, ty: TypeHandle| {
+            let ty_ref = ty.deref(ctx);
+            ty_ref.is::<IntegerType>()
+                || ty_ref.is::<llvm::types::PointerType>()
+                || ty_ref.is::<FP32Type>()
+                || ty_ref.is::<FP64Type>()
+        };
+        if is_scalar(ctx, value.get_type(ctx)) && is_scalar(ctx, result_ty) {
+            let cast = stair_mir::ops::CastOp::new(ctx, value, result_ty);
+            cast.get_operation().insert_at_back(insert_block, ctx);
+            return Ok(cast.get_result(ctx));
+        }
     }
 
-    // A transmute involving an enum is a pure reinterpretation of bytes. Since
-    // every converted type now shares rustc's real memory layout, spill the
-    // source value and reload it as the destination type.
+    // Any other transmute is a pure reinterpretation of bytes. Since every
+    // converted type shares rustc's real memory layout, spill the source
+    // value and reload it as the destination type.
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
     let src_size = rustc_layout_size_of_ty(tcx, typing_env, src_ty)?;
     let dst_size = rustc_layout_size_of_ty(tcx, typing_env, dst_ty)?;
@@ -3126,12 +4499,102 @@ fn lower_pointer_unsize_cast<'tcx>(
 
     let source_ty = mono_ty(tcx, state, operand.ty(body, tcx));
     let target_ty = mono_ty(tcx, state, target_ty);
-    let Some(len) = unsized_slice_len(tcx, source_ty, target_ty)? else {
+    let Some(metadata) = unsize_metadata(tcx, source_ty, target_ty)? else {
         return Ok(None);
     };
 
     let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
     let ptr_ty = llvm_ptr_ty(ctx);
+
+    // The metadata half of the resulting fat pointer.
+    let metadata_value: Value = match metadata {
+        UnsizeMetadata::SliceLen(len) => {
+            let usize_ty: TypeHandle = usize_ty(ctx).into();
+            let len_op = integer_constant(ctx, usize_ty, len as u128)?;
+            len_op.get_operation().insert_at_back(insert_block, ctx);
+            len_op.get_result(ctx)
+        }
+        UnsizeMetadata::Vtable {
+            concrete,
+            principal,
+        } => {
+            // The same vtable rustc's own codegen would reference: emit its
+            // allocation as an internal data global and take its address.
+            let vtable_alloc_id = tcx.vtable_allocation((concrete, principal));
+            let rustc_mir::interpret::GlobalAlloc::Memory(alloc) =
+                tcx.global_alloc(vtable_alloc_id)
+            else {
+                return Err(format!(
+                    "vtable allocation for {concrete:?} is not a memory allocation"
+                ));
+            };
+            let mut legaliser = Legaliser::default();
+            let symbol = legaliser.legalise(&format!("__crabbit_{vtable_alloc_id:?}"));
+            emit_allocation_global(
+                tcx,
+                ctx,
+                state.module_body,
+                symbol.clone(),
+                alloc.inner(),
+                LinkageAttr::InternalLinkage,
+                false,
+            )?;
+            let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            op.get_operation().insert_at_back(insert_block, ctx);
+            op.get_result(ctx)
+        }
+        UnsizeMetadata::ReuseSource => {
+            // dyn -> dyn with the same principal: a NOP coercion — the fat
+            // pointer (data and vtable) is unchanged. Only the converted
+            // type may differ nominally, so reinterpret through a spill
+            // when it does.
+            let result_ty = convert_ty(tcx, ctx, target_ty)?;
+            if input.get_type(ctx) == result_ty {
+                return Ok(Some(input));
+            }
+            let input_ty = input.get_type(ctx);
+            let spill = stair_mir::ops::AllocaOp::new(ctx, input_ty);
+            spill.get_operation().insert_at_back(insert_block, ctx);
+            let spill = spill.get_result(ctx);
+            let store = stair_mir::ops::StoreOp::new(ctx, input, spill);
+            store.get_operation().insert_at_back(insert_block, ctx);
+            let load = stair_mir::ops::LoadOp::new(ctx, spill, result_ty);
+            load.get_operation().insert_at_back(insert_block, ctx);
+            return Ok(Some(load.get_result(ctx)));
+        }
+    };
+
+    if runtime_ty(source_ty).is_box() {
+        // `Box<[T; N]> -> Box<[T]>`: the source value is a thin pointer at
+        // byte offset 0 of its (nested) struct layout, and the target's real
+        // layout is `{ ptr, len }`. The converted struct types nest the
+        // pointer several levels deep (Unique -> NonNull -> ptr), so
+        // assemble the fat value through memory at real byte offsets rather
+        // than by insertvalue paths.
+        let input_ty = input.get_type(ctx);
+        let spill = stair_mir::ops::AllocaOp::new(ctx, input_ty);
+        spill.get_operation().insert_at_back(insert_block, ctx);
+        let spill = spill.get_result(ctx);
+        let store = stair_mir::ops::StoreOp::new(ctx, input, spill);
+        store.get_operation().insert_at_back(insert_block, ctx);
+        let load_ptr = stair_mir::ops::LoadOp::new(ctx, spill, ptr_ty);
+        load_ptr.get_operation().insert_at_back(insert_block, ctx);
+        let data_ptr = load_ptr.get_result(ctx);
+
+        let result_ty = convert_ty(tcx, ctx, target_ty)?;
+        let out = stair_mir::ops::AllocaOp::new(ctx, result_ty);
+        out.get_operation().insert_at_back(insert_block, ctx);
+        let out = out.get_result(ctx);
+        let store_ptr = stair_mir::ops::StoreOp::new(ctx, data_ptr, out);
+        store_ptr.get_operation().insert_at_back(insert_block, ctx);
+        let meta_addr = ptr_offset_const(ctx, insert_block, out, 8)?;
+        let store_meta = stair_mir::ops::StoreOp::new(ctx, metadata_value, meta_addr);
+        store_meta.get_operation().insert_at_back(insert_block, ctx);
+        let load = stair_mir::ops::LoadOp::new(ctx, out, result_ty);
+        load.get_operation().insert_at_back(insert_block, ctx);
+        return Ok(Some(load.get_result(ctx)));
+    }
+
     let data_ptr = if input.get_type(ctx) == ptr_ty {
         input
     } else {
@@ -3140,24 +4603,35 @@ fn lower_pointer_unsize_cast<'tcx>(
         cast.get_result(ctx)
     };
 
-    let usize_ty: TypeHandle = usize_ty(ctx).into();
-    let len_op = integer_constant(ctx, usize_ty, len as u128)?;
-    len_op.get_operation().insert_at_back(insert_block, ctx);
-
     let result_ty = convert_ty(tcx, ctx, target_ty)?;
     let undef = stair_mir::ops::UndefOp::new(ctx, result_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
     let with_ptr =
         stair_mir::ops::InsertValueOp::new(ctx, data_ptr, undef.get_result(ctx), vec![0]);
     with_ptr.get_operation().insert_at_back(insert_block, ctx);
-    let with_len = stair_mir::ops::InsertValueOp::new(
+    let with_meta = stair_mir::ops::InsertValueOp::new(
         ctx,
-        len_op.get_result(ctx),
+        metadata_value,
         with_ptr.get_result(ctx),
         vec![1],
     );
-    with_len.get_operation().insert_at_back(insert_block, ctx);
-    Ok(Some(with_len.get_result(ctx)))
+    with_meta.get_operation().insert_at_back(insert_block, ctx);
+    Ok(Some(with_meta.get_result(ctx)))
+}
+
+/// What the fat pointer's metadata half is for an unsize coercion; the same
+/// classification as rustc_codegen_ssa's `unsized_info`.
+enum UnsizeMetadata<'tcx> {
+    /// `[T; N] -> [T]` (possibly through a struct tail): the slice length.
+    SliceLen(u64),
+    /// `T -> dyn Trait`: the vtable of `concrete` for `principal`.
+    Vtable {
+        concrete: Ty<'tcx>,
+        principal: Option<rustc_middle::ty::ExistentialTraitRef<'tcx>>,
+    },
+    /// `dyn Trait -> dyn Trait` with the same principal (adding/removing
+    /// auto traits): the source's metadata is reused unchanged.
+    ReuseSource,
 }
 
 fn unsized_slice_len<'tcx>(
@@ -3165,6 +4639,17 @@ fn unsized_slice_len<'tcx>(
     source_ty: Ty<'tcx>,
     target_ty: Ty<'tcx>,
 ) -> Result<Option<u64>, String> {
+    match unsize_metadata(tcx, source_ty, target_ty)? {
+        Some(UnsizeMetadata::SliceLen(len)) => Ok(Some(len)),
+        _ => Ok(None),
+    }
+}
+
+fn unsize_metadata<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    source_ty: Ty<'tcx>,
+    target_ty: Ty<'tcx>,
+) -> Result<Option<UnsizeMetadata<'tcx>>, String> {
     let source_ty = runtime_ty(source_ty);
     let target_ty = runtime_ty(target_ty);
     let (source_inner, target_inner) = match (source_ty.kind(), target_ty.kind()) {
@@ -3176,16 +4661,51 @@ fn unsized_slice_len<'tcx>(
             rustc_middle::ty::TyKind::RawPtr(source_inner, _),
             rustc_middle::ty::TyKind::RawPtr(target_inner, _),
         ) => (*source_inner, *target_inner),
+        _ if source_ty.is_box() && target_ty.is_box() => {
+            (source_ty.expect_boxed_ty(), target_ty.expect_boxed_ty())
+        }
         _ => return Ok(None),
     };
 
+    // Unsizing may act through a struct's (recursive) tail field, e.g.
+    // `&PolymorphicIter<[T; N]> -> &PolymorphicIter<[T]>` in core's array
+    // iterator: the fat pointer's metadata is still the slice length. The
+    // *lockstep* tails stop peeling as soon as the sides diverge, so a
+    // sized `Sq(u64) -> dyn Shape` coercion keeps `Sq` as the concrete
+    // type instead of drilling to its last field (rustc_codegen_ssa's
+    // `unsized_info` does the same).
+    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let (source_tail, target_tail) = tcx.struct_lockstep_tails_for_codegen(
+        runtime_ty(source_inner),
+        runtime_ty(target_inner),
+        typing_env,
+    );
     match (
-        runtime_ty(source_inner).kind(),
-        runtime_ty(target_inner).kind(),
+        runtime_ty(source_tail).kind(),
+        runtime_ty(target_tail).kind(),
     ) {
         (rustc_middle::ty::TyKind::Array(_, len), rustc_middle::ty::TyKind::Slice(_)) => {
-            Ok(Some(array_len(tcx, *len)?))
+            Ok(Some(UnsizeMetadata::SliceLen(array_len(tcx, *len)?)))
         }
+        (
+            rustc_middle::ty::TyKind::Dynamic(data_a, _),
+            rustc_middle::ty::TyKind::Dynamic(data_b, _),
+        ) => {
+            let b_principal = data_b.principal_def_id();
+            if data_a.principal_def_id() == b_principal || b_principal.is_none() {
+                Ok(Some(UnsizeMetadata::ReuseSource))
+            } else {
+                Err(format!(
+                    "unsupported trait upcasting coercion: {source_tail:?} -> {target_tail:?}"
+                ))
+            }
+        }
+        (_, rustc_middle::ty::TyKind::Dynamic(data, _)) => Ok(Some(UnsizeMetadata::Vtable {
+            concrete: runtime_ty(source_tail),
+            principal: data
+                .principal()
+                .map(|principal| tcx.instantiate_bound_regions_with_erased(principal)),
+        })),
         _ => Ok(None),
     }
 }
@@ -3280,7 +4800,16 @@ fn import_constant<'tcx>(
         |_| rustc_middle::ty::TypingEnv::fully_monomorphized(),
     );
     if is_str_ref_ty(const_.ty()) {
-        return import_str_constant(tcx, ctx, state.module_body, insert_block, body, constant);
+        return import_str_constant(
+            tcx,
+            ctx,
+            state.module_body,
+            insert_block,
+            typing_env,
+            body,
+            constant,
+            const_,
+        );
     }
     if let Some(len) = byte_array_ref_len(tcx, const_.ty())
         && let Some(bytes) = literal_byte_string_constant(tcx, constant)
@@ -3297,14 +4826,7 @@ fn import_constant<'tcx>(
     if let Some(def_id) = constant.check_static_ptr(tcx) {
         let mut legaliser = Legaliser::default();
         let symbol = legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, def_id)).name);
-        declare_static_global(
-            tcx,
-            ctx,
-            state.module_body,
-            symbol.clone(),
-            def_id,
-            const_.ty(),
-        )?;
+        declare_static_global(tcx, ctx, state.module_body, symbol.clone(), def_id)?;
         let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
@@ -3355,7 +4877,36 @@ fn import_constant<'tcx>(
         )? {
             return Ok(value);
         }
-        return Err(unsupported_constant_reason(tcx, typing_env, constant));
+        if let Some(value) = import_pointer_to_plain_data_constant(
+            tcx,
+            ctx,
+            state,
+            insert_block,
+            typing_env,
+            constant.span,
+            const_,
+            ty,
+        )? {
+            return Ok(value);
+        }
+        if let Some(value) = import_pointer_constant(
+            tcx,
+            ctx,
+            state,
+            insert_block,
+            typing_env,
+            constant.span,
+            const_,
+            ty,
+        )? {
+            return Ok(value);
+        }
+        return Err(unsupported_constant_reason(
+            tcx,
+            typing_env,
+            constant.span,
+            const_,
+        ));
     };
     match constant_from_bits(ctx, ty, bits) {
         Ok(op) => {
@@ -3416,34 +4967,202 @@ fn import_memory_constant<'tcx>(
     Ok(Some(load.get_result(ctx)))
 }
 
-/// Explain why a constant could not be imported. Constants that carry pointers
-/// are the common case: emitting them needs data relocations in the object
-/// writer (which only emits `call26` branch relocations today), so they are
-/// called out specifically rather than reported as an opaque MIR dump.
+/// Explain why a constant could not be imported. Pointer-carrying constants
+/// are lowered through `ll.data` globals with data relocations, so a constant
+/// that still fails here could not be evaluated or has an unhandled value
+/// shape; report the MIR dump.
 fn unsupported_constant_reason<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: rustc_middle::ty::TypingEnv<'tcx>,
-    constant: &ConstOperand<'tcx>,
+    span: rustc_span::Span,
+    constant: rustc_mir::Const<'tcx>,
 ) -> String {
-    let carries_pointer = match constant.const_.eval(tcx, typing_env, constant.span) {
-        Ok(rustc_mir::ConstValue::Scalar(rustc_mir::interpret::Scalar::Ptr(_, _))) => true,
-        Ok(rustc_mir::ConstValue::Indirect { alloc_id, .. }) => {
-            matches!(
-                tcx.global_alloc(alloc_id),
-                rustc_mir::interpret::GlobalAlloc::Memory(alloc)
-                    if !alloc.inner().provenance().ptrs().is_empty()
-            )
-        }
-        _ => false,
+    match constant.eval(tcx, typing_env, span) {
+        Ok(value) => format!("unsupported MIR constant value {value:?}: {constant:?}"),
+        Err(_) => format!("unsupported MIR constant (evaluation failed): {constant:?}"),
+    }
+}
+
+/// Import an evaluated constant that is a thin pointer/reference into a
+/// read-only allocation without pointer provenance (e.g. the promoted
+/// `&ControlFlow<(), ()>` constants inside `Iterator::all`/`any`, or promoted
+/// `&[T; 0]` empty-array refs), or a fat `&[T]` slice ref whose data carries
+/// no provenance. The pointee bytes become an anonymous byte global and the
+/// constant becomes its address (plus the length for slice refs).
+#[allow(clippy::too_many_arguments)]
+fn import_pointer_to_plain_data_constant<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    state: &FunctionImportState<'tcx>,
+    insert_block: Ptr<BasicBlock>,
+    typing_env: rustc_middle::ty::TypingEnv<'tcx>,
+    span: rustc_span::Span,
+    constant: rustc_mir::Const<'tcx>,
+    ty: TypeHandle,
+) -> Result<Option<Value>, String> {
+    let pointee = match runtime_ty(constant.ty()).kind() {
+        rustc_middle::ty::TyKind::Ref(_, inner, _)
+        | rustc_middle::ty::TyKind::RawPtr(inner, _) => runtime_ty(*inner),
+        _ => return Ok(None),
     };
-    if carries_pointer {
-        format!(
-            "unsupported MIR constant (it contains a pointer, which needs data \
-             relocations the object writer does not emit yet): {:?}",
-            constant.const_
-        )
-    } else {
-        format!("unsupported MIR constant: {:?}", constant.const_)
+    let Ok(value) = constant.eval(tcx, typing_env, span) else {
+        return Ok(None);
+    };
+    match value {
+        rustc_mir::ConstValue::Scalar(rustc_mir::interpret::Scalar::Ptr(ptr, _)) => {
+            let (provenance, offset) = ptr.prov_and_relative_offset();
+            let rustc_mir::interpret::GlobalAlloc::Memory(alloc) =
+                tcx.global_alloc(provenance.alloc_id())
+            else {
+                return Ok(None);
+            };
+            let alloc = alloc.inner();
+            if !alloc.provenance().ptrs().is_empty() {
+                return Ok(None);
+            }
+            let bytes = alloc
+                .inspect_with_uninit_and_ptr_outside_interpreter(
+                    offset.bytes() as usize..alloc.len(),
+                )
+                .to_vec();
+            let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
+            let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
+            op.get_operation().insert_at_back(insert_block, ctx);
+            Ok(Some(op.get_result(ctx)))
+        }
+        rustc_mir::ConstValue::Slice { alloc_id, meta } => {
+            let rustc_middle::ty::TyKind::Slice(elem) = pointee.kind() else {
+                return Ok(None);
+            };
+            let elem_size = layout_size_of_ty(tcx, *elem)?;
+            let Some(bytes) =
+                allocation_bytes(tcx, alloc_id, Size::ZERO, meta.saturating_mul(elem_size))
+            else {
+                return Ok(None);
+            };
+            let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
+            let ptr_ty = llvm_ptr_ty(ctx);
+            let data = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            data.get_operation().insert_at_back(insert_block, ctx);
+            let usize_ty: TypeHandle = usize_ty(ctx).into();
+            let len = integer_constant(ctx, usize_ty, meta as u128)?;
+            len.get_operation().insert_at_back(insert_block, ctx);
+            let undef = stair_mir::ops::UndefOp::new(ctx, ty);
+            undef.get_operation().insert_at_back(insert_block, ctx);
+            let with_ptr = stair_mir::ops::InsertValueOp::new(
+                ctx,
+                data.get_result(ctx),
+                undef.get_result(ctx),
+                vec![0],
+            );
+            with_ptr.get_operation().insert_at_back(insert_block, ctx);
+            let with_len = stair_mir::ops::InsertValueOp::new(
+                ctx,
+                len.get_result(ctx),
+                with_ptr.get_result(ctx),
+                vec![1],
+            );
+            with_len.get_operation().insert_at_back(insert_block, ctx);
+            Ok(Some(with_len.get_result(ctx)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Import an evaluated constant whose value carries pointer provenance, by
+/// materializing the backing allocations as [ll.data](pliron_ll::ll::DataAttr)
+/// globals (with data relocations for the pointer slots) and taking their
+/// addresses:
+///
+/// - a `Scalar::Ptr` becomes `llvm.addressof` of the target's global (plus a
+///   byte offset for interior pointers),
+/// - a `Slice` becomes the `{ptr, len}` fat-pointer pair over the data global,
+/// - an `Indirect` (by-ref) value is loaded back out of its relocated global,
+///   so pointer slots inside it hold real addresses at runtime.
+#[allow(clippy::too_many_arguments)]
+fn import_pointer_constant<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    state: &FunctionImportState<'tcx>,
+    insert_block: Ptr<BasicBlock>,
+    typing_env: rustc_middle::ty::TypingEnv<'tcx>,
+    span: rustc_span::Span,
+    constant: rustc_mir::Const<'tcx>,
+    ty: TypeHandle,
+) -> Result<Option<Value>, String> {
+    let Ok(value) = constant.eval(tcx, typing_env, span) else {
+        return Ok(None);
+    };
+    match value {
+        rustc_mir::ConstValue::Scalar(rustc_mir::interpret::Scalar::Ptr(ptr, _)) => {
+            let (provenance, offset) = ptr.prov_and_relative_offset();
+            // A type-id "pointer" is not an address: its offset bytes are a
+            // hash segment, materialized as a plain integer.
+            if matches!(
+                tcx.global_alloc(provenance.alloc_id()),
+                rustc_mir::interpret::GlobalAlloc::TypeId { .. }
+            ) {
+                let usize_ty: TypeHandle = usize_ty(ctx).into();
+                let op = integer_constant(ctx, usize_ty, offset.bytes() as u128)?;
+                op.get_operation().insert_at_back(insert_block, ctx);
+                return Ok(Some(cast_value_to_type(
+                    ctx,
+                    insert_block,
+                    op.get_result(ctx),
+                    ty,
+                )));
+            }
+            let symbol =
+                data_global_for_alloc(tcx, ctx, state.module_body, provenance.alloc_id())?;
+            let ptr_ty = llvm_ptr_ty(ctx);
+            let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            addr.get_operation().insert_at_back(insert_block, ctx);
+            let mut value = addr.get_result(ctx);
+            if offset.bytes() != 0 {
+                value = ptr_offset_const(ctx, insert_block, value, offset.bytes())?;
+            }
+            Ok(Some(cast_value_to_type(ctx, insert_block, value, ty)))
+        }
+        rustc_mir::ConstValue::Slice { alloc_id, meta } => {
+            let symbol = data_global_for_alloc(tcx, ctx, state.module_body, alloc_id)?;
+            let ptr_ty = llvm_ptr_ty(ctx);
+            let data = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            data.get_operation().insert_at_back(insert_block, ctx);
+            let usize_ty: TypeHandle = usize_ty(ctx).into();
+            let len = integer_constant(ctx, usize_ty, meta as u128)?;
+            len.get_operation().insert_at_back(insert_block, ctx);
+            let undef = stair_mir::ops::UndefOp::new(ctx, ty);
+            undef.get_operation().insert_at_back(insert_block, ctx);
+            let with_ptr = stair_mir::ops::InsertValueOp::new(
+                ctx,
+                data.get_result(ctx),
+                undef.get_result(ctx),
+                vec![0],
+            );
+            with_ptr.get_operation().insert_at_back(insert_block, ctx);
+            let with_len = stair_mir::ops::InsertValueOp::new(
+                ctx,
+                len.get_result(ctx),
+                with_ptr.get_result(ctx),
+                vec![1],
+            );
+            with_len.get_operation().insert_at_back(insert_block, ctx);
+            Ok(Some(with_len.get_result(ctx)))
+        }
+        rustc_mir::ConstValue::Indirect { alloc_id, offset } => {
+            let symbol = data_global_for_alloc(tcx, ctx, state.module_body, alloc_id)?;
+            let ptr_ty = llvm_ptr_ty(ctx);
+            let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            addr.get_operation().insert_at_back(insert_block, ctx);
+            let mut addr_value = addr.get_result(ctx);
+            if offset.bytes() != 0 {
+                addr_value = ptr_offset_const(ctx, insert_block, addr_value, offset.bytes())?;
+            }
+            let load = stair_mir::ops::LoadOp::new(ctx, addr_value, ty);
+            load.get_operation().insert_at_back(insert_block, ctx);
+            Ok(Some(load.get_result(ctx)))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -3581,8 +5300,15 @@ fn import_enum_constant<'tcx>(
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
     }
-    let bytes = enum_constant_bytes(tcx, typing_env, span, constant, size)
-        .ok_or_else(|| format!("unsupported MIR enum constant: {:?}", constant))?;
+    let Some(bytes) = enum_constant_bytes(tcx, typing_env, span, constant, size) else {
+        // The variant payload carries pointers (e.g. `Some(&STATIC)`): fall
+        // back to the relocated-global path, which loads the enum blob out of
+        // an `ll.data` global whose pointer slots the linker fills in.
+        return import_pointer_constant(
+            tcx, ctx, state, insert_block, typing_env, span, constant, ty,
+        )?
+        .ok_or_else(|| format!("unsupported MIR enum constant: {:?}", constant));
+    };
     let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
     let ptr_ty = llvm_ptr_ty(ctx);
     let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
@@ -3731,16 +5457,36 @@ fn mono_const<'tcx>(
     })
 }
 
+/// Monomorphize a type-level constant (e.g. an array length that mentions a
+/// generic const parameter) the same way `mono_ty`/`mono_const` do.
+fn mono_ty_const<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    state: &FunctionImportState<'tcx>,
+    constant: rustc_middle::ty::Const<'tcx>,
+) -> rustc_middle::ty::Const<'tcx> {
+    state.instance.map_or(constant, |instance| {
+        instance.instantiate_mir_and_normalize_erasing_regions(
+            tcx,
+            rustc_middle::ty::TypingEnv::fully_monomorphized(),
+            EarlyBinder::bind(constant),
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn import_str_constant<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,
     module_body: Ptr<BasicBlock>,
     insert_block: Ptr<BasicBlock>,
+    typing_env: rustc_middle::ty::TypingEnv<'tcx>,
     body: &Body<'tcx>,
     constant: &ConstOperand<'tcx>,
+    const_: rustc_mir::Const<'tcx>,
 ) -> Result<Value, String> {
     let value = literal_string_constant(tcx, body, constant)
-        .ok_or_else(|| format!("unsupported string constant: {:?}", constant.const_))?;
+        .or_else(|| evaluated_str_constant(tcx, typing_env, constant.span, const_))
+        .ok_or_else(|| format!("unsupported string constant: {:?}", const_))?;
     // The old `cmir.cstr` becomes a private NUL-terminated byte global plus
     // an address-of; the NUL matches the old ll.cstr literal emission and is
     // excluded from the `{ptr, len}` str-ref length below.
@@ -4041,6 +5787,34 @@ fn store_field_projection<'tcx>(
     Ok(())
 }
 
+/// The "address" of a slot-less local (type `()` or `!`): a dangling pointer
+/// at the type's alignment, the same convention rustc's codegen uses for ZST
+/// places. The pointee is never read or written through it.
+fn dangling_zst_addr<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    state: &FunctionImportState<'tcx>,
+    insert_block: Ptr<BasicBlock>,
+    body: &Body<'tcx>,
+    local: Local,
+) -> Result<Value, String> {
+    let ty = mono_ty(tcx, state, body.local_decls[local].ty);
+    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let align = rustc_layout_align_of_ty(tcx, typing_env, runtime_ty(ty))
+        .unwrap_or(1)
+        .max(1);
+    let usize_ty: TypeHandle = usize_ty(ctx).into();
+    let addr = integer_constant(ctx, usize_ty, align as u128)?;
+    addr.get_operation().insert_at_back(insert_block, ctx);
+    let ptr_ty = llvm_ptr_ty(ctx);
+    Ok(cast_value_to_type(
+        ctx,
+        insert_block,
+        addr.get_result(ctx),
+        ptr_ty,
+    ))
+}
+
 fn place_addr<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,
@@ -4049,11 +5823,19 @@ fn place_addr<'tcx>(
     body: &Body<'tcx>,
     place: &Place<'tcx>,
 ) -> Result<Value, String> {
+    let base = match local_slot_opt(state, place.local)? {
+        Some(slot) => slot,
+        // A local of type `()` or `!` gets no storage slot, but MIR may
+        // still take its address (e.g. `&core::ptr::metadata(p)` where the
+        // metadata is `()`). Mirror rustc's ZST codegen: a dangling,
+        // suitably aligned pointer.
+        None => dangling_zst_addr(tcx, ctx, state, insert_block, body, place.local)?,
+    };
     if place.projection.is_empty() {
-        return local_slot(state, place.local);
+        return Ok(base);
     }
 
-    let mut addr = local_slot(state, place.local)?;
+    let mut addr = base;
     let mut current_ty = mono_ty(tcx, state, body.local_decls[place.local].ty);
     let mut current_variant = None;
     for elem in place.projection {
@@ -4068,10 +5850,54 @@ fn place_addr<'tcx>(
             }
             rustc_mir::ProjectionElem::Field(field, field_ty) => {
                 let offset = field_offset_of(tcx, current_ty, current_variant, field.index())?;
-                if offset != 0 {
+                let field_ty = mono_ty(tcx, state, field_ty);
+                let addr_is_fat = addr
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .is::<llvm::types::StructType>();
+                if addr_is_fat {
+                    // The base is a fat `{ptr, meta}` value (a Deref of a
+                    // reference to an unsized ADT). Sized fields live at byte
+                    // offsets off the data pointer; the unsized tail field
+                    // keeps the metadata.
+                    let fat_ty = addr.get_type(ctx);
+                    let ptr_ty = llvm_ptr_ty(ctx);
+                    let data = stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
+                    data.get_operation().insert_at_back(insert_block, ctx);
+                    let mut data = data.get_result(ctx);
+                    if offset != 0 {
+                        data = ptr_offset_const(ctx, insert_block, data, offset)?;
+                    }
+                    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+                    if runtime_ty(field_ty).is_sized(tcx, typing_env) {
+                        addr = data;
+                    } else {
+                        let usize_ty: TypeHandle = usize_ty(ctx).into();
+                        let meta =
+                            stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![1], usize_ty);
+                        meta.get_operation().insert_at_back(insert_block, ctx);
+                        let undef = stair_mir::ops::UndefOp::new(ctx, fat_ty);
+                        undef.get_operation().insert_at_back(insert_block, ctx);
+                        let with_ptr = stair_mir::ops::InsertValueOp::new(
+                            ctx,
+                            data,
+                            undef.get_result(ctx),
+                            vec![0],
+                        );
+                        with_ptr.get_operation().insert_at_back(insert_block, ctx);
+                        let with_meta = stair_mir::ops::InsertValueOp::new(
+                            ctx,
+                            meta.get_result(ctx),
+                            with_ptr.get_result(ctx),
+                            vec![1],
+                        );
+                        with_meta.get_operation().insert_at_back(insert_block, ctx);
+                        addr = with_meta.get_result(ctx);
+                    }
+                } else if offset != 0 {
                     addr = ptr_offset_const(ctx, insert_block, addr, offset)?;
                 }
-                current_ty = mono_ty(tcx, state, field_ty);
+                current_ty = field_ty;
                 current_variant = None;
             }
             rustc_mir::ProjectionElem::Downcast(_, variant) => {
@@ -4105,13 +5931,91 @@ fn place_addr<'tcx>(
                 current_ty = mono_ty(tcx, state, indexed_elem_ty(current_ty)?);
                 current_variant = None;
             }
+            rustc_mir::ProjectionElem::Subslice { from, to, from_end } => {
+                match runtime_ty(current_ty).kind() {
+                    rustc_middle::ty::TyKind::Array(elem, len) => {
+                        // `array[from..]` starts `from` elements in; the result
+                        // is a shorter array at a constant byte offset.
+                        let elem_ty = mono_ty(tcx, state, *elem);
+                        let elem_size = indexed_elem_size(tcx, current_ty)?;
+                        let byte_offset = from * elem_size;
+                        if byte_offset != 0 {
+                            addr = ptr_offset_const(ctx, insert_block, addr, byte_offset)?;
+                        }
+                        let new_len = if from_end {
+                            array_len(tcx, mono_ty_const(tcx, state, *len))?
+                                .checked_sub(from + to)
+                                .ok_or_else(|| {
+                                    format!("MIR Subslice out of bounds: {elem:?} {from}..-{to}")
+                                })?
+                        } else {
+                            to - from
+                        };
+                        current_ty = Ty::new_array(tcx, elem_ty, new_len);
+                    }
+                    rustc_middle::ty::TyKind::Slice(_) => {
+                        // A slice place's "address" is the fat `{ptr, len}`
+                        // value the preceding Deref loaded: rebase the data
+                        // pointer by `from` elements and shrink the length.
+                        let elem_size = indexed_elem_size(tcx, current_ty)?;
+                        let fat_ty = addr.get_type(ctx);
+                        let ptr_ty = llvm_ptr_ty(ctx);
+                        let usize_ty: TypeHandle = usize_ty(ctx).into();
+                        let data = stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
+                        data.get_operation().insert_at_back(insert_block, ctx);
+                        let mut data = data.get_result(ctx);
+                        if from != 0 {
+                            data = ptr_offset_const(ctx, insert_block, data, from * elem_size)?;
+                        }
+                        let new_len = if from_end {
+                            let len =
+                                stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![1], usize_ty);
+                            len.get_operation().insert_at_back(insert_block, ctx);
+                            let dropped = integer_constant(ctx, usize_ty, (from + to) as u128)?;
+                            dropped.get_operation().insert_at_back(insert_block, ctx);
+                            let sub = stair_mir::ops::SubOp::new(
+                                ctx,
+                                len.get_result(ctx),
+                                dropped.get_result(ctx),
+                            );
+                            sub.get_operation().insert_at_back(insert_block, ctx);
+                            sub.get_result(ctx)
+                        } else {
+                            let len = integer_constant(ctx, usize_ty, (to - from) as u128)?;
+                            len.get_operation().insert_at_back(insert_block, ctx);
+                            len.get_result(ctx)
+                        };
+                        let undef = stair_mir::ops::UndefOp::new(ctx, fat_ty);
+                        undef.get_operation().insert_at_back(insert_block, ctx);
+                        let with_ptr = stair_mir::ops::InsertValueOp::new(
+                            ctx,
+                            data,
+                            undef.get_result(ctx),
+                            vec![0],
+                        );
+                        with_ptr.get_operation().insert_at_back(insert_block, ctx);
+                        let with_len = stair_mir::ops::InsertValueOp::new(
+                            ctx,
+                            new_len,
+                            with_ptr.get_result(ctx),
+                            vec![1],
+                        );
+                        with_len.get_operation().insert_at_back(insert_block, ctx);
+                        addr = with_len.get_result(ctx);
+                        // The place stays the same slice type.
+                    }
+                    other => {
+                        return Err(format!(
+                            "unsupported MIR Subslice base type: {other:?}"
+                        ));
+                    }
+                }
+                current_variant = None;
+            }
             rustc_mir::ProjectionElem::OpaqueCast(ty)
             | rustc_mir::ProjectionElem::UnwrapUnsafeBinder(ty) => {
                 current_ty = mono_ty(tcx, state, ty);
                 current_variant = None;
-            }
-            other => {
-                return Err(format!("unsupported MIR place projection: {other:?}"));
             }
         }
     }
@@ -4422,13 +6326,11 @@ fn layout_size_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Result<u64, Strin
         rustc_middle::ty::TyKind::FnDef(_, _) | rustc_middle::ty::TyKind::Never => Ok(0),
         rustc_middle::ty::TyKind::Ref(_, inner, _) | rustc_middle::ty::TyKind::RawPtr(inner, _) => {
             // Fat references convert to a two-word {ptr, meta} struct.
-            let unsized_pointee = matches!(
-                runtime_ty(*inner).kind(),
-                rustc_middle::ty::TyKind::Slice(_)
-                    | rustc_middle::ty::TyKind::Str
-                    | rustc_middle::ty::TyKind::Dynamic(_, _)
-            );
-            Ok(if unsized_pointee { 16 } else { 8 })
+            Ok(if pointee_unsized_tail(tcx, *inner).is_some() {
+                16
+            } else {
+                8
+            })
         }
         rustc_middle::ty::TyKind::Tuple(_) => {
             let fields = memory_ordered_fields(tcx, ty)?;
@@ -4689,6 +6591,33 @@ fn byte_array_ref_len<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<u64> {
     }
 }
 
+/// For a pointer/reference pointee, the unsized tail type (`[T]`, `str`, or
+/// `dyn Trait`) that determines the fat-pointer metadata, or `None` when the
+/// pointee is sized (thin pointer). Peels ADT struct tails, so e.g.
+/// `&PolymorphicIter<[T]>` (core's array iterator internals) is fat with a
+/// slice-length metadata.
+fn pointee_unsized_tail<'tcx>(tcx: TyCtxt<'tcx>, pointee: Ty<'tcx>) -> Option<Ty<'tcx>> {
+    let pointee = runtime_ty(pointee);
+    match pointee.kind() {
+        rustc_middle::ty::TyKind::Slice(_)
+        | rustc_middle::ty::TyKind::Str
+        | rustc_middle::ty::TyKind::Dynamic(_, _) => Some(pointee),
+        _ => {
+            let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+            if pointee.is_sized(tcx, typing_env) {
+                return None;
+            }
+            let tail = tcx.struct_tail_for_codegen(pointee, typing_env);
+            match runtime_ty(tail).kind() {
+                rustc_middle::ty::TyKind::Slice(_)
+                | rustc_middle::ty::TyKind::Str
+                | rustc_middle::ty::TyKind::Dynamic(_, _) => Some(runtime_ty(tail)),
+                _ => None,
+            }
+        }
+    }
+}
+
 fn contains_maybe_uninit_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     let ty = runtime_ty(ty);
     if format!("{ty:?}").contains("MaybeUninit") {
@@ -4824,47 +6753,19 @@ fn convert_ty<'tcx>(
             let elem = convert_ty(tcx, ctx, *elem)?;
             return Ok(llvm::types::ArrayType::get(ctx, elem, 0).into());
         }
-        TyKind::Ref(_, inner, mutability) if matches!(inner.kind(), TyKind::Str) => {
-            let _ = mutability;
-            return Ok(str_ref_ty(ctx));
-        }
-        TyKind::Ref(_, inner, mutability) if matches!(inner.kind(), TyKind::Slice(_)) => {
-            let _ = mutability;
-            let TyKind::Slice(elem) = inner.kind() else {
-                unreachable!("slice ref checked above");
+        TyKind::Ref(_, inner, _) | TyKind::RawPtr(inner, _) => {
+            return match pointee_unsized_tail(tcx, *inner) {
+                Some(tail) => match runtime_ty(tail).kind() {
+                    TyKind::Str => Ok(str_ref_ty(ctx)),
+                    TyKind::Slice(elem) => {
+                        let elem = convert_ty(tcx, ctx, *elem)?;
+                        Ok(slice_ref_ty(ctx, elem))
+                    }
+                    TyKind::Dynamic(_, _) => Ok(trait_object_ref_ty(ctx)),
+                    other => Err(format!("unsupported unsized pointee tail: {other:?}")),
+                },
+                None => Ok(llvm_ptr_ty(ctx)),
             };
-            let elem = convert_ty(tcx, ctx, *elem)?;
-            return Ok(slice_ref_ty(ctx, elem));
-        }
-        TyKind::Ref(_, inner, mutability) if matches!(inner.kind(), TyKind::Dynamic(_, _)) => {
-            let _ = mutability;
-            return Ok(trait_object_ref_ty(ctx));
-        }
-        TyKind::Ref(_, inner, mutability) => {
-            let elem = convert_ty(tcx, ctx, *inner)?;
-            let _ = (elem, mutability);
-            return Ok(llvm_ptr_ty(ctx));
-        }
-        TyKind::RawPtr(inner, mutability) if matches!(inner.kind(), TyKind::Str) => {
-            let _ = mutability;
-            return Ok(str_ref_ty(ctx));
-        }
-        TyKind::RawPtr(inner, mutability) if matches!(inner.kind(), TyKind::Slice(_)) => {
-            let _ = mutability;
-            let TyKind::Slice(elem) = inner.kind() else {
-                unreachable!("slice raw ptr checked above");
-            };
-            let elem = convert_ty(tcx, ctx, *elem)?;
-            return Ok(slice_ref_ty(ctx, elem));
-        }
-        TyKind::RawPtr(inner, mutability) if matches!(inner.kind(), TyKind::Dynamic(_, _)) => {
-            let _ = mutability;
-            return Ok(trait_object_ref_ty(ctx));
-        }
-        TyKind::RawPtr(ty, mutability) => {
-            let elem = convert_ty(tcx, ctx, *ty)?;
-            let _ = (elem, mutability);
-            return Ok(llvm_ptr_ty(ctx));
         }
         TyKind::Adt(_, _)
             if format!("{ty:?}").starts_with("std::fmt::Arguments")
@@ -4874,11 +6775,14 @@ fn convert_ty<'tcx>(
         }
         TyKind::Adt(adt_def, args) if adt_def.is_struct() => {
             let name = type_symbol(tcx, ty);
-            if let Some(existing) = llvm::types::StructType::get_existing_named(ctx, &name) {
-                return Ok(existing.into());
-            }
-            let _reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
+            // `get_named` with no fields returns the type if the name is
+            // already registered, and reserves it (as an opaque struct)
+            // otherwise; only proceed to build the body for opaque results.
+            let reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
                 .map_err(|error| error.to_string())?;
+            if !reserved.deref(ctx).is_opaque() {
+                return Ok(reserved.into());
+            }
             let source: Vec<_> = adt_def
                 .non_enum_variant()
                 .fields
@@ -4896,11 +6800,14 @@ fn convert_ty<'tcx>(
         }
         TyKind::Adt(adt_def, args) if adt_def.is_union() => {
             let name = type_symbol(tcx, ty);
-            if let Some(existing) = llvm::types::StructType::get_existing_named(ctx, &name) {
-                return Ok(existing.into());
-            }
-            let _reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
+            // `get_named` with no fields returns the type if the name is
+            // already registered, and reserves it (as an opaque struct)
+            // otherwise; only proceed to build the body for opaque results.
+            let reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
                 .map_err(|error| error.to_string())?;
+            if !reserved.deref(ctx).is_opaque() {
+                return Ok(reserved.into());
+            }
             let size = layout_size_of_ty(tcx, ty)?;
             let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
             let storage: TypeHandle = if size == 0 {
@@ -4938,11 +6845,14 @@ fn convert_ty<'tcx>(
         }
         TyKind::Closure(_, args) => {
             let name = type_symbol(tcx, ty);
-            if let Some(existing) = llvm::types::StructType::get_existing_named(ctx, &name) {
-                return Ok(existing.into());
-            }
-            let _reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
+            // `get_named` with no fields returns the type if the name is
+            // already registered, and reserves it (as an opaque struct)
+            // otherwise; only proceed to build the body for opaque results.
+            let reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
                 .map_err(|error| error.to_string())?;
+            if !reserved.deref(ctx).is_opaque() {
+                return Ok(reserved.into());
+            }
             let source: Vec<_> = args.as_closure().upvar_tys().iter().collect();
             let order = struct_memory_order(tcx, ty, source.len());
             let fields = order
@@ -4976,8 +6886,10 @@ fn enum_blob_ty<'tcx>(
         return Ok(unit_ty(ctx));
     }
     let name = type_symbol(tcx, ty);
-    if let Some(existing) = llvm::types::StructType::get_existing_named(ctx, &name) {
-        return Ok(existing.into());
+    let reserved = llvm::types::StructType::get_named(ctx, name.clone(), None)
+        .map_err(|error| error.to_string())?;
+    if !reserved.deref(ctx).is_opaque() {
+        return Ok(reserved.into());
     }
     let align = enum_stack_align(tcx, ty)?;
     let elem: TypeHandle = IntegerType::get(ctx, (align * 8) as u32, Signedness::Unsigned).into();
@@ -5028,7 +6940,16 @@ fn read_enum_discriminant<'tcx>(
     };
 
     match &layout.variants {
-        Variants::Empty => Err(format!("MIR discriminant of uninhabited enum: {enum_ty:?}")),
+        Variants::Empty => {
+            // An uninhabited enum (e.g. `Result<Infallible, !>`) has no
+            // values, so this read can never execute. Mirror rustc's cg_ssa,
+            // which emits an arbitrary (poison) value: a zero constant of the
+            // discriminant type, matching the non-enum branch of
+            // `Rvalue::Discriminant`.
+            let op = integer_constant(ctx, discr_ty, 0)?;
+            op.get_operation().insert_at_back(insert_block, ctx);
+            Ok(op.get_result(ctx))
+        }
         Variants::Single { index } => {
             let value = adt_def.discriminant_for_variant(tcx, *index).val & discr_mask;
             let op = integer_constant(ctx, discr_ty, value)?;
@@ -5175,8 +7096,15 @@ fn write_enum_tag<'tcx>(
 }
 
 fn type_symbol<'tcx>(_tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> crate::identifier::Identifier {
+    // `{ty:?}` prints paths of local items without the crate name, so e.g.
+    // arrow-buffer's own `bytes::Bytes` and the external `bytes` crate's
+    // `Bytes` would print identically and alias one converted struct (with
+    // whichever layout was converted first). `with_resolve_crate_name`
+    // prefixes every path (local ones included) with the real crate name,
+    // in generic-argument position too, keeping the symbols distinct.
+    let printed = rustc_middle::ty::print::with_resolve_crate_name!(format!("{ty:?}"));
     let mut legaliser = Legaliser::default();
-    legaliser.legalise(&format!("{ty:?}"))
+    legaliser.legalise(&printed)
 }
 
 fn is_fmt_rt_argument_type<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> bool {
@@ -5863,10 +7791,9 @@ mod ox {
         shim_binop!(BitXorOp, MirBitXorOp, XorOp);
         shim_binop!(ShlOp, MirShlOp, ShlOp);
 
-        /// `>>` keeps the old pipeline's semantics: always a logical shift
-        /// (`llvm.lshr`), because the aarch64/x86_64 isel has no `ashr`
-        /// lowering yet. dialect-mir's own `mir.shr` would pick `ashr` for
-        /// signed operands; switch to it once the isel learns `asr`.
+        /// The importer's own synthesized shifts (intrinsic expansions,
+        /// overflow decompositions) are always logical, matching the
+        /// unsigned bit-pattern math they implement.
         pub struct ShrOp {
             op: Ptr<Operation>,
         }
@@ -5880,6 +7807,33 @@ mod ox {
             }
         }
         shim_common!(ShrOp);
+
+        // Rust-level `>>` goes through dialect-mir's `mir.shr`, which
+        // mir-lower turns into `llvm.ashr` for signed operands and
+        // `llvm.lshr` for unsigned ones — the aarch64 isel lowers both
+        // (asr since the FP round; x86_64 still rejects `ashr` with a
+        // precise error).
+        shim_binop!(SignAwareShrOp, MirShrOp, LShrOp);
+
+        pub struct NegOp {
+            op: Ptr<Operation>,
+        }
+
+        impl NegOp {
+            pub fn new(ctx: &mut Context, input: Value) -> Self {
+                let ty = input.get_type(ctx);
+                let op = Operation::new(
+                    ctx,
+                    dm_ops::MirNegOp::get_concrete_op_info(),
+                    vec![ty],
+                    vec![input],
+                    vec![],
+                    0,
+                );
+                NegOp { op }
+            }
+        }
+        shim_common!(NegOp);
 
         shim_cmpop!(EqOp, MirEqOp, EQ);
         shim_cmpop!(NeOp, MirNeOp, NE);

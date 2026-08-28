@@ -194,14 +194,14 @@ impl_verify_succ!(FuncOp);
 
 pub fn mov_imm(ctx: &mut Context, rd: Register, imm: u64) -> Ptr<Operation> {
     let op = MovImmOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_imm(ctx, op, imm);
     op
 }
 
 pub fn movz(ctx: &mut Context, rd: Register, imm: u64, shift: u64) -> Ptr<Operation> {
     let op = MovzOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_imm(ctx, op, imm);
     set_shift(ctx, op, shift);
     op
@@ -209,7 +209,7 @@ pub fn movz(ctx: &mut Context, rd: Register, imm: u64, shift: u64) -> Ptr<Operat
 
 pub fn movk(ctx: &mut Context, rd: Register, imm: u64, shift: u64) -> Ptr<Operation> {
     let op = MovkOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_imm(ctx, op, imm);
     set_shift(ctx, op, shift);
     op
@@ -217,8 +217,8 @@ pub fn movk(ctx: &mut Context, rd: Register, imm: u64, shift: u64) -> Ptr<Operat
 
 pub fn mov(ctx: &mut Context, rd: Register, rm: Register) -> Ptr<Operation> {
     let op = MovOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_str(), rm);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), rm);
     op
 }
 
@@ -230,22 +230,22 @@ pub fn binary(
     rm: Register,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), rn);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_str(), rm);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), rm);
     op
 }
 
 pub fn str_pre_sp(ctx: &mut Context, rt: Register, bytes: u64) -> Ptr<Operation> {
     let op = StrPreSpOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
     set_imm(ctx, op, bytes);
     op
 }
 
 pub fn ldr_post_sp(ctx: &mut Context, rt: Register, bytes: u64) -> Ptr<Operation> {
     let op = LdrPostSpOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
     set_imm(ctx, op, bytes);
     op
 }
@@ -264,7 +264,7 @@ pub fn add_sp_imm(ctx: &mut Context, bytes: u64) -> Ptr<Operation> {
 
 pub fn add_sp_offset(ctx: &mut Context, rd: Register, offset: u64) -> Ptr<Operation> {
     let op = AddSpOffsetOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_imm(ctx, op, offset);
     op
 }
@@ -280,7 +280,7 @@ pub fn str_sp_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
     set_imm(ctx, op, offset);
     op
 }
@@ -296,14 +296,14 @@ pub fn ldr_sp_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
     set_imm(ctx, op, offset);
     op
 }
 
 pub fn ldr_stack_arg(ctx: &mut Context, rt: Register, offset: u64) -> Ptr<Operation> {
     let op = LdrStackArgOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
     set_imm(ctx, op, offset);
     op
 }
@@ -325,8 +325,8 @@ pub fn str_reg_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
     set_imm(ctx, op, offset);
     op
 }
@@ -348,8 +348,8 @@ pub fn ldr_reg_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rt);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rt);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
     set_imm(ctx, op, offset);
     op
 }
@@ -361,7 +361,7 @@ pub fn adr_literal(
     bytes: Vec<u8>,
 ) -> Ptr<Operation> {
     let op = AdrLiteralOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_literal_label(ctx, op, label);
     set_literal_bytes(ctx, op, bytes);
     op
@@ -375,7 +375,74 @@ pub fn adr_function(
     symbol: Identifier,
 ) -> Ptr<Operation> {
     let op = AdrFunctionOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_callee(ctx, op, symbol.to_string());
+    op
+}
+
+/// Materialize the 4KiB-page address of `symbol` (ADRP with a page-relative
+/// relocation). Pair with [add_lo12] on the same register to form the full
+/// address; the split matches the two relocations ELF uses for it.
+pub fn adrp(ctx: &mut Context, rd: Register, symbol: Identifier) -> Ptr<Operation> {
+    let op = AdrpOp::new(ctx).op;
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_callee(ctx, op, symbol.to_string());
+    op
+}
+
+/// Add the low 12 address bits of `symbol` to `rn` (ADD immediate with a
+/// low-12-bits relocation); the second half of an [adrp] pair.
+pub fn add_lo12(
+    ctx: &mut Context,
+    rd: Register,
+    rn: Register,
+    symbol: Identifier,
+) -> Ptr<Operation> {
+    let op = AddLo12Op::new(ctx).op;
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
+    set_callee(ctx, op, symbol.to_string());
+    op
+}
+
+/// Read the thread pointer (`mrs rd, tpidr_el0`), the base the local-exec
+/// TLS model offsets from. Pair with [add_tprel_hi12] + [add_tprel_lo12_nc]
+/// on the same register to form the address of a thread-local symbol.
+pub fn mrs_tpidr(ctx: &mut Context, rd: Register) -> Ptr<Operation> {
+    let op = MrsTpidrOp::new(ctx).op;
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    op
+}
+
+/// Add the high 12 bits of `symbol`'s TP-relative offset to `rn`
+/// (`add rd, rn, #:tprel_hi12:symbol` — an ADD immediate with LSL 12 whose
+/// immediate the linker fills via `R_AARCH64_TLSLE_ADD_TPREL_HI12`).
+pub fn add_tprel_hi12(
+    ctx: &mut Context,
+    rd: Register,
+    rn: Register,
+    symbol: Identifier,
+) -> Ptr<Operation> {
+    let op = AddTprelHi12Op::new(ctx).op;
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
+    set_callee(ctx, op, symbol.to_string());
+    op
+}
+
+/// Add the low 12 bits of `symbol`'s TP-relative offset to `rn`
+/// (`add rd, rn, #:tprel_lo12_nc:symbol`, relocation
+/// `R_AARCH64_TLSLE_ADD_TPREL_LO12_NC`); the final step of the local-exec
+/// address sequence started by [mrs_tpidr].
+pub fn add_tprel_lo12_nc(
+    ctx: &mut Context,
+    rd: Register,
+    rn: Register,
+    symbol: Identifier,
+) -> Ptr<Operation> {
+    let op = AddTprelLo12NcOp::new(ctx).op;
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
     set_callee(ctx, op, symbol.to_string());
     op
 }
@@ -403,7 +470,7 @@ pub fn call(ctx: &mut Context, callee: Identifier) -> Ptr<Operation> {
 /// Indirect call through the function pointer in `rn`.
 pub fn blr(ctx: &mut Context, rn: Register) -> Ptr<Operation> {
     let op = BlrOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
     op
 }
 
@@ -415,15 +482,15 @@ pub fn b(ctx: &mut Context, target: Ptr<BasicBlock>) -> Ptr<Operation> {
 
 pub fn cbnz(ctx: &mut Context, rn: Register, target: Ptr<BasicBlock>) -> Ptr<Operation> {
     let op = CbnzOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
     set_target(ctx, op, target);
     op
 }
 
 pub fn cmp(ctx: &mut Context, rn: Register, rm: Register) -> Ptr<Operation> {
     let op = CmpOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), rn);
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_str(), rm);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), rm);
     op
 }
 
@@ -436,8 +503,62 @@ pub fn b_cond(ctx: &mut Context, cond: ConditionCode, target: Ptr<BasicBlock>) -
 
 pub fn cset(ctx: &mut Context, rd: Register, cond: ConditionCode) -> Ptr<Operation> {
     let op = CsetOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_cond(ctx, op, cond);
+    op
+}
+
+/// A two-register instruction writing `rd` from `rn` (fneg, fcvt, scvtf,
+/// fcvtzs, fmov between register files, ...).
+pub fn unary(
+    ctx: &mut Context,
+    opcode: Aarch64Opcode,
+    rd: Register,
+    rn: Register,
+) -> Ptr<Operation> {
+    let op = create_instruction(ctx, opcode);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
+    op
+}
+
+/// A register-to-register FP move (`fmov dN, dM` / `fmov sN, sM`); mirrors
+/// [mov]'s rd/rm operand shape.
+pub fn fmov_rr(
+    ctx: &mut Context,
+    opcode: Aarch64Opcode,
+    rd: Register,
+    rm: Register,
+) -> Ptr<Operation> {
+    let op = create_instruction(ctx, opcode);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), rm);
+    op
+}
+
+/// `fmov <rd>, #imm8` with the raw 8-bit VFPExpandImm encoding in `imm`.
+pub fn fmov_imm(
+    ctx: &mut Context,
+    opcode: Aarch64Opcode,
+    rd: Register,
+    imm8: u64,
+) -> Ptr<Operation> {
+    let op = create_instruction(ctx, opcode);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
+    set_imm(ctx, op, imm8);
+    op
+}
+
+/// An FP compare setting nzcv (`fcmp <rn>, <rm>`).
+pub fn fcmp(
+    ctx: &mut Context,
+    opcode: Aarch64Opcode,
+    rn: Register,
+    rm: Register,
+) -> Ptr<Operation> {
+    let op = create_instruction(ctx, opcode);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
+    set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), rm);
     op
 }
 
@@ -749,10 +870,10 @@ fn apply_instruction_field(
             input_error!(loc.clone(), "invalid AArch64 register `{text}` for `{key}`")
         })
     };
-    match (key.as_str(), value) {
-        ("rd", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_str(), register_value(&text)?),
-        ("rn", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_str(), register_value(&text)?),
-        ("rm", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_str(), register_value(&text)?),
+    match (key.as_ref() as &str, value) {
+        ("rd", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), register_value(&text)?),
+        ("rn", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), register_value(&text)?),
+        ("rm", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), register_value(&text)?),
         ("imm", Text(text)) => set_imm(ctx, op, int_value(&text)?),
         ("cond", Text(text)) => {
             let cond = ConditionCode::parse(&text).ok_or_else(|| {
@@ -852,7 +973,7 @@ macro_rules! define_aarch64_instruction {
                 collect_register_operands(
                     ctx,
                     self.op,
-                    &[$(($reg_key.as_str(), RegisterOperandKind::$reg_kind)),*],
+                    &[$(($reg_key.as_ref(), RegisterOperandKind::$reg_kind)),*],
                 )
             }
             fn rewrite_register_operand(&self, ctx: &mut Context, key: &str, reg: Register) {
@@ -862,6 +983,9 @@ macro_rules! define_aarch64_instruction {
 
         #[op_interface_impl]
         impl BinarySerializableOpInterface for $name {
+            fn byte_len(&self, _ctx: &Context) -> u64 {
+                encoding::byte_len_for(Self::OPCODE)
+            }
             fn literal(&self, ctx: &Context) -> Option<(String, Vec<u8>)> {
                 encoding::literal_for_inst(ctx, self.op, Self::OPCODE)
             }
@@ -949,6 +1073,49 @@ define_aarch64_instructions! {
     Xor => XorOp, "aarch64.xor", "xor", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
     Shl => ShlOp, "aarch64.shl", "shl", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
     Lsr => LsrOp, "aarch64.lsr", "lsr", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    Asr => AsrOp, "aarch64.asr", "asr", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FaddD => FaddDOp, "aarch64.fadd_d", "fadd_d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FaddS => FaddSOp, "aarch64.fadd_s", "fadd_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FsubD => FsubDOp, "aarch64.fsub_d", "fsub_d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FsubS => FsubSOp, "aarch64.fsub_s", "fsub_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FmulD => FmulDOp, "aarch64.fmul_d", "fmul_d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FmulS => FmulSOp, "aarch64.fmul_s", "fmul_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FdivD => FdivDOp, "aarch64.fdiv_d", "fdiv_d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FdivS => FdivSOp, "aarch64.fdiv_s", "fdiv_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FnegD => FnegDOp, "aarch64.fneg_d", "fneg_d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FnegS => FnegSOp, "aarch64.fneg_s", "fneg_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcmpD => FcmpDOp, "aarch64.fcmp_d", "fcmp_d", [ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FcmpS => FcmpSOp, "aarch64.fcmp_s", "fcmp_s", [ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FcvtDS => FcvtDSOp, "aarch64.fcvt_ds", "fcvt_ds", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtSD => FcvtSDOp, "aarch64.fcvt_sd", "fcvt_sd", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    ScvtfDX => ScvtfDXOp, "aarch64.scvtf_dx", "scvtf_dx", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    ScvtfSX => ScvtfSXOp, "aarch64.scvtf_sx", "scvtf_sx", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    UcvtfDX => UcvtfDXOp, "aarch64.ucvtf_dx", "ucvtf_dx", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    UcvtfSX => UcvtfSXOp, "aarch64.ucvtf_sx", "ucvtf_sx", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzsXD => FcvtzsXDOp, "aarch64.fcvtzs_xd", "fcvtzs_xd", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzsWD => FcvtzsWDOp, "aarch64.fcvtzs_wd", "fcvtzs_wd", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzsXS => FcvtzsXSOp, "aarch64.fcvtzs_xs", "fcvtzs_xs", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzsWS => FcvtzsWSOp, "aarch64.fcvtzs_ws", "fcvtzs_ws", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzuXD => FcvtzuXDOp, "aarch64.fcvtzu_xd", "fcvtzu_xd", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzuWD => FcvtzuWDOp, "aarch64.fcvtzu_wd", "fcvtzu_wd", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzuXS => FcvtzuXSOp, "aarch64.fcvtzu_xs", "fcvtzu_xs", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FcvtzuWS => FcvtzuWSOp, "aarch64.fcvtzu_ws", "fcvtzu_ws", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FmovXD => FmovXDOp, "aarch64.fmov_xd", "fmov_xd", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FmovDX => FmovDXOp, "aarch64.fmov_dx", "fmov_dx", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FmovWS => FmovWSOp, "aarch64.fmov_ws", "fmov_ws", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FmovSW => FmovSWOp, "aarch64.fmov_sw", "fmov_sw", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FmovD => FmovDOp, "aarch64.fmov_d", "fmov_d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RM => Use];
+    FmovS => FmovSOp, "aarch64.fmov_s", "fmov_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RM => Use];
+    FmovImmD => FmovImmDOp, "aarch64.fmov_imm_d", "fmov_imm_d", [ATTR_KEY_AARCH64_RD => Def];
+    FmovImmS => FmovImmSOp, "aarch64.fmov_imm_s", "fmov_imm_s", [ATTR_KEY_AARCH64_RD => Def];
+    StrdSpOffset => StrdSpOffsetOp, "aarch64.strd_sp_offset", "strd_sp_offset", [ATTR_KEY_AARCH64_RD => Use];
+    LdrdSpOffset => LdrdSpOffsetOp, "aarch64.ldrd_sp_offset", "ldrd_sp_offset", [ATTR_KEY_AARCH64_RD => Def];
+    StrsSpOffset => StrsSpOffsetOp, "aarch64.strs_sp_offset", "strs_sp_offset", [ATTR_KEY_AARCH64_RD => Use];
+    LdrsSpOffset => LdrsSpOffsetOp, "aarch64.ldrs_sp_offset", "ldrs_sp_offset", [ATTR_KEY_AARCH64_RD => Def];
+    StrdRegOffset => StrdRegOffsetOp, "aarch64.strd_reg_offset", "strd_reg_offset", [ATTR_KEY_AARCH64_RD => Use, ATTR_KEY_AARCH64_RN => Use];
+    LdrdRegOffset => LdrdRegOffsetOp, "aarch64.ldrd_reg_offset", "ldrd_reg_offset", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    StrsRegOffset => StrsRegOffsetOp, "aarch64.strs_reg_offset", "strs_reg_offset", [ATTR_KEY_AARCH64_RD => Use, ATTR_KEY_AARCH64_RN => Use];
+    LdrsRegOffset => LdrsRegOffsetOp, "aarch64.ldrs_reg_offset", "ldrs_reg_offset", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
     Cmp => CmpOp, "aarch64.cmp", "cmp", [ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
     StrPreSp => StrPreSpOp, "aarch64.str_pre_sp", "str_pre_sp", [ATTR_KEY_AARCH64_RD => Use];
     LdrPostSp => LdrPostSpOp, "aarch64.ldr_post_sp", "ldr_post_sp", [ATTR_KEY_AARCH64_RD => Def];
@@ -983,6 +1150,11 @@ define_aarch64_instructions! {
     Cbnz => CbnzOp, "aarch64.cbnz", "cbnz", [ATTR_KEY_AARCH64_RN => Use];
     AdrFunction => AdrFunctionOp, "aarch64.adr_function", "adr_function", [ATTR_KEY_AARCH64_RD => Def];
     Blr => BlrOp, "aarch64.blr", "blr", [ATTR_KEY_AARCH64_RN => Use];
+    Adrp => AdrpOp, "aarch64.adrp", "adrp", [ATTR_KEY_AARCH64_RD => Def];
+    AddLo12 => AddLo12Op, "aarch64.add_lo12", "add_lo12", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    MrsTpidr => MrsTpidrOp, "aarch64.mrs_tpidr", "mrs_tpidr", [ATTR_KEY_AARCH64_RD => Def];
+    AddTprelHi12 => AddTprelHi12Op, "aarch64.add_tprel_hi12", "add_tprel_hi12", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    AddTprelLo12Nc => AddTprelLo12NcOp, "aarch64.add_tprel_lo12_nc", "add_tprel_lo12_nc", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
 }
 
 fn opcode_for_operation_opt(ctx: &Context, op: Ptr<Operation>) -> Option<Aarch64Opcode> {
@@ -1124,9 +1296,9 @@ mod tests {
             // scalar fields print whenever present. Branch targets are CFG
             // successors, not attributes; they only resolve inside a region
             // and round-trip in `branch_targets_round_trip_inside_a_func`.
-            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RD.as_str(), Register::gpr(0));
-            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RN.as_str(), super::super::registers::SP);
-            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RM.as_str(), Register::virtual_gpr(7));
+            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), Register::gpr(0));
+            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), super::super::registers::SP);
+            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), Register::virtual_gpr(7));
             set_imm(&mut ctx, op, 42);
             set_cond(&mut ctx, op, ConditionCode::Ls);
             set_shift(&mut ctx, op, 16);

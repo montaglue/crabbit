@@ -25,7 +25,7 @@ impl Pass for Aarch64LegalizePass {
         "aarch64-legalize"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {
@@ -52,15 +52,66 @@ impl Pass for Aarch64LegalizePass {
     }
 }
 
-/// The current instruction set only has GPR encodings. Reject a manually
-/// constructed FP/SIMD register operand before RA/encoding instead of letting
-/// it collide with a virtual register name or panic in `parse_xreg`.
+/// The register-file group an instruction expects for one operand key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedClass {
+    Gpr,
+    /// Either FP class: `d` and `s` spell element sizes of the same file,
+    /// and the element size is carried by the opcode.
+    Fpr,
+}
+
+fn matches_expected(class: RegisterClass, expected: ExpectedClass) -> bool {
+    match expected {
+        ExpectedClass::Gpr => class == RegisterClass::Gpr64,
+        ExpectedClass::Fpr => matches!(class, RegisterClass::Fpr64 | RegisterClass::Fpr32),
+    }
+}
+
+/// The expected register-file group of the `(rd, rn, rm)` operands for
+/// `opcode`. Defaults to all-GPR; FP instructions override the operands
+/// living in the FP file (conversions and cross-file moves mix the two).
+fn expected_operand_classes(
+    opcode: aarch64_ops::Aarch64Opcode,
+) -> (ExpectedClass, ExpectedClass, ExpectedClass) {
+    use ExpectedClass::{Fpr, Gpr};
+    use aarch64_ops::Aarch64Opcode as Opc;
+    match opcode {
+        // FP data-processing: everything in the FP file.
+        Opc::FaddD | Opc::FaddS | Opc::FsubD | Opc::FsubS | Opc::FmulD | Opc::FmulS
+        | Opc::FdivD | Opc::FdivS | Opc::FnegD | Opc::FnegS | Opc::FcmpD | Opc::FcmpS
+        | Opc::FcvtDS | Opc::FcvtSD | Opc::FmovD | Opc::FmovS | Opc::FmovImmD
+        | Opc::FmovImmS => (Fpr, Fpr, Fpr),
+        // FP data register, GPR base for loads/stores; no rm.
+        Opc::StrdSpOffset | Opc::LdrdSpOffset | Opc::StrsSpOffset | Opc::LdrsSpOffset
+        | Opc::StrdRegOffset | Opc::LdrdRegOffset | Opc::StrsRegOffset | Opc::LdrsRegOffset => {
+            (Fpr, Gpr, Gpr)
+        }
+        // int -> FP conversions and GPR-to-FP moves: FP destination, GPR source.
+        Opc::ScvtfDX | Opc::ScvtfSX | Opc::UcvtfDX | Opc::UcvtfSX | Opc::FmovDX
+        | Opc::FmovSW => (Fpr, Gpr, Gpr),
+        // FP -> int conversions and FP-to-GPR moves: GPR destination, FP source.
+        Opc::FcvtzsXD | Opc::FcvtzsWD | Opc::FcvtzsXS | Opc::FcvtzsWS | Opc::FcvtzuXD
+        | Opc::FcvtzuWD | Opc::FcvtzuXS | Opc::FcvtzuWS | Opc::FmovXD | Opc::FmovWS => {
+            (Gpr, Fpr, Gpr)
+        }
+        _ => (Gpr, Gpr, Gpr),
+    }
+}
+
+/// Reject a register operand in the wrong register file before RA/encoding
+/// instead of letting it collide with a virtual register name or panic in
+/// the encoder's register-number extraction.
 fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
     let mnemonic = aarch64_ops::mnemonic(ctx, op).unwrap_or("<unknown>");
-    for key in [
-        ATTR_KEY_AARCH64_RD.as_str(),
-        ATTR_KEY_AARCH64_RN.as_str(),
-        ATTR_KEY_AARCH64_RM.as_str(),
+    let Some(opcode) = aarch64_ops::opcode(ctx, op) else {
+        return Ok(());
+    };
+    let (rd_expected, rn_expected, rm_expected) = expected_operand_classes(opcode);
+    for (key, expected) in [
+        (ATTR_KEY_AARCH64_RD.as_ref(), rd_expected),
+        (ATTR_KEY_AARCH64_RN.as_ref(), rn_expected),
+        (ATTR_KEY_AARCH64_RM.as_ref(), rm_expected),
     ] {
         let Some(register) = aarch64_ops::reg(ctx, op, key) else {
             continue;
@@ -69,9 +120,9 @@ fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
             Register::Virtual { class, .. } => class,
             Register::Physical(register) => register.class(),
         };
-        if class != RegisterClass::Gpr64 {
+        if !matches_expected(class, expected) {
             return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-                format!("{mnemonic} requires a GPR operand, got `{register}`")
+                format!("{mnemonic} requires a {expected:?} operand for {key}, got `{register}`")
             )));
         }
     }

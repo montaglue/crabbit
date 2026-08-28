@@ -35,7 +35,7 @@ impl Pass for LLVMPinTypePunnedSlotsPass {
     }
 
     fn run(
-        &self,
+        &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,

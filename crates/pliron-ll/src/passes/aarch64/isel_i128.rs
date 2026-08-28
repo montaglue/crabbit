@@ -13,7 +13,7 @@ use super::{
     frontend::BinaryKind,
     llvm_to_aarch64_isel::{
         CompareValue, LoweredValue, condition_code, fold_binary, fresh_vreg, is_128_bit_integer,
-        materialize_pair, materialize_typed, materialize_u64_immediate, opcode,
+        materialize, materialize_pair, materialize_typed, materialize_u64_immediate, opcode,
     },
 };
 use crate::r#type::TypeHandle;
@@ -162,22 +162,37 @@ pub(super) fn lower_binary_128(
             .insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
-        BinaryKind::Shr => {
-            let Some(shift) = shift_amount else {
-                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-                    "dynamic i128 logical shift right".to_string(),
-                )));
-            };
-            lower_shift_right_128(ctx, entry, lhs_lo, lhs_hi, shift, next_vreg)
-        }
-        BinaryKind::Shl => {
-            let Some(shift) = shift_amount else {
-                return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-                    "dynamic i128 shift left".to_string(),
-                )));
-            };
-            lower_shift_left_128(ctx, entry, lhs_lo, lhs_hi, shift, next_vreg)
-        }
+        BinaryKind::Shr => match shift_amount {
+            Some(shift) => {
+                lower_shift_right_128(ctx, entry, lhs_lo, lhs_hi, shift, false, next_vreg)
+            }
+            None => {
+                let amount = materialize(ctx, entry, rhs, next_vreg, "i128 shift amount")?;
+                lower_dynamic_shift_128(
+                    ctx, entry, DynamicShift::Lshr, lhs_lo, lhs_hi, amount, next_vreg,
+                )
+            }
+        },
+        BinaryKind::AShr => match shift_amount {
+            Some(shift) => {
+                lower_shift_right_128(ctx, entry, lhs_lo, lhs_hi, shift, true, next_vreg)
+            }
+            None => {
+                let amount = materialize(ctx, entry, rhs, next_vreg, "i128 shift amount")?;
+                lower_dynamic_shift_128(
+                    ctx, entry, DynamicShift::Ashr, lhs_lo, lhs_hi, amount, next_vreg,
+                )
+            }
+        },
+        BinaryKind::Shl => match shift_amount {
+            Some(shift) => lower_shift_left_128(ctx, entry, lhs_lo, lhs_hi, shift, next_vreg),
+            None => {
+                let amount = materialize(ctx, entry, rhs, next_vreg, "i128 shift amount")?;
+                lower_dynamic_shift_128(
+                    ctx, entry, DynamicShift::Shl, lhs_lo, lhs_hi, amount, next_vreg,
+                )
+            }
+        },
         BinaryKind::And | BinaryKind::Or | BinaryKind::Xor => {
             let (rhs_lo, rhs_hi) =
                 materialize_pair(ctx, entry, rhs, result_ty, next_vreg, "i128 rhs")?;
@@ -363,8 +378,14 @@ fn lower_shift_right_128(
     lo: Register,
     hi: Register,
     shift: u32,
+    signed: bool,
     next_vreg: &mut usize,
 ) -> STAIRResult<LoweredValue> {
+    let hi_shift_opcode = if signed {
+        aarch64_ops::AsrOp::OPCODE
+    } else {
+        aarch64_ops::LsrOp::OPCODE
+    };
     if shift == 0 {
         return Ok(LoweredValue::RegPair(lo, hi));
     }
@@ -402,35 +423,142 @@ fn lower_shift_right_128(
         .insert_at_back(entry, ctx);
         let new_hi = fresh_vreg(next_vreg);
         let shift_reg = fresh_shift(ctx, entry, shift, next_vreg)?;
-        aarch64_ops::binary(
-            ctx,
-            aarch64_ops::LsrOp::OPCODE,
-            new_hi.clone(),
-            hi,
-            shift_reg,
-        )
-        .insert_at_back(entry, ctx);
+        aarch64_ops::binary(ctx, hi_shift_opcode, new_hi.clone(), hi, shift_reg)
+            .insert_at_back(entry, ctx);
         Ok(LoweredValue::RegPair(new_lo, new_hi))
     } else {
         let new_lo = if shift == 64 {
-            hi
+            hi.clone()
         } else {
             let shift_reg = fresh_vreg(next_vreg);
             materialize_u64_immediate(ctx, entry, shift_reg, (shift - 64) as u64);
             let shifted = fresh_vreg(next_vreg);
-            aarch64_ops::binary(
-                ctx,
-                aarch64_ops::LsrOp::OPCODE,
-                shifted.clone(),
-                hi,
-                shift_reg,
-            )
-            .insert_at_back(entry, ctx);
+            aarch64_ops::binary(ctx, hi_shift_opcode, shifted.clone(), hi.clone(), shift_reg)
+                .insert_at_back(entry, ctx);
             shifted
         };
-        let new_hi = fresh_vreg(next_vreg);
-        materialize_u64_immediate(ctx, entry, new_hi, 0);
+        let new_hi = if signed {
+            // The high half becomes the sign extension of the old high half.
+            let sixty_three = fresh_shift(ctx, entry, 63, next_vreg)?;
+            let sign = fresh_vreg(next_vreg);
+            aarch64_ops::binary(ctx, aarch64_ops::AsrOp::OPCODE, sign.clone(), hi, sixty_three)
+                .insert_at_back(entry, ctx);
+            sign
+        } else {
+            let zero = fresh_vreg(next_vreg);
+            materialize_u64_immediate(ctx, entry, zero.clone(), 0);
+            zero
+        };
         Ok(LoweredValue::RegPair(new_lo, new_hi))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicShift {
+    Shl,
+    Lshr,
+    Ashr,
+}
+
+/// Branch-free variable-amount 128-bit shift for amounts in `0..=127`.
+///
+/// The construction relies on AArch64's variable shifts using the amount
+/// modulo 64 (so one `lslv`/`lsrv`/`asrv` covers both the `n < 64` and the
+/// `n - 64` cases), on `(x >> 1) >> (63 - (n & 63))` being `x >> (64 - n)`
+/// for `n > 0` and `0` for `n == 0` (the cross-half carry), and on
+/// `cmp n, #64` + `cset` producing all-ones/all-zero masks that select
+/// between the two cases without a branch.
+fn lower_dynamic_shift_128(
+    ctx: &mut Context,
+    entry: Ptr<crate::ir::basic_block::BasicBlock>,
+    kind: DynamicShift,
+    lo: Register,
+    hi: Register,
+    amount: Register,
+    next_vreg: &mut usize,
+) -> STAIRResult<LoweredValue> {
+    let emit_binary = |ctx: &mut Context,
+                       opcode: crate::dialects::aarch64::op_interfaces::Aarch64Opcode,
+                       lhs: Register,
+                       rhs: Register,
+                       next_vreg: &mut usize| {
+        let dst = fresh_vreg(next_vreg);
+        aarch64_ops::binary(ctx, opcode, dst.clone(), lhs, rhs).insert_at_back(entry, ctx);
+        dst
+    };
+    let constant = |ctx: &mut Context, value: u64, next_vreg: &mut usize| {
+        let dst = fresh_vreg(next_vreg);
+        materialize_u64_immediate(ctx, entry, dst.clone(), value);
+        dst
+    };
+    use aarch64_ops::{AndOp, AsrOp, LsrOp, OrOp, ShlOp, SubOp};
+
+    // inv = 63 - (n & 63), the carry shift with the n == 0 case folded out.
+    let c63 = constant(ctx, 63, next_vreg);
+    let n63 = emit_binary(ctx, AndOp::OPCODE, amount.clone(), c63.clone(), next_vreg);
+    let inv = emit_binary(ctx, SubOp::OPCODE, c63.clone(), n63, next_vreg);
+
+    // mask_lo = all-ones when n < 64, else zero; mask_hi is its complement.
+    let c64 = constant(ctx, 64, next_vreg);
+    aarch64_ops::cmp(ctx, amount.clone(), c64).insert_at_back(entry, ctx);
+    let lt64 = fresh_vreg(next_vreg);
+    aarch64_ops::cset(ctx, lt64.clone(), condition_code(ICmpPredicateAttr::ULT))
+        .insert_at_back(entry, ctx);
+    let ge64 = fresh_vreg(next_vreg);
+    aarch64_ops::cset(ctx, ge64.clone(), condition_code(ICmpPredicateAttr::UGE))
+        .insert_at_back(entry, ctx);
+    let zero = constant(ctx, 0, next_vreg);
+    let mask_lo = emit_binary(ctx, SubOp::OPCODE, zero.clone(), lt64, next_vreg);
+    let mask_hi = emit_binary(ctx, SubOp::OPCODE, zero, ge64, next_vreg);
+
+    let select = |ctx: &mut Context,
+                  low_case: Register,
+                  high_case: Register,
+                  next_vreg: &mut usize| {
+        let low = emit_binary(ctx, AndOp::OPCODE, low_case, mask_lo.clone(), next_vreg);
+        let high = emit_binary(ctx, AndOp::OPCODE, high_case, mask_hi.clone(), next_vreg);
+        emit_binary(ctx, OrOp::OPCODE, low, high, next_vreg)
+    };
+
+    match kind {
+        DynamicShift::Shl => {
+            // shl_lo = lo << (n mod 64): the n < 64 low half, and (for
+            // n >= 64) exactly lo << (n - 64), the high half.
+            let shl_lo = emit_binary(ctx, ShlOp::OPCODE, lo.clone(), amount.clone(), next_vreg);
+            let shl_hi = emit_binary(ctx, ShlOp::OPCODE, hi, amount, next_vreg);
+            let one = constant(ctx, 1, next_vreg);
+            let lo_half = emit_binary(ctx, LsrOp::OPCODE, lo, one, next_vreg);
+            let carry = emit_binary(ctx, LsrOp::OPCODE, lo_half, inv, next_vreg);
+            let hi_low_case = emit_binary(ctx, OrOp::OPCODE, shl_hi, carry, next_vreg);
+            let new_lo = emit_binary(ctx, AndOp::OPCODE, shl_lo.clone(), mask_lo.clone(), next_vreg);
+            let new_hi = select(ctx, hi_low_case, shl_lo, next_vreg);
+            Ok(LoweredValue::RegPair(new_lo, new_hi))
+        }
+        DynamicShift::Lshr | DynamicShift::Ashr => {
+            let hi_shift_opcode = if kind == DynamicShift::Ashr {
+                AsrOp::OPCODE
+            } else {
+                LsrOp::OPCODE
+            };
+            // hi_shifted = hi >>(s) (n mod 64): the n < 64 high half, and
+            // (for n >= 64) exactly hi >>(s) (n - 64), the low half.
+            let hi_shifted =
+                emit_binary(ctx, hi_shift_opcode, hi.clone(), amount.clone(), next_vreg);
+            let lsr_lo = emit_binary(ctx, LsrOp::OPCODE, lo, amount, next_vreg);
+            let one = constant(ctx, 1, next_vreg);
+            let hi_double = emit_binary(ctx, ShlOp::OPCODE, hi.clone(), one, next_vreg);
+            let carry = emit_binary(ctx, ShlOp::OPCODE, hi_double, inv, next_vreg);
+            let lo_low_case = emit_binary(ctx, OrOp::OPCODE, lsr_lo, carry, next_vreg);
+            let new_lo = select(ctx, lo_low_case, hi_shifted.clone(), next_vreg);
+            let new_hi = if kind == DynamicShift::Ashr {
+                let sixty_three = constant(ctx, 63, next_vreg);
+                let sign = emit_binary(ctx, AsrOp::OPCODE, hi, sixty_three, next_vreg);
+                select(ctx, hi_shifted, sign, next_vreg)
+            } else {
+                emit_binary(ctx, AndOp::OPCODE, hi_shifted, mask_lo.clone(), next_vreg)
+            };
+            Ok(LoweredValue::RegPair(new_lo, new_hi))
+        }
     }
 }
 

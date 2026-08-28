@@ -129,16 +129,9 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String>
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
 /// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
-fn pipeline(target: &TargetBackend, internal_symbols: Vec<String>) -> Passes {
+fn pipeline(target: &TargetBackend) -> Passes {
     let mut passes = Passes::default();
     passes.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
-    // mir-lower emits llvm.funcs without linkage; crabbit's llvm passes and
-    // the object backends require every function to carry one.
-    passes.add_pass(
-        crabbit_mir::passes::lower_dialect_mir::StampFunctionLinkagePass::new(
-            internal_symbols,
-        ),
-    );
     // Inline the module-internal call graph, then fold/clean and merge the
     // inlined blocks. simplify runs again after the CFG cleanup because
     // merging blocks turns cross-block load/store chains into block-local
@@ -216,7 +209,7 @@ fn emit_object(
     let mut config = PMConfig::default();
     config.print_after_all = true;
     config.ir_printing_dir = Some(dump_dir.clone());
-    let mut pipeline = pipeline(target, imported.internal_symbols.clone());
+    let mut pipeline = pipeline(target);
     pipeline.set_config(config);
 
     let initial_dump = imported.module.disp(&imported.ctx).to_string();

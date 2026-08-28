@@ -36,7 +36,7 @@ pub fn x86_64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResul
         };
         let offset = text.len() as u64;
         let encoded =
-            get_bytes_attr(op, ctx, ATTR_KEY_X86_64_ENCODED.as_str()).unwrap_or_default();
+            get_bytes_attr(op, ctx, ATTR_KEY_X86_64_ENCODED.as_ref()).unwrap_or_default();
         text.extend_from_slice(&encoded);
         if func.linkage(ctx) == LinkageAttr::External {
             symbols.push(Symbol {
@@ -48,7 +48,7 @@ pub fn x86_64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResul
         }
     }
     let literals =
-        get_bytes_attr(root, ctx, ATTR_KEY_X86_64_MODULE_LITERALS.as_str()).unwrap_or_default();
+        get_bytes_attr(root, ctx, ATTR_KEY_X86_64_MODULE_LITERALS.as_ref()).unwrap_or_default();
     text.extend_from_slice(&literals);
     let relocations = external_branch_relocations(ctx, root, &mut symbols);
     Ok(ObjectOp::new_with_relocations(
@@ -65,7 +65,7 @@ fn external_branch_relocations(
     root: Ptr<Operation>,
     symbols: &mut Vec<Symbol>,
 ) -> Vec<Relocation> {
-    let fixups = get_fixups_attr(root, ctx, ATTR_KEY_X86_64_FIXUPS.as_str()).unwrap_or_default();
+    let fixups = get_fixups_attr(root, ctx, ATTR_KEY_X86_64_FIXUPS.as_ref()).unwrap_or_default();
     fixups
         .into_iter()
         .map(|fixup| {
@@ -133,7 +133,7 @@ mod tests {
         set_bytes_attr(
             target.get_operation(),
             &mut ctx,
-            ATTR_KEY_X86_64_ENCODED.as_str(),
+            ATTR_KEY_X86_64_ENCODED.as_ref(),
             vec![0x00, 0x00, 0x00, 0x00],
         );
         let other = x86_64::ops::FuncOp::new(&mut ctx, "other".try_into().unwrap(), LinkageAttr::External);
@@ -141,19 +141,19 @@ mod tests {
         set_bytes_attr(
             other.get_operation(),
             &mut ctx,
-            ATTR_KEY_X86_64_ENCODED.as_str(),
+            ATTR_KEY_X86_64_ENCODED.as_ref(),
             vec![],
         );
         set_bytes_attr(
             module.get_operation(),
             &mut ctx,
-            ATTR_KEY_X86_64_MODULE_LITERALS.as_str(),
+            ATTR_KEY_X86_64_MODULE_LITERALS.as_ref(),
             vec![],
         );
         set_fixups_attr(
             module.get_operation(),
             &mut ctx,
-            ATTR_KEY_X86_64_FIXUPS.as_str(),
+            ATTR_KEY_X86_64_FIXUPS.as_ref(),
             vec![
                 BinaryFixup {
                     offset: 0,

@@ -60,7 +60,7 @@ impl Pass for LLVMSroaPass {
         "llvm-sroa"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;

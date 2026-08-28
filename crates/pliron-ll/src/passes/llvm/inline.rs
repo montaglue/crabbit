@@ -63,7 +63,7 @@ impl Pass for LLVMInlinePass {
         "llvm-inline"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let funcs = collect_functions(ctx, root);
         let by_symbol: FxHashMap<Identifier, FuncOp> = funcs
             .iter()

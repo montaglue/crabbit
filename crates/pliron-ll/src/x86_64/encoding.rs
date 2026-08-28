@@ -82,9 +82,9 @@ fn encode_into(
     out: &mut Vec<u8>,
     fixups: &mut Vec<BinaryFixup>,
 ) -> STAIRResult<()> {
-    let rd = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RD.as_str(), mnemonic);
-    let rn = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RN.as_str(), mnemonic);
-    let rm = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RM.as_str(), mnemonic);
+    let rd = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), mnemonic);
+    let rn = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), mnemonic);
+    let rm = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RM.as_ref(), mnemonic);
     let imm = || {
         ops::imm(ctx, op).ok_or_else(|| {
             crate::input_error_noloc!("x86-64 `{mnemonic}` is missing its immediate")

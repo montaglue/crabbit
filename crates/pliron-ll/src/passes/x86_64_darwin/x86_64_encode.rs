@@ -29,7 +29,7 @@ impl Pass for X86_64EncodePass {
         "x86-64-encode"
     }
 
-    fn run(&self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -86,16 +86,16 @@ impl Pass for X86_64EncodePass {
                     bytes.extend_from_slice(&encoded.bytes);
                 }
             }
-            set_bytes_attr(op, ctx, ATTR_KEY_X86_64_ENCODED.as_str(), bytes.clone());
+            set_bytes_attr(op, ctx, ATTR_KEY_X86_64_ENCODED.as_ref(), bytes.clone());
             function_offset += bytes.len() as u64;
         }
         set_bytes_attr(
             root,
             ctx,
-            ATTR_KEY_X86_64_MODULE_LITERALS.as_str(),
+            ATTR_KEY_X86_64_MODULE_LITERALS.as_ref(),
             literal_bytes,
         );
-        set_fixups_attr(root, ctx, ATTR_KEY_X86_64_FIXUPS.as_str(), fixups);
+        set_fixups_attr(root, ctx, ATTR_KEY_X86_64_FIXUPS.as_ref(), fixups);
         Ok(changed())
     }
 }
@@ -235,7 +235,7 @@ mod tests {
             get_bytes_attr(
                 caller.get_operation(),
                 &ctx,
-                ATTR_KEY_X86_64_ENCODED.as_str()
+                ATTR_KEY_X86_64_ENCODED.as_ref()
             ),
             // movabs rbx,1; call puts (fixup); call callee (+20); lea r12,
             // [rip+19]; lea r13, [rip+16]; jmp exit (fall-through distance 0);
@@ -248,7 +248,7 @@ mod tests {
             get_bytes_attr(
                 callee.get_operation(),
                 &ctx,
-                ATTR_KEY_X86_64_ENCODED.as_str()
+                ATTR_KEY_X86_64_ENCODED.as_ref()
             ),
             Some(bytes("c3"))
         );
@@ -256,7 +256,7 @@ mod tests {
             get_bytes_attr(
                 third.get_operation(),
                 &ctx,
-                ATTR_KEY_X86_64_ENCODED.as_str()
+                ATTR_KEY_X86_64_ENCODED.as_ref()
             ),
             // call rel32 back to caller at offset 0 from pc 41.
             Some(bytes("e8d2ffffff"))
@@ -265,12 +265,12 @@ mod tests {
             get_bytes_attr(
                 module.get_operation(),
                 &ctx,
-                ATTR_KEY_X86_64_MODULE_LITERALS.as_str()
+                ATTR_KEY_X86_64_MODULE_LITERALS.as_ref()
             ),
             Some(bytes("aabbccdd01020304"))
         );
         assert_eq!(
-            get_fixups_attr(module.get_operation(), &ctx, ATTR_KEY_X86_64_FIXUPS.as_str()),
+            get_fixups_attr(module.get_operation(), &ctx, ATTR_KEY_X86_64_FIXUPS.as_ref()),
             // The fixup names the disp32 field: call at 10, disp at 11.
             Some(vec![BinaryFixup {
                 offset: 11,

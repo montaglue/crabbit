@@ -13,7 +13,10 @@ use crate::{
 };
 
 pub fn register(ctx: &mut Context) {
-    Dialect::register(ctx, &DialectName::new("cmir"));
+    Dialect::register(
+        ctx,
+        &DialectName::try_new("cmir").expect("invalid dialect name"),
+    );
     attributes::register(ctx);
     types::register(ctx);
     ops::register(ctx);

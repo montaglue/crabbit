@@ -74,7 +74,7 @@ impl Pass for LlvmToX86_64IselPass {
     }
 
     fn run(
-        &self,
+        &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,

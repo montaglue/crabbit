@@ -18,12 +18,12 @@ use crate::{
         llvm::{
             attributes::LinkageAttr as LlvmLinkageAttr,
             ops::{
-                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
-                ExtractValueOp, FuncOp, GetElementPtrOp, ICmpOp, InsertValueOp,
-                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp,
-                SRemOp,
-                ShlOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, UnreachableOp, XorOp,
-                SExtOp, ZExtOp,
+                AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
+                ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp,
+                FPToUIOp, FPTruncOp, FRemOp, FSubOp, FuncOp, GetElementPtrOp, ICmpOp,
+                InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp,
+                ReturnOp, SDivOp, SIToFPOp, SRemOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp,
+                UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, SExtOp, ZExtOp,
             },
             types::{FuncType, PointerType, VoidType},
         },
@@ -47,6 +47,9 @@ use crate::ll::{LinkageAttr};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AbiClass {
     Int { size: u64, align: u64 },
+    /// A scalar `f32` (size 4) or `f64` (size 8): passed in v0-v7 per
+    /// AAPCS64 rule C.1.
+    Float { size: u64 },
     Aggregate { size: u64, align: u64 },
     Void,
 }
@@ -64,7 +67,10 @@ pub(super) enum BinaryKind {
     Or,
     Xor,
     Shl,
+    /// Logical shift right (`llvm.lshr`).
     Shr,
+    /// Arithmetic shift right (`llvm.ashr`).
+    AShr,
 }
 
 #[op_interface]
@@ -101,6 +107,9 @@ pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> STAIRRes
         LlvmLinkageAttr::ExternalLinkage => Ok(LinkageAttr::External),
         LlvmLinkageAttr::InternalLinkage => Ok(LinkageAttr::Internal),
         LlvmLinkageAttr::PrivateLinkage => Ok(LinkageAttr::Private),
+        LlvmLinkageAttr::WeakODRLinkage | LlvmLinkageAttr::WeakAnyLinkage => {
+            Ok(LinkageAttr::Weak)
+        }
         other => Err(input_error_noloc!(Aarch64Err::UnsupportedLinkage(
             name.to_string(),
             other
@@ -188,6 +197,19 @@ impl_valid_op!(
     CondBrOp,
     ReturnOp,
     UnreachableOp,
+    FAddOp,
+    FSubOp,
+    FMulOp,
+    FDivOp,
+    FRemOp,
+    FNegOp,
+    FCmpOp,
+    SIToFPOp,
+    UIToFPOp,
+    FPToSIOp,
+    FPToUIOp,
+    FPExtOp,
+    FPTruncOp,
 );
 
 impl_binary_op!(
@@ -203,6 +225,7 @@ impl_binary_op!(
     XorOp => BinaryKind::Xor,
     ShlOp => BinaryKind::Shl,
     LShrOp => BinaryKind::Shr,
+    AShrOp => BinaryKind::AShr,
 );
 
 pub(super) fn function_abi_classes(
@@ -236,10 +259,11 @@ pub(super) fn abi_class(ctx: &Context, ty: TypeHandle) -> STAIRResult<AbiClass> 
         let (size, align) = abi_type_layout(ctx, ty)?;
         return Ok(AbiClass::Int { size, align });
     }
-    if ty_ref.downcast_ref::<FP32Type>().is_some() || ty_ref.downcast_ref::<FP64Type>().is_some() {
-        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-            "floating-point ABI lowering is not implemented".to_string()
-        )));
+    if ty_ref.downcast_ref::<FP32Type>().is_some() {
+        return Ok(AbiClass::Float { size: 4 });
+    }
+    if ty_ref.downcast_ref::<FP64Type>().is_some() {
+        return Ok(AbiClass::Float { size: 8 });
     }
     if ty_ref
         .downcast_ref::<crate::dialects::llvm::types::StructType>()
@@ -264,10 +288,30 @@ pub(super) fn assign_abi(
     result: AbiClass,
 ) -> STAIRResult<FunctionAbi> {
     let mut gpr: u8 = 0;
+    let mut fpr: u8 = 0;
     let mut stack_offset = 0u64;
     let mut locations = Vec::with_capacity(args.len());
     for arg in args {
         match arg {
+            AbiClass::Float { size } => {
+                if fpr < 8 {
+                    let reg = if *size == 8 {
+                        Register::fpr64(fpr)
+                    } else {
+                        Register::fpr32(fpr)
+                    };
+                    locations.push(AbiLocation::Gpr(reg));
+                    fpr += 1;
+                } else {
+                    // AAPCS64 rule C.3: once a float is assigned to the
+                    // stack, no later float may back-fill v-registers. Stack
+                    // argument slots are rounded up to 8 bytes (rule C.14).
+                    fpr = 8;
+                    stack_offset = align_to(stack_offset, 8);
+                    locations.push(AbiLocation::Stack(stack_offset));
+                    stack_offset += 8;
+                }
+            }
             AbiClass::Int { size, .. } if *size <= 8 => {
                 if gpr < 8 {
                     locations.push(AbiLocation::Gpr(Register::gpr(gpr)));
@@ -316,6 +360,8 @@ pub(super) fn assign_abi(
         }
     }
     let result = match result {
+        AbiClass::Float { size: 8 } => AbiLocation::Gpr(Register::fpr64(0)),
+        AbiClass::Float { .. } => AbiLocation::Gpr(Register::fpr32(0)),
         AbiClass::Int { size, .. } if size <= 8 => AbiLocation::Gpr(Register::gpr(0)),
         AbiClass::Int { size, .. } if size <= 16 => {
             AbiLocation::GprPair(Register::gpr(0), Register::gpr(1))
@@ -407,6 +453,8 @@ mod tests {
 
     const I64: AbiClass = AbiClass::Int { size: 8, align: 8 };
     const I128: AbiClass = AbiClass::Int { size: 16, align: 16 };
+    const F64: AbiClass = AbiClass::Float { size: 8 };
+    const F32: AbiClass = AbiClass::Float { size: 4 };
 
     #[test]
     fn linux_starts_gpr_pairs_at_even_registers() {
@@ -421,6 +469,28 @@ mod tests {
         let abi = assign_abi(TargetOs::Darwin, "f", &[I64, I128], AbiClass::Void).unwrap();
         assert!(matches!(abi.args[1], AbiLocation::GprPair(a, b)
             if a == super::Register::gpr(1) && b == super::Register::gpr(2)));
+    }
+
+    #[test]
+    fn floats_use_an_independent_vreg_lane() {
+        // Ints and floats draw from separate register files: x0, d0, x1, s1.
+        let abi = assign_abi(TargetOs::Linux, "f", &[I64, F64, I64, F32], AbiClass::Void).unwrap();
+        assert!(matches!(abi.args[0], AbiLocation::Gpr(r) if r == super::Register::gpr(0)));
+        assert!(matches!(abi.args[1], AbiLocation::Gpr(r) if r == super::Register::fpr64(0)));
+        assert!(matches!(abi.args[2], AbiLocation::Gpr(r) if r == super::Register::gpr(1)));
+        assert!(matches!(abi.args[3], AbiLocation::Gpr(r) if r == super::Register::fpr32(1)));
+    }
+
+    #[test]
+    fn ninth_float_goes_to_the_stack_in_8_byte_slots() {
+        let args = [F64, F64, F64, F64, F64, F64, F64, F64, F32, F64];
+        let abi = assign_abi(TargetOs::Linux, "f", &args, F64).unwrap();
+        assert!(matches!(abi.args[7], AbiLocation::Gpr(r) if r == super::Register::fpr64(7)));
+        // The ninth (an f32) takes a full 8-byte stack slot; the tenth
+        // follows at 8 (no v-register back-fill, AAPCS64 rule C.3).
+        assert!(matches!(abi.args[8], AbiLocation::Stack(0)));
+        assert!(matches!(abi.args[9], AbiLocation::Stack(8)));
+        assert!(matches!(abi.result, AbiLocation::Gpr(r) if r == super::Register::fpr64(0)));
     }
 
     #[test]

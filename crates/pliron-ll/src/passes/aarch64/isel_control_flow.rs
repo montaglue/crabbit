@@ -10,11 +10,14 @@ use crate::{
     result::STAIRResult,
 };
 
+use crate::dialects::aarch64::registers::RegisterClass;
+
 use super::{
     error::Aarch64Err,
     llvm_to_aarch64_isel::{
-        LoweredValue, block_arg_registers, fresh_vreg, is_128_bit_integer, is_aggregate_ty,
-        is_zero_sized_ty, lookup_value, materialize_pair, materialize_typed, struct_fields,
+        FpKind, LoweredValue, block_arg_registers, emit_move, fresh_fpr, fresh_vreg,
+        is_128_bit_integer, is_aggregate_ty, is_zero_sized_ty, lookup_value, materialize_pair,
+        materialize_typed, struct_fields,
     },
 };
 
@@ -108,15 +111,30 @@ pub(super) fn emit_block_arg_copies(
         if let Some(free) = free {
             let (dst, src) = pending.remove(free);
             match src {
-                Some(src) => aarch64_ops::mov(ctx, dst, src).insert_at_back(insert_block, ctx),
-                None => aarch64_ops::mov_imm(ctx, dst, 0).insert_at_back(insert_block, ctx),
+                Some(src) => emit_move(ctx, insert_block, dst, src)?,
+                None => match dst.class() {
+                    // An undef FP leaf: zero the bit pattern through the
+                    // integer file.
+                    RegisterClass::Fpr64 | RegisterClass::Fpr32 => {
+                        let zero = fresh_vreg(next_vreg);
+                        aarch64_ops::mov_imm(ctx, zero, 0).insert_at_back(insert_block, ctx);
+                        emit_move(ctx, insert_block, dst, zero)?;
+                    }
+                    _ => {
+                        aarch64_ops::mov_imm(ctx, dst, 0).insert_at_back(insert_block, ctx);
+                    }
+                },
             };
         } else {
             // Every remaining destination is still read by another copy:
             // save one destination's current value and redirect its readers.
             let dst = pending[0].0;
-            let scratch = fresh_vreg(next_vreg);
-            aarch64_ops::mov(ctx, scratch, dst).insert_at_back(insert_block, ctx);
+            let scratch = match dst.class() {
+                RegisterClass::Fpr64 => fresh_fpr(next_vreg, FpKind::F64),
+                RegisterClass::Fpr32 => fresh_fpr(next_vreg, FpKind::F32),
+                _ => fresh_vreg(next_vreg),
+            };
+            emit_move(ctx, insert_block, scratch, dst)?;
             for (_, src) in pending.iter_mut() {
                 if *src == Some(dst) {
                     *src = Some(scratch);

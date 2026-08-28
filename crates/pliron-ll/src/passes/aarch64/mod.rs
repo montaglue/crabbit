@@ -208,7 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fp_abi_before_instruction_selection() {
+    fn lowers_scalar_fp_signature_through_the_pipeline() {
+        // fp_identity(x: f32) -> f32 { x }: the argument arrives in s0 and
+        // returns in s0.
         let mut ctx = context();
         let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
@@ -218,15 +220,16 @@ mod tests {
         func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
         func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
+        let arg = entry.deref(&ctx).get_argument(0);
+        ReturnOp::new(&mut ctx, Some(arg))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
 
-        let err = match lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin) {
-            Ok(_) => panic!("floating-point ABI signature unexpectedly lowered"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("floating-point ABI lowering is not implemented")
-        );
+        lower_module(&mut ctx, module.get_operation(), TargetOs::Darwin).unwrap();
+        let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
+        assert_eq!(object.symbols(&ctx)[0].name, "_fp_identity");
+        assert!(!object.text(&ctx).is_empty());
     }
 
     #[test]

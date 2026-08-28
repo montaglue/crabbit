@@ -26,7 +26,9 @@ struct Args {
 }
 
 struct CrabbitHooks {
-    passes: Vec<Box<dyn Pass>>,
+    // `Pass::run` takes `&mut self` (pliron 0.17) while `DriverHooks` hands
+    // out `&self`; RefCell bridges the two.
+    passes: Vec<std::cell::RefCell<Box<dyn Pass>>>,
 }
 
 impl CrabbitHooks {
@@ -41,13 +43,18 @@ impl CrabbitHooks {
             Box::new(LLVMSimplifyCfgPass),
             Box::new(LLVMSroaPass),
         ];
-        CrabbitHooks { passes }
+        CrabbitHooks {
+            passes: passes.into_iter().map(std::cell::RefCell::new).collect(),
+        }
     }
 }
 
 impl DriverHooks for CrabbitHooks {
     fn pass_names(&self) -> Vec<String> {
-        self.passes.iter().map(|p| p.name().to_string()).collect()
+        self.passes
+            .iter()
+            .map(|p| p.borrow().name().to_string())
+            .collect()
     }
 
     fn run_pass(
@@ -56,11 +63,16 @@ impl DriverHooks for CrabbitHooks {
         root: Ptr<Operation>,
         ctx: &mut Context,
     ) -> Result<Ptr<Operation>, String> {
-        let Some(pass) = self.passes.iter().find(|p| p.name() == name) else {
+        let Some(pass) = self
+            .passes
+            .iter()
+            .find(|p| p.borrow().name() == name)
+        else {
             return Err(format!("unknown pass: {name}"));
         };
         let mut analyses = AnalysisManager::default();
-        pass.run(root, ctx, &mut analyses)
+        pass.borrow_mut()
+            .run(root, ctx, &mut analyses)
             .map(|_| root)
             .map_err(|e| format!("{e}"))
     }

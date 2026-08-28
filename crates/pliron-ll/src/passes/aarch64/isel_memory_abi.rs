@@ -112,6 +112,8 @@ pub(super) enum ResultLocation {
     Void,
     ScalarX0,
     ScalarX0X1,
+    /// A scalar FP result in v0 (`d0` or `s0`).
+    Fpr(FpKind),
     DirectGprs(usize),
     IndirectX8,
 }
@@ -125,6 +127,9 @@ pub(super) fn result_location_for_type(
     }
     if is_128_bit_integer(ctx, ty) {
         return Ok(ResultLocation::ScalarX0X1);
+    }
+    if let Some(kind) = fp_kind(ctx, ty) {
+        return Ok(ResultLocation::Fpr(kind));
     }
     if is_aggregate_ty(ctx, ty) {
         let size = stack_size_of(ctx, ty)?;
@@ -163,6 +168,19 @@ pub(super) fn emit_return_value(
 ) -> STAIRResult<()> {
     match result {
         AbiLocation::Void => Ok(()),
+        // A scalar FP result: materialize in the FP file and move into v0.
+        AbiLocation::Gpr(reg) if reg.is_fpr() => {
+            let lowered = lookup_value(ctx, values, value)?;
+            let src = materialize_typed(
+                ctx,
+                entry,
+                lowered,
+                value.get_type(ctx),
+                next_vreg,
+                "return value",
+            )?;
+            emit_move(ctx, entry, reg, src)
+        }
         AbiLocation::Gpr(reg) => {
             let lowered = lookup_value(ctx, values, value)?;
             let src = if is_aggregate_ty(ctx, value.get_type(ctx)) {
@@ -738,6 +756,16 @@ pub(super) fn load_stack_value(
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(LoweredValue::Undef);
     }
+    if let Some(kind) = fp_kind(ctx, ty) {
+        let opcode = match kind {
+            FpKind::F64 => aarch64_ops::LdrdSpOffsetOp::OPCODE,
+            FpKind::F32 => aarch64_ops::LdrsSpOffsetOp::OPCODE,
+        };
+        let dst = fresh_fpr(next_vreg, kind);
+        aarch64_ops::ldr_sp_offset_sized(ctx, opcode, dst.clone(), offset)
+            .insert_at_back(entry, ctx);
+        return Ok(LoweredValue::Reg(dst));
+    }
     if is_stack_scalar_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             let lo = fresh_vreg(next_vreg);
@@ -805,6 +833,17 @@ fn store_stack_value(
         return Ok(());
     }
     if matches!(value, LoweredValue::Undef) {
+        return Ok(());
+    }
+    if let Some(kind) = fp_kind(ctx, ty)
+        && !matches!(value, LoweredValue::Aggregate(_))
+    {
+        let opcode = match kind {
+            FpKind::F64 => aarch64_ops::StrdSpOffsetOp::OPCODE,
+            FpKind::F32 => aarch64_ops::StrsSpOffsetOp::OPCODE,
+        };
+        let src = materialize_fp(ctx, entry, value, kind, next_vreg, "store value")?;
+        aarch64_ops::str_sp_offset_sized(ctx, opcode, src, offset).insert_at_back(entry, ctx);
         return Ok(());
     }
     if is_stack_scalar_ty(ctx, ty) {
@@ -881,6 +920,16 @@ fn load_register_address_value(
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(LoweredValue::Undef);
     }
+    if let Some(kind) = fp_kind(ctx, ty) {
+        let opcode = match kind {
+            FpKind::F64 => aarch64_ops::LdrdRegOffsetOp::OPCODE,
+            FpKind::F32 => aarch64_ops::LdrsRegOffsetOp::OPCODE,
+        };
+        let dst = fresh_fpr(next_vreg, kind);
+        aarch64_ops::ldr_reg_offset_sized(ctx, opcode, dst.clone(), base, offset)
+            .insert_at_back(entry, ctx);
+        return Ok(LoweredValue::Reg(dst));
+    }
     if is_stack_scalar_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             let lo = fresh_vreg(next_vreg);
@@ -944,6 +993,18 @@ fn store_register_address_value(
         return Ok(());
     }
     if matches!(value, LoweredValue::Undef) {
+        return Ok(());
+    }
+    if let Some(kind) = fp_kind(ctx, ty)
+        && !matches!(value, LoweredValue::Aggregate(_))
+    {
+        let opcode = match kind {
+            FpKind::F64 => aarch64_ops::StrdRegOffsetOp::OPCODE,
+            FpKind::F32 => aarch64_ops::StrsRegOffsetOp::OPCODE,
+        };
+        let src = materialize_fp(ctx, entry, value, kind, next_vreg, "store value")?;
+        aarch64_ops::str_reg_offset_sized(ctx, opcode, src, base, offset)
+            .insert_at_back(entry, ctx);
         return Ok(());
     }
     if is_stack_scalar_ty(ctx, ty) {
@@ -1223,6 +1284,18 @@ pub(super) fn scalar_size_of(
     }
     if ty_ref
         .downcast_ref::<crate::dialects::llvm::types::PointerType>()
+        .is_some()
+    {
+        return Ok(8);
+    }
+    if ty_ref
+        .downcast_ref::<crate::dialects::builtin::types::FP32Type>()
+        .is_some()
+    {
+        return Ok(4);
+    }
+    if ty_ref
+        .downcast_ref::<crate::dialects::builtin::types::FP64Type>()
         .is_some()
     {
         return Ok(8);

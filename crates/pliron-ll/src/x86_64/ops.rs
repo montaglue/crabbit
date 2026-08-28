@@ -193,15 +193,15 @@ impl_verify_succ!(FuncOp);
 
 pub fn mov_imm(ctx: &mut Context, rd: Register, imm: u64) -> Ptr<Operation> {
     let op = MovImmOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
     set_imm(ctx, op, imm);
     op
 }
 
 pub fn mov(ctx: &mut Context, rd: Register, rm: Register) -> Ptr<Operation> {
     let op = MovOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_str(), rm);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_ref(), rm);
     op
 }
 
@@ -213,21 +213,21 @@ pub fn binary(
     rm: Register,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), rn);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_str(), rm);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), rn);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_ref(), rm);
     op
 }
 
 pub fn push(ctx: &mut Context, rt: Register) -> Ptr<Operation> {
     let op = PushOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
     op
 }
 
 pub fn pop(ctx: &mut Context, rt: Register) -> Ptr<Operation> {
     let op = PopOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
     op
 }
 
@@ -245,7 +245,7 @@ pub fn add_sp_imm(ctx: &mut Context, bytes: u64) -> Ptr<Operation> {
 
 pub fn add_sp_offset(ctx: &mut Context, rd: Register, offset: u64) -> Ptr<Operation> {
     let op = AddSpOffsetOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
     set_imm(ctx, op, offset);
     op
 }
@@ -261,7 +261,7 @@ pub fn str_sp_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
     set_imm(ctx, op, offset);
     op
 }
@@ -277,14 +277,14 @@ pub fn ldr_sp_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
     set_imm(ctx, op, offset);
     op
 }
 
 pub fn ldr_stack_arg(ctx: &mut Context, rt: Register, offset: u64) -> Ptr<Operation> {
     let op = LdrStackArgOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
     set_imm(ctx, op, offset);
     op
 }
@@ -306,8 +306,8 @@ pub fn str_reg_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), rn);
     set_imm(ctx, op, offset);
     op
 }
@@ -329,8 +329,8 @@ pub fn ldr_reg_offset_sized(
     offset: u64,
 ) -> Ptr<Operation> {
     let op = create_instruction(ctx, opcode);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rt);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rt);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), rn);
     set_imm(ctx, op, offset);
     op
 }
@@ -342,7 +342,7 @@ pub fn adr_literal(
     bytes: Vec<u8>,
 ) -> Ptr<Operation> {
     let op = AdrLiteralOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
     set_literal_label(ctx, op, label);
     set_literal_bytes(ctx, op, bytes);
     op
@@ -356,7 +356,7 @@ pub fn adr_function(
     symbol: Identifier,
 ) -> Ptr<Operation> {
     let op = AdrFunctionOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
     set_callee(ctx, op, symbol.to_string());
     op
 }
@@ -378,7 +378,7 @@ pub fn call(ctx: &mut Context, callee: Identifier) -> Ptr<Operation> {
 /// Indirect call through the function pointer in `rn`.
 pub fn call_reg(ctx: &mut Context, rn: Register) -> Ptr<Operation> {
     let op = CallRegOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), rn);
     op
 }
 
@@ -391,15 +391,15 @@ pub fn jmp(ctx: &mut Context, target: Ptr<BasicBlock>) -> Ptr<Operation> {
 /// `test rn, rn; jnz target` — branch when `rn` is non-zero.
 pub fn test_jnz(ctx: &mut Context, rn: Register, target: Ptr<BasicBlock>) -> Ptr<Operation> {
     let op = TestJnzOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), rn);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), rn);
     set_target(ctx, op, target);
     op
 }
 
 pub fn cmp(ctx: &mut Context, rn: Register, rm: Register) -> Ptr<Operation> {
     let op = CmpOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), rn);
-    set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_str(), rm);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), rn);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_ref(), rm);
     op
 }
 
@@ -414,7 +414,7 @@ pub fn jcc(ctx: &mut Context, cond: ConditionCode, target: Ptr<BasicBlock>) -> P
 /// `setcc rd8; movzx rd, rd8` — materialize a condition flag as 0/1.
 pub fn cset(ctx: &mut Context, rd: Register, cond: ConditionCode) -> Ptr<Operation> {
     let op = CsetOp::new(ctx).op;
-    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), rd);
+    set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
     set_cond(ctx, op, cond);
     op
 }
@@ -710,10 +710,10 @@ fn apply_instruction_field(
             input_error!(loc.clone(), "invalid x86-64 register `{text}` for `{key}`")
         })
     };
-    match (key.as_str(), value) {
-        ("rd", Text(text)) => set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_str(), register_value(&text)?),
-        ("rn", Text(text)) => set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_str(), register_value(&text)?),
-        ("rm", Text(text)) => set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_str(), register_value(&text)?),
+    match (key.as_ref() as &str, value) {
+        ("rd", Text(text)) => set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), register_value(&text)?),
+        ("rn", Text(text)) => set_reg(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), register_value(&text)?),
+        ("rm", Text(text)) => set_reg(ctx, op, ATTR_KEY_X86_64_RM.as_ref(), register_value(&text)?),
         ("imm", Text(text)) => set_imm(ctx, op, int_value(&text)?),
         ("cond", Text(text)) => {
             let cond = ConditionCode::parse(&text).ok_or_else(|| {
@@ -812,7 +812,7 @@ macro_rules! define_x86_64_instruction {
                 collect_register_operands(
                     ctx,
                     self.op,
-                    &[$(($reg_key.as_str(), RegisterOperandKind::$reg_kind)),*],
+                    &[$(($reg_key.as_ref(), RegisterOperandKind::$reg_kind)),*],
                 )
             }
             fn rewrite_register_operand(&self, ctx: &mut Context, key: &str, reg: Register) {
@@ -1061,9 +1061,9 @@ mod tests {
             // Branch targets are CFG successors, not attributes; they only
             // resolve inside a region and round-trip in
             // `branch_targets_round_trip_inside_a_func`.
-            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RD.as_str(), RAX);
-            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RN.as_str(), RSP_REG);
-            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RM.as_str(), Register::virtual_gpr(7));
+            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RD.as_ref(), RAX);
+            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RN.as_ref(), RSP_REG);
+            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RM.as_ref(), Register::virtual_gpr(7));
             set_imm(&mut ctx, op, 42);
             set_cond(&mut ctx, op, ConditionCode::Np);
             set_callee(&mut ctx, op, "_callee");
