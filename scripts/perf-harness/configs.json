@@ -1,0 +1,25 @@
+[
+  { "name": "baseline", "env": {} },
+  { "name": "weighted", "env": { "CRABBIT_SPILL_POLICY": "weighted" } },
+  { "name": "weighted+remat", "env": {
+      "CRABBIT_SPILL_POLICY": "weighted",
+      "CRABBIT_RESTORE_ESTIMATE": "remat" } },
+  { "name": "weighted+remat+spectral", "env": {
+      "CRABBIT_SPILL_POLICY": "weighted",
+      "CRABBIT_RESTORE_ESTIMATE": "remat",
+      "CRABBIT_BLOCK_FREQ": "spectral" } },
+  { "name": "eregalloc-c0", "env": {
+      "CRABBIT_REGALLOC": "eregalloc",
+      "CRABBIT_REGALLOC_ORACLE": "c0" } },
+  { "name": "eregalloc-c0+spectral", "env": {
+      "CRABBIT_REGALLOC": "eregalloc",
+      "CRABBIT_REGALLOC_ORACLE": "c0",
+      "CRABBIT_BLOCK_FREQ": "spectral" } },
+  { "name": "eregalloc-c2", "env": {
+      "CRABBIT_REGALLOC": "eregalloc",
+      "CRABBIT_REGALLOC_ORACLE": "c2" } },
+  { "name": "eregalloc-c2+spectral", "env": {
+      "CRABBIT_REGALLOC": "eregalloc",
+      "CRABBIT_REGALLOC_ORACLE": "c2",
+      "CRABBIT_BLOCK_FREQ": "spectral" } }
+]

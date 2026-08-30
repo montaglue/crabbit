@@ -169,6 +169,33 @@ fn encode_fixed_inst(ctx: &Context, op: Ptr<Operation>, opcode: Aarch64Opcode) -
         ops::FdivSOp::OPCODE => encode_three_freg(ctx, op, 0x1e20_1800),
         ops::FnegDOp::OPCODE => encode_two_reg(ctx, op, 0x1e61_4000, freg, freg),
         ops::FnegSOp::OPCODE => encode_two_reg(ctx, op, 0x1e21_4000, freg, freg),
+        // FP 1-source data-processing: fabs, fsqrt and the frint* rounding
+        // family (frintm floor, frintp ceil, frintz trunc, frinta round
+        // half away from zero, frintn round half to even).
+        ops::FabsDOp::OPCODE => encode_two_reg(ctx, op, 0x1e60_c000, freg, freg),
+        ops::FabsSOp::OPCODE => encode_two_reg(ctx, op, 0x1e20_c000, freg, freg),
+        ops::FsqrtDOp::OPCODE => encode_two_reg(ctx, op, 0x1e61_c000, freg, freg),
+        ops::FsqrtSOp::OPCODE => encode_two_reg(ctx, op, 0x1e21_c000, freg, freg),
+        ops::FrintmDOp::OPCODE => encode_two_reg(ctx, op, 0x1e65_4000, freg, freg),
+        ops::FrintmSOp::OPCODE => encode_two_reg(ctx, op, 0x1e25_4000, freg, freg),
+        ops::FrintpDOp::OPCODE => encode_two_reg(ctx, op, 0x1e64_c000, freg, freg),
+        ops::FrintpSOp::OPCODE => encode_two_reg(ctx, op, 0x1e24_c000, freg, freg),
+        ops::FrintzDOp::OPCODE => encode_two_reg(ctx, op, 0x1e65_c000, freg, freg),
+        ops::FrintzSOp::OPCODE => encode_two_reg(ctx, op, 0x1e25_c000, freg, freg),
+        ops::FrintaDOp::OPCODE => encode_two_reg(ctx, op, 0x1e66_4000, freg, freg),
+        ops::FrintaSOp::OPCODE => encode_two_reg(ctx, op, 0x1e26_4000, freg, freg),
+        ops::FrintnDOp::OPCODE => encode_two_reg(ctx, op, 0x1e64_4000, freg, freg),
+        ops::FrintnSOp::OPCODE => encode_two_reg(ctx, op, 0x1e24_4000, freg, freg),
+        // FP 2-source min/max: the *nm forms return the number when one
+        // operand is NaN (IEEE minNum/maxNum), the plain forms propagate it.
+        ops::FminnmDOp::OPCODE => encode_three_freg(ctx, op, 0x1e60_7800),
+        ops::FminnmSOp::OPCODE => encode_three_freg(ctx, op, 0x1e20_7800),
+        ops::FmaxnmDOp::OPCODE => encode_three_freg(ctx, op, 0x1e60_6800),
+        ops::FmaxnmSOp::OPCODE => encode_three_freg(ctx, op, 0x1e20_6800),
+        ops::FminDOp::OPCODE => encode_three_freg(ctx, op, 0x1e60_5800),
+        ops::FminSOp::OPCODE => encode_three_freg(ctx, op, 0x1e20_5800),
+        ops::FmaxDOp::OPCODE => encode_three_freg(ctx, op, 0x1e60_4800),
+        ops::FmaxSOp::OPCODE => encode_three_freg(ctx, op, 0x1e20_4800),
         // FCMP sets nzcv; rd is hard-wired to zero in the encoding.
         ops::FcmpDOp::OPCODE => encode_fcmp(ctx, op, 0x1e60_2000),
         ops::FcmpSOp::OPCODE => encode_fcmp(ctx, op, 0x1e20_2000),
@@ -566,6 +593,18 @@ mod tests {
             // fdiv d17, d18, d19 ; fdiv s17, s18, s19
             (Aarch64Opcode::FdivD, d(17), d(18), d(19), 0x1e73_1a51),
             (Aarch64Opcode::FdivS, s(17), s(18), s(19), 0x1e33_1a51),
+            // fminnm d3, d4, d5 ; fminnm s3, s4, s5
+            (Aarch64Opcode::FminnmD, d(3), d(4), d(5), 0x1e65_7883),
+            (Aarch64Opcode::FminnmS, s(3), s(4), s(5), 0x1e25_7883),
+            // fmaxnm d3, d4, d5 ; fmaxnm s3, s4, s5
+            (Aarch64Opcode::FmaxnmD, d(3), d(4), d(5), 0x1e65_6883),
+            (Aarch64Opcode::FmaxnmS, s(3), s(4), s(5), 0x1e25_6883),
+            // fmin d3, d4, d5 ; fmin s3, s4, s5
+            (Aarch64Opcode::FminD, d(3), d(4), d(5), 0x1e65_5883),
+            (Aarch64Opcode::FminS, s(3), s(4), s(5), 0x1e25_5883),
+            // fmax d3, d4, d5 ; fmax s3, s4, s5
+            (Aarch64Opcode::FmaxD, d(3), d(4), d(5), 0x1e65_4883),
+            (Aarch64Opcode::FmaxS, s(3), s(4), s(5), 0x1e25_4883),
             // asr x9, x10, x12
             (Aarch64Opcode::Asr, x(9), x(10), x(12), 0x9acc_2949),
         ];
@@ -578,6 +617,27 @@ mod tests {
             // fneg d20, d21 ; fneg s20, s21
             (Aarch64Opcode::FnegD, d(20), d(21), 0x1e61_42b4),
             (Aarch64Opcode::FnegS, s(20), s(21), 0x1e21_42b4),
+            // fabs d20, d21 ; fabs s20, s21
+            (Aarch64Opcode::FabsD, d(20), d(21), 0x1e60_c2b4),
+            (Aarch64Opcode::FabsS, s(20), s(21), 0x1e20_c2b4),
+            // fsqrt d20, d21 ; fsqrt s20, s21
+            (Aarch64Opcode::FsqrtD, d(20), d(21), 0x1e61_c2b4),
+            (Aarch64Opcode::FsqrtS, s(20), s(21), 0x1e21_c2b4),
+            // frintm d20, d21 ; frintm s20, s21
+            (Aarch64Opcode::FrintmD, d(20), d(21), 0x1e65_42b4),
+            (Aarch64Opcode::FrintmS, s(20), s(21), 0x1e25_42b4),
+            // frintp d20, d21 ; frintp s20, s21
+            (Aarch64Opcode::FrintpD, d(20), d(21), 0x1e64_c2b4),
+            (Aarch64Opcode::FrintpS, s(20), s(21), 0x1e24_c2b4),
+            // frintz d20, d21 ; frintz s20, s21
+            (Aarch64Opcode::FrintzD, d(20), d(21), 0x1e65_c2b4),
+            (Aarch64Opcode::FrintzS, s(20), s(21), 0x1e25_c2b4),
+            // frinta d20, d21 ; frinta s20, s21
+            (Aarch64Opcode::FrintaD, d(20), d(21), 0x1e66_42b4),
+            (Aarch64Opcode::FrintaS, s(20), s(21), 0x1e26_42b4),
+            // frintn d20, d21 ; frintn s20, s21
+            (Aarch64Opcode::FrintnD, d(20), d(21), 0x1e64_42b4),
+            (Aarch64Opcode::FrintnS, s(20), s(21), 0x1e24_42b4),
             // fcvt d0, s1 ; fcvt s0, d1
             (Aarch64Opcode::FcvtDS, d(0), s(1), 0x1e22_c020),
             (Aarch64Opcode::FcvtSD, s(0), d(1), 0x1e62_4020),

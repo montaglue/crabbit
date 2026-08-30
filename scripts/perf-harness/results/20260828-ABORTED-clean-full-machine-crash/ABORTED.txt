@@ -1,0 +1,1 @@
+ABORTED: harness died 18:04 2026-08-28 on a 300s run timeout caused by machine overload from an unrelated workload (the Spark later crashed); fixture timings also overlapped concurrent agent builds. Superseded by 20260831-clean-full. Not data.

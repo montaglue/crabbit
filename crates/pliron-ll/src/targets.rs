@@ -7,7 +7,7 @@
 use pliron::{context::Context, context::Ptr, operation::Operation};
 
 use crate::{
-    conversion::pass::Passes,
+    conversion::pass::{DynPass, Pass, Passes},
     passes::{aarch64, x86_64_darwin},
     result::STAIRResult,
     triple::{Arch, Triple},
@@ -20,6 +20,9 @@ pub struct TargetBackend {
     pub name: &'static str,
     matches: fn(&Triple) -> bool,
     pipeline: fn() -> Passes,
+    /// The same pipeline with the register allocator replaced; `None` for
+    /// backends whose allocator slot is not parameterized (yet).
+    pipeline_with_allocator: Option<fn(DynPass) -> Passes>,
     write_object: fn(&mut Context, Ptr<Operation>) -> STAIRResult<Vec<u8>>,
 }
 
@@ -28,6 +31,15 @@ impl TargetBackend {
     /// verification down to encoded machine code.
     pub fn pipeline(&self) -> Passes {
         (self.pipeline)()
+    }
+
+    /// [Self::pipeline] with `allocator` in the register-allocation slot,
+    /// or `None` if this backend has no swappable allocator. The allocator
+    /// must meet the backend's own allocator post-conditions (see
+    /// `passes::aarch64::pipeline_with_allocator`).
+    pub fn pipeline_with_allocator(&self, allocator: impl Pass + 'static) -> Option<Passes> {
+        self.pipeline_with_allocator
+            .map(|build| build(DynPass::new(allocator)))
     }
 
     /// Writes a module lowered by [Self::pipeline] into object-container
@@ -46,6 +58,9 @@ static BACKENDS: &[TargetBackend] = &[
         name: "aarch64-darwin",
         matches: |triple| triple.arch == Arch::Aarch64 && triple.is_os_darwin(),
         pipeline: || aarch64::pipeline(aarch64::TargetOs::Darwin),
+        pipeline_with_allocator: Some(|allocator| {
+            aarch64::pipeline_with_allocator(aarch64::TargetOs::Darwin, allocator)
+        }),
         write_object: aarch64::write_macho_object_from_ir,
     },
     TargetBackend {
@@ -54,12 +69,16 @@ static BACKENDS: &[TargetBackend] = &[
             triple.arch == Arch::Aarch64 && triple.os == crate::triple::Os::Linux
         },
         pipeline: || aarch64::pipeline(aarch64::TargetOs::Linux),
+        pipeline_with_allocator: Some(|allocator| {
+            aarch64::pipeline_with_allocator(aarch64::TargetOs::Linux, allocator)
+        }),
         write_object: aarch64::write_elf_object_from_ir,
     },
     TargetBackend {
         name: "x86_64-darwin",
         matches: |triple| triple.arch == Arch::X86_64 && triple.is_os_darwin(),
         pipeline: x86_64_darwin::pipeline,
+        pipeline_with_allocator: None,
         write_object: x86_64_darwin::write_macho_object_from_ir,
     },
 ];

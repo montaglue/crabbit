@@ -27,6 +27,34 @@ pub use pliron::pass::*;
 /// this facade, back when the pinned pliron rev only exposed a function.
 pub use pliron::opts::mem2reg::Mem2RegPass;
 
+/// A type-erased [Pass], so a pipeline constructor can accept a pass chosen
+/// at runtime (e.g. an alternative register allocator selected by
+/// environment flag) through a plain `fn` pointer. `Box<dyn Pass>` cannot
+/// implement the foreign `Pass` trait directly (orphan rule), hence the
+/// newtype.
+pub struct DynPass(pub Box<dyn Pass>);
+
+impl DynPass {
+    pub fn new(pass: impl Pass + 'static) -> Self {
+        DynPass(Box::new(pass))
+    }
+}
+
+impl Pass for DynPass {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn run(
+        &mut self,
+        op: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
+        self.0.run(op, ctx, analyses)
+    }
+}
+
 /// A [PassResult] reporting that the IR changed — the common case for every
 /// pass here, none of which currently participate in analysis caching.
 pub fn changed() -> PassResult {

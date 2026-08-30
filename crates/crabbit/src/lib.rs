@@ -17,6 +17,8 @@ extern crate rustc_driver;
 // build pending deletion.
 #[path = "importer_oxide.rs"]
 pub mod importer;
+pub mod regalloc_engine;
+pub mod kernel_llvm_export;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo};
@@ -129,8 +131,29 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String>
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
 /// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
-fn pipeline(target: &TargetBackend) -> Passes {
+fn pipeline(target: &TargetBackend) -> Result<Passes, String> {
     let mut passes = Passes::default();
+    add_midend_passes(&mut passes);
+    // The machine pipeline, with the register allocator swapped for the
+    // engine chosen by CRABBIT_REGALLOC (see [regalloc_engine]).
+    let engine = regalloc_engine::RegallocEngine::from_env()?;
+    let machine = match engine.allocator() {
+        None => target.pipeline(),
+        Some(allocator) => target.pipeline_with_allocator(allocator).ok_or_else(|| {
+            format!(
+                "CRABBIT_REGALLOC=eregalloc is not supported by the `{}` backend (no swappable allocator)",
+                target.name
+            )
+        })?,
+    };
+    passes.add_pass(machine);
+    Ok(passes)
+}
+
+/// The target-independent mid-end: `mir` → LLVM dialect, then inlining,
+/// simplification, SROA and mem2reg (twice, see below). Shared by the host
+/// pipeline and the kernel pipeline.
+fn add_midend_passes(passes: &mut Passes) {
     passes.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
     // Inline the module-internal call graph, then fold/clean and merge the
     // inlined blocks. simplify runs again after the CFG cleanup because
@@ -159,8 +182,86 @@ fn pipeline(target: &TargetBackend) -> Passes {
     passes.add_pass(LLVMSimplifyPass);
     passes.add_pass(LLVMSimplifyCfgPass);
     passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(target.pipeline());
+}
+
+/// The kernel (`rust_kernels` module) pipeline: the mid-end only. PTX has
+/// virtual registers and ptxas does the machine work, so translation to
+/// PTX text ([pliron_ll::nvptx::write_ptx_from_ir]) happens outside the
+/// pass pipeline, like the object writers.
+fn kernel_pipeline() -> Passes {
+    let mut passes = Passes::default();
+    add_midend_passes(&mut passes);
     passes
+}
+
+/// Lower the imported `rust_kernels` module and write its PTX next to
+/// `object` (`<stem>.ptx`) and to `CRABBIT_PTX_OUT` when set. See
+/// docs/KERNEL-ABI.md.
+fn emit_kernels(
+    imported: &mut importer::ImportedCrate,
+    object: &std::path::Path,
+    tracing: bool,
+) -> Result<std::path::PathBuf, String> {
+    let mut analyses = AnalysisManager::default();
+    let mut pipeline = kernel_pipeline();
+    let mut dump_dir = None;
+    if tracing {
+        let dir = std::env::temp_dir().join(format!("stair-kernel-pass-dumps-{}", trace_version()));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("failed to create kernel pass dump directory: {error}"))?;
+        let mut config = PMConfig::default();
+        config.print_after_all = true;
+        config.ir_printing_dir = Some(dir.clone());
+        pipeline.set_config(config);
+        dump_dir = Some(dir);
+    }
+    let run_result = pipeline.run(imported.kernel_module, &mut imported.ctx, &mut analyses);
+    if let Some(dir) = dump_dir {
+        // Keep the kernel dumps where CRABBIT_TRACE users can find them;
+        // they are small (kernel modules are) and named after the pass.
+        let keep = object.with_extension("kernel-trace");
+        let _ = std::fs::remove_dir_all(&keep);
+        let _ = std::fs::rename(&dir, &keep).or_else(|_| {
+            std::fs::create_dir_all(&keep).and_then(|_| {
+                for (name, dump) in collect_pass_dumps(&dir) {
+                    std::fs::write(keep.join(format!("{name}.plir")), dump)?;
+                }
+                std::fs::remove_dir_all(&dir)
+            })
+        });
+    }
+    run_result.map_err(|error| format!("kernel pipeline failed: {error}"))?;
+
+    let mut target = pliron_ll::nvptx::PtxTarget::default();
+    if let Ok(sm) = std::env::var("CRABBIT_PTX_SM")
+        && !sm.is_empty()
+    {
+        target.sm = sm
+            .parse()
+            .map_err(|_| format!("CRABBIT_PTX_SM must be an integer SM number, got `{sm}`"))?;
+    }
+    let ptx = pliron_ll::nvptx::write_ptx_from_ir(&imported.ctx, imported.kernel_module, &target)
+        .map_err(|error| format!("NVPTX emission failed: {error}"))?;
+
+    let sidecar = object.with_extension("ptx");
+    std::fs::write(&sidecar, &ptx).map_err(|error| {
+        format!("failed to write PTX sidecar `{}`: {error}", sidecar.display())
+    })?;
+    if let Ok(out) = std::env::var("CRABBIT_PTX_OUT")
+        && !out.is_empty()
+    {
+        std::fs::write(&out, &ptx)
+            .map_err(|error| format!("failed to write CRABBIT_PTX_OUT `{out}`: {error}"))?;
+    }
+    if let Ok(out) = std::env::var("CRABBIT_LL_OUT")
+        && !out.is_empty()
+    {
+        let ll = kernel_llvm_export::export_kernel_module(&mut imported.ctx, imported.kernel_module)
+            .map_err(|error| format!("LLVM IR export of the kernel module failed: {error}"))?;
+        std::fs::write(&out, ll)
+            .map_err(|error| format!("failed to write CRABBIT_LL_OUT `{out}`: {error}"))?;
+    }
+    Ok(sidecar)
 }
 
 /// The `(pass name, IR dump)` pairs pliron's `print_after_all` hook wrote
@@ -192,54 +293,65 @@ fn emit_object(
     imported: &mut importer::ImportedCrate,
 ) -> Result<std::path::PathBuf, String> {
     let target = backend_for_session(sess)?;
-    if imported.kernel_count > 0 {
-        return Err("STAIR object emission does not support kernels yet".to_string());
+
+    // Per-pass IR dumps and the trace file cost O(passes × module text) in
+    // formatting and I/O — gigabytes on a large crate — so tracing is
+    // opt-in via CRABBIT_TRACE.
+    let tracing = std::env::var("CRABBIT_TRACE").is_ok_and(|value| !value.is_empty() && value != "0");
+
+    let mut analyses = AnalysisManager::default();
+    let mut pipeline = pipeline(target)?;
+    let mut dump_dir = None;
+    let mut initial_dump = None;
+    let version = trace_version();
+    if tracing {
+        // Per-pass IR dumps come from pliron's own PMConfig printing hooks;
+        // the trace file is assembled from the dumped files after the run,
+        // so a failed pipeline still leaves a trace up to the failing pass.
+        let dir = std::env::temp_dir().join(format!("stair-pass-dumps-{version}"));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("failed to create pass dump directory: {error}"))?;
+        let mut config = PMConfig::default();
+        config.print_after_all = true;
+        config.ir_printing_dir = Some(dir.clone());
+        pipeline.set_config(config);
+        dump_dir = Some(dir);
+        initial_dump = Some(imported.module.disp(&imported.ctx).to_string());
     }
 
-    let project = trace_project(sess);
-    let version = trace_version();
-
-    // Per-pass IR dumps come from pliron's own PMConfig printing hooks; the
-    // trace file is assembled from the dumped files after the run, so a
-    // failed pipeline still leaves a trace up to the failing pass.
-    let dump_dir = std::env::temp_dir().join(format!("stair-pass-dumps-{version}"));
-    std::fs::create_dir_all(&dump_dir)
-        .map_err(|error| format!("failed to create pass dump directory: {error}"))?;
-    let mut analyses = AnalysisManager::default();
-    let mut config = PMConfig::default();
-    config.print_after_all = true;
-    config.ir_printing_dir = Some(dump_dir.clone());
-    let mut pipeline = pipeline(target);
-    pipeline.set_config(config);
-
-    let initial_dump = imported.module.disp(&imported.ctx).to_string();
     let run_result = pipeline.run(imported.module, &mut imported.ctx, &mut analyses);
 
-    let dumps = collect_pass_dumps(&dump_dir);
-    let _ = std::fs::remove_dir_all(&dump_dir);
+    if let Some(dump_dir) = dump_dir {
+        let project = trace_project(sess);
+        let dumps = collect_pass_dumps(&dump_dir);
+        let _ = std::fs::remove_dir_all(&dump_dir);
 
-    let mut trace = StairTraceFile::new(StairTraceMeta {
-        name: project.clone(),
-        kind: "compiler-run".to_string(),
-        entry: None,
-        source: None,
-        pipeline: dumps.iter().map(|(name, _)| name.clone()).collect(),
-        target: Some(sess.target.llvm_target.to_string()),
-        note: Some(format!("version {version}")),
-        extra: BTreeMap::new(),
-    });
-    trace.push_dump("initial", initial_dump);
-    for (name, dump) in dumps {
-        trace.push_dump(name, dump);
+        let mut trace = StairTraceFile::new(StairTraceMeta {
+            name: project.clone(),
+            kind: "compiler-run".to_string(),
+            entry: None,
+            source: None,
+            pipeline: dumps.iter().map(|(name, _)| name.clone()).collect(),
+            target: Some(sess.target.llvm_target.to_string()),
+            note: Some(format!("version {version}")),
+            extra: BTreeMap::new(),
+        });
+        trace.push_dump("initial", initial_dump.unwrap_or_default());
+        for (name, dump) in dumps {
+            trace.push_dump(name, dump);
+        }
+        let trace_path = trace::project_trace_path(&project, &version);
+        if let Err(error) = &run_result {
+            let _ = trace.write(&trace_path);
+            return Err(error.to_string());
+        }
+        trace
+            .write(&trace_path)
+            .map_err(|error| error.to_string())?;
     }
-    let trace_path = trace::project_trace_path(&project, &version);
     if let Err(error) = run_result {
-        let _ = trace.write(&trace_path);
         return Err(error.to_string());
     }
-    trace
-        .write(&trace_path)
-        .map_err(|error| error.to_string())?;
 
     // No invocation-temp component: the object must outlive the rustc
     // invocation (backend-tests inspect it after the build).
@@ -257,6 +369,9 @@ fn emit_object(
             object.display()
         )
     })?;
+    if imported.kernel_count > 0 {
+        emit_kernels(imported, &object, tracing)?;
+    }
     Ok(object)
 }
 

@@ -1,0 +1,1 @@
+ABORTED 2026-08-28: engine-only arrow compile-time run on the pre-bugfix backend (sha c56ef07a…); superseded by the clean full sweep. Not data.

@@ -17,6 +17,7 @@ use pliron::{
 };
 
 dict_key!(ATTR_KEY_LL_TLS, "ll_tls");
+dict_key!(ATTR_KEY_LL_SECTION, "ll_section");
 
 pub fn register(ctx: &mut Context) {
     Dialect::register(
@@ -77,4 +78,24 @@ pub fn global_is_thread_local(ctx: &Context, global: &pliron_llvm::ops::GlobalOp
         .attributes
         .get::<TlsAttr>(&ATTR_KEY_LL_TLS)
         .is_some()
+}
+
+/// Record the `#[link_section = "…"]` of a global (a `builtin.string`
+/// under the `ll_section` key). Object writers may honor it; the NVPTX
+/// translator maps `.shared` to per-CTA shared memory (docs/KERNEL-ABI.md).
+pub fn set_global_section(ctx: &mut Context, global: &pliron_llvm::ops::GlobalOp, section: &str) {
+    global.get_operation().deref_mut(ctx).attributes.set(
+        ATTR_KEY_LL_SECTION.clone(),
+        pliron::builtin::attributes::StringAttr::new(section.to_string()),
+    );
+}
+
+/// The `#[link_section]` recorded on a global, if any.
+pub fn global_section(ctx: &Context, global: &pliron_llvm::ops::GlobalOp) -> Option<String> {
+    global
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<pliron::builtin::attributes::StringAttr>(&ATTR_KEY_LL_SECTION)
+        .map(|attr| attr.as_str().to_string())
 }

@@ -200,9 +200,28 @@ fn is_codegen_body(tcx: TyCtxt<'_>, def_id: rustc_hir::def_id::DefId) -> bool {
 }
 
 fn is_kernel_def_id<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> bool {
-    tcx.codegen_fn_attrs(def_id)
-        .symbol_name
-        .is_some_and(|name| name.as_str().starts_with(KERNEL_EXPORT_PREFIX))
+    kernel_export_symbol(tcx, def_id).is_some()
+}
+
+/// The exported (unmangled) symbol of `def_id` when it names a kernel:
+/// an `#[export_name = "__stair_kernel_…"]` or a `#[no_mangle]` item whose
+/// name carries [KERNEL_EXPORT_PREFIX] (docs/KERNEL-ABI.md).
+fn kernel_export_symbol<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: rustc_hir::def_id::DefId,
+) -> Option<String> {
+    let attrs = tcx.codegen_fn_attrs(def_id);
+    let name = if let Some(name) = attrs.symbol_name {
+        name.to_string()
+    } else if attrs
+        .flags
+        .contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NO_MANGLE)
+    {
+        tcx.item_name(def_id).to_string()
+    } else {
+        return None;
+    };
+    name.starts_with(KERNEL_EXPORT_PREFIX).then_some(name)
 }
 
 fn function_symbol<'tcx>(
@@ -213,12 +232,21 @@ fn function_symbol<'tcx>(
     legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, def_id)).name)
 }
 
+/// A kernel's PTX entry name: its exported symbol with [KERNEL_EXPORT_PREFIX]
+/// stripped, so every toolchain arm (crabbit PTX, LLVM PTX, nvcc) shares
+/// one `.entry` name per kernel.
 fn kernel_symbol<'tcx>(
     tcx: TyCtxt<'tcx>,
     legaliser: &mut Legaliser,
     def_id: rustc_hir::def_id::DefId,
 ) -> crate::identifier::Identifier {
-    legaliser.legalise(&tcx.def_path_str(def_id))
+    let exported = kernel_export_symbol(tcx, def_id)
+        .unwrap_or_else(|| tcx.def_path_str(def_id));
+    let entry = exported
+        .strip_prefix(KERNEL_EXPORT_PREFIX)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(&exported);
+    legaliser.legalise(entry)
 }
 
 fn import_entry_wrapper(
@@ -511,15 +539,21 @@ fn declare_static_global<'tcx>(
     if def_id.is_local()
         && let Ok(alloc) = tcx.eval_static_initializer(def_id)
     {
-        return emit_allocation_global(
+        emit_allocation_global(
             tcx,
             ctx,
             module_body,
-            symbol,
+            symbol.clone(),
             alloc.inner(),
             LinkageAttr::ExternalLinkage,
             false,
-        );
+        )?;
+        // `#[link_section]` rides along as `ll_section`; the NVPTX
+        // translator reads `.shared` off it (docs/KERNEL-ABI.md).
+        if let Some(section) = tcx.codegen_fn_attrs(def_id).link_section {
+            set_global_section_by_symbol(ctx, module_body, &symbol, section.as_str());
+        }
+        return Ok(());
     }
     let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
     let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, 0).into();
@@ -527,6 +561,24 @@ fn declare_static_global<'tcx>(
     global.set_attr_llvm_global_linkage(ctx, LinkageAttr::ExternalLinkage);
     global.get_operation().insert_at_back(module_body, ctx);
     Ok(())
+}
+
+fn set_global_section_by_symbol(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    symbol: &crate::identifier::Identifier,
+    section: &str,
+) {
+    let global = module_body.deref(ctx).iter(ctx).find(|op| {
+        let op_obj = Operation::get_op_dyn(*op, ctx);
+        op_cast::<dyn SymbolOpInterface>(&*op_obj)
+            .is_some_and(|symbol_op| symbol_op.get_symbol_name(ctx) == *symbol)
+    });
+    if let Some(global) = global
+        && let Some(global) = Operation::get_op::<llvm::ops::GlobalOp>(global, ctx)
+    {
+        pliron_ll::ll::set_global_section(ctx, &global, section);
+    }
 }
 
 /// Declare or define the storage of a `#[thread_local]` static (the target
@@ -1876,6 +1928,22 @@ fn lower_known_intrinsic_call<'tcx>(
     match name.as_str() {
         // Pure optimization hints with no runtime semantics.
         "cold_path" => Ok(true),
+        "black_box" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "unsupported black_box intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            // The optimization barrier means nothing to this backend; the
+            // value passes through unchanged (and a ZST has nothing to copy).
+            if layout_size_of_ty(tcx, mono_ty(tcx, state, instance.args.type_at(0)))? == 0 {
+                return Ok(true);
+            }
+            let value = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            store_place(tcx, ctx, state, insert_block, body, destination, value)?;
+            Ok(true)
+        }
         // `atomic_load`/`atomic_store` are `(*const T) -> T` and
         // `(*mut T, T) -> ()`, with the ordering as a const generic rather than
         // a runtime argument.
@@ -2057,8 +2125,25 @@ fn lower_known_intrinsic_call<'tcx>(
                 return Err(format!("unsupported ctpop intrinsic arity: {}", args.len()));
             }
             let input = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
-            let x = widen_to_u64(ctx, insert_block, input)?;
-            let total = emit_popcount64(ctx, insert_block, x)?;
+            let width = input
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .map(|ty| ty.width())
+                .ok_or_else(|| "ctpop on non-integer type".to_string())?;
+            let total = if width == 128 {
+                let (lo, hi) = split_u128_halves(ctx, insert_block, input)?;
+                let lo_count = emit_popcount64(ctx, insert_block, lo)?;
+                let hi_count = emit_popcount64(ctx, insert_block, hi)?;
+                emit_op(
+                    stair_mir::ops::AddOp::new(ctx, lo_count, hi_count).get_operation(),
+                    ctx,
+                    insert_block,
+                )
+            } else {
+                let x = widen_to_u64(ctx, insert_block, input)?;
+                emit_popcount64(ctx, insert_block, x)?
+            };
             let dest_ty =
                 convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
             let result = cast_value_to_type(ctx, insert_block, total, dest_ty);
@@ -2115,6 +2200,69 @@ fn lower_known_intrinsic_call<'tcx>(
             store_place(tcx, ctx, state, insert_block, body, destination, result)?;
             Ok(true)
         }
+        "bswap" => {
+            if args.len() != 1 {
+                return Err(format!("unsupported bswap intrinsic arity: {}", args.len()));
+            }
+            let input = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let width = input
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .map(|ty| ty.width())
+                .ok_or_else(|| "bswap on non-integer type".to_string())?;
+            let swapped = if width == 128 {
+                // Swap each 64-bit half's bytes, then swap the halves.
+                let (lo, hi) = split_u128_halves(ctx, insert_block, input)?;
+                let lo_swapped = emit_bswap64(ctx, insert_block, lo, 64)?;
+                let hi_swapped = emit_bswap64(ctx, insert_block, hi, 64)?;
+                join_u128_halves(ctx, insert_block, hi_swapped, lo_swapped)?
+            } else if width > 64 || width % 8 != 0 {
+                return Err(format!("unsupported {width}-bit bswap intrinsic"));
+            } else if width == 8 {
+                widen_to_u64(ctx, insert_block, input)?
+            } else {
+                let x = widen_to_u64(ctx, insert_block, input)?;
+                emit_bswap64(ctx, insert_block, x, width)?
+            };
+            let dest_ty =
+                convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
+            let result = cast_value_to_type(ctx, insert_block, swapped, dest_ty);
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        "bitreverse" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "unsupported bitreverse intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let input = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let width = input
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .map(|ty| ty.width())
+                .ok_or_else(|| "bitreverse on non-integer type".to_string())?;
+            let reversed = if width == 128 {
+                // Reverse each 64-bit half, then swap the halves.
+                let (lo, hi) = split_u128_halves(ctx, insert_block, input)?;
+                let lo_reversed = emit_bitreverse64(ctx, insert_block, lo, 64)?;
+                let hi_reversed = emit_bitreverse64(ctx, insert_block, hi, 64)?;
+                join_u128_halves(ctx, insert_block, hi_reversed, lo_reversed)?
+            } else if width > 64 {
+                return Err(format!("unsupported {width}-bit bitreverse intrinsic"));
+            } else {
+                let x = widen_to_u64(ctx, insert_block, input)?;
+                emit_bitreverse64(ctx, insert_block, x, width)?
+            };
+            let dest_ty =
+                convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
+            let result = cast_value_to_type(ctx, insert_block, reversed, dest_ty);
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
         "rotate_left" | "rotate_right" => {
             if args.len() != 2 {
                 return Err(format!(
@@ -2129,6 +2277,64 @@ fn lower_known_intrinsic_call<'tcx>(
                 .downcast_ref::<IntegerType>()
                 .map(|ty| ty.width())
                 .ok_or_else(|| "rotate on non-integer type".to_string())?;
+            if width == 128 {
+                // Same modular-shift construction as the u64 path below,
+                // carried out at u128 (dynamic i128 shifts exist in isel).
+                let u128_ty: TypeHandle =
+                    IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+                let x = cast_value_to_type(ctx, insert_block, input, u128_ty);
+                let shift = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+                let shift = cast_value_to_type(ctx, insert_block, shift, u128_ty);
+                let modulus_mask = integer_constant(ctx, u128_ty, 127)?;
+                modulus_mask.get_operation().insert_at_back(insert_block, ctx);
+                let modulus_mask = modulus_mask.get_result(ctx);
+                let k = emit_op(
+                    stair_mir::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let width_value = integer_constant(ctx, u128_ty, 128)?;
+                width_value.get_operation().insert_at_back(insert_block, ctx);
+                let complement = emit_op(
+                    stair_mir::ops::SubOp::new(ctx, width_value.get_result(ctx), k)
+                        .get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let inv = emit_op(
+                    stair_mir::ops::BitAndOp::new(ctx, complement, modulus_mask).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let (left_amount, right_amount) = if name == "rotate_left" {
+                    (k, inv)
+                } else {
+                    (inv, k)
+                };
+                let left = emit_op(
+                    stair_mir::ops::ShlOp::new(ctx, x, left_amount).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let right = emit_op(
+                    stair_mir::ops::ShrOp::new(ctx, x, right_amount).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let rotated = emit_op(
+                    stair_mir::ops::BitOrOp::new(ctx, left, right).get_operation(),
+                    ctx,
+                    insert_block,
+                );
+                let dest_ty = convert_immediate_ty(
+                    tcx,
+                    ctx,
+                    mono_ty(tcx, state, destination.ty(body, tcx).ty),
+                )?;
+                let result = cast_value_to_type(ctx, insert_block, rotated, dest_ty);
+                store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+                return Ok(true);
+            }
             if width > 64 || !width.is_power_of_two() {
                 return Err(format!("unsupported {width}-bit rotate intrinsic"));
             }
@@ -2529,7 +2735,15 @@ fn lower_known_intrinsic_call<'tcx>(
             let lhs = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
             let rhs = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
             if !is_unsigned_integer_value(ctx, lhs) {
-                return Err(format!("unsupported signed saturating intrinsic: {name}"));
+                let result = lower_signed_saturating(
+                    ctx,
+                    insert_block,
+                    name == "saturating_add",
+                    lhs,
+                    rhs,
+                )?;
+                store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+                return Ok(true);
             }
             let int_ty = lhs.get_type(ctx);
             let result = if name == "saturating_add" {
@@ -2569,6 +2783,62 @@ fn lower_known_intrinsic_call<'tcx>(
                 let saturated = stair_mir::ops::BitAndOp::new(ctx, diff, mask).get_operation();
                 saturated.insert_at_back(insert_block, ctx);
                 saturated.deref(ctx).get_result(0)
+            };
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        "exact_div" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "unsupported exact_div intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let lhs = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let rhs = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
+            // `exact_div` is division with UB on a non-zero remainder (or
+            // overflow), so plain division is a valid lowering.
+            let result = if is_128_bit_integer_value(ctx, lhs) {
+                lower_i128_divrem(
+                    ctx,
+                    state.module_body,
+                    insert_block,
+                    BinOp::Div,
+                    lhs,
+                    rhs,
+                )?
+            } else {
+                emit_op(
+                    stair_mir::ops::DivOp::new(ctx, lhs, rhs).get_operation(),
+                    ctx,
+                    insert_block,
+                )
+            };
+            store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+            Ok(true)
+        }
+        "float_to_int_unchecked" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "unsupported float_to_int_unchecked intrinsic arity: {}",
+                    args.len()
+                ));
+            }
+            let input = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let dest_ty =
+                convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, destination.ty(body, tcx).ty))?;
+            // In-range inputs are the caller's obligation, so the saturating
+            // `as`-cast lowering is a valid refinement at every width.
+            let result = if dest_ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|ty| ty.width() == 128)
+            {
+                lower_float_to_i128_sat(ctx, state.module_body, insert_block, input, dest_ty)?
+            } else {
+                let cast = stair_mir::ops::CastOp::new(ctx, input, dest_ty);
+                cast.get_operation().insert_at_back(insert_block, ctx);
+                cast.get_result(ctx)
             };
             store_place(tcx, ctx, state, insert_block, body, destination, result)?;
             Ok(true)
@@ -2675,8 +2945,118 @@ fn lower_known_intrinsic_call<'tcx>(
             call.get_operation().insert_at_back(insert_block, ctx);
             Ok(true)
         }
+        _ if float_math_intrinsic(name.as_str()).is_some() => lower_float_math_intrinsic(
+            tcx,
+            ctx,
+            state,
+            insert_block,
+            body,
+            name.as_str(),
+            args,
+            destination,
+        ),
         _ => Ok(false),
     }
+}
+
+/// How a float math intrinsic reaches the backend: as a call to an
+/// `llvm_<op>_f{32,64}` declaration that instruction selection turns into
+/// one FP instruction (mirroring LLVM's `llvm.<op>.f32` intrinsics), or as
+/// a call into libm / compiler-builtins, the way LLVM's own lowering
+/// expands the transcendental intrinsics.
+enum FloatMathLowering {
+    Inline(&'static str),
+    Libcall {
+        f32_symbol: &'static str,
+        f64_symbol: &'static str,
+    },
+}
+
+fn float_math_intrinsic(name: &str) -> Option<FloatMathLowering> {
+    use FloatMathLowering::{Inline, Libcall};
+    // Strip the width suffix (`sqrtf32`, `round_ties_even_f64`); the
+    // generic `fabs` carries none, and the operand type decides the width.
+    let base = name
+        .strip_suffix("f32")
+        .or_else(|| name.strip_suffix("f64"))
+        .unwrap_or(name);
+    let base = base.strip_suffix('_').unwrap_or(base);
+    Some(match base {
+        "sqrt" => Inline("sqrt"),
+        "fabs" => Inline("fabs"),
+        "floor" => Inline("floor"),
+        "ceil" => Inline("ceil"),
+        "trunc" => Inline("trunc"),
+        "round" => Inline("round"),
+        "round_ties_even" => Inline("rint"),
+        "minnum" | "minimum_number_nsz" => Inline("minnum"),
+        "maxnum" | "maximum_number_nsz" => Inline("maxnum"),
+        "minimum" => Inline("minimum"),
+        "maximum" => Inline("maximum"),
+        "exp" => Libcall { f32_symbol: "expf", f64_symbol: "exp" },
+        "exp2" => Libcall { f32_symbol: "exp2f", f64_symbol: "exp2" },
+        "log" => Libcall { f32_symbol: "logf", f64_symbol: "log" },
+        "log2" => Libcall { f32_symbol: "log2f", f64_symbol: "log2" },
+        "log10" => Libcall { f32_symbol: "log10f", f64_symbol: "log10" },
+        "sin" => Libcall { f32_symbol: "sinf", f64_symbol: "sin" },
+        "cos" => Libcall { f32_symbol: "cosf", f64_symbol: "cos" },
+        "pow" => Libcall { f32_symbol: "powf", f64_symbol: "pow" },
+        "fma" | "fmuladd" => Libcall { f32_symbol: "fmaf", f64_symbol: "fma" },
+        "copysign" => Libcall { f32_symbol: "copysignf", f64_symbol: "copysign" },
+        // Integer power: compiler-builtins' `__powi{s,d}f2`, as LLVM
+        // expands `llvm.powi`.
+        "powi" => Libcall { f32_symbol: "__powisf2", f64_symbol: "__powidf2" },
+        _ => return None,
+    })
+}
+
+/// Lower a float math intrinsic (see [float_math_intrinsic]) to a call the
+/// backend resolves. Returns `Ok(false)` for float widths this backend
+/// does not lower (f16/f128), leaving the call unresolved as before.
+#[allow(clippy::too_many_arguments)]
+fn lower_float_math_intrinsic<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    state: &FunctionImportState<'tcx>,
+    insert_block: Ptr<BasicBlock>,
+    body: &Body<'tcx>,
+    name: &str,
+    args: &[rustc_span::Spanned<Operand<'tcx>>],
+    destination: &Place<'tcx>,
+) -> Result<bool, String> {
+    let Some(lowering) = float_math_intrinsic(name) else {
+        return Ok(false);
+    };
+    if args.is_empty() {
+        return Err(format!("unsupported {name} intrinsic arity: 0"));
+    }
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        values.push(import_operand(tcx, ctx, state, insert_block, body, &arg.node)?);
+    }
+    let float_ty = values[0].get_type(ctx);
+    let is_f32 = float_ty.deref(ctx).downcast_ref::<FP32Type>().is_some();
+    if !is_f32 && float_ty.deref(ctx).downcast_ref::<FP64Type>().is_none() {
+        return Ok(false);
+    }
+    let callee: crate::identifier::Identifier = match lowering {
+        FloatMathLowering::Inline(op) => {
+            format!("llvm_{op}_f{}", if is_f32 { 32 } else { 64 })
+        }
+        FloatMathLowering::Libcall {
+            f32_symbol,
+            f64_symbol,
+        } => (if is_f32 { f32_symbol } else { f64_symbol }).to_string(),
+    }
+    .try_into()
+    .unwrap();
+    let arg_tys: Vec<TypeHandle> = values.iter().map(|value| value.get_type(ctx)).collect();
+    declare_external_function(ctx, state.module_body, callee.clone(), arg_tys, Some(float_ty));
+    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, values, Some(float_ty));
+    call.get_operation().insert_at_back(insert_block, ctx);
+    let result = call.get_result(ctx);
+    store_place(tcx, ctx, state, insert_block, body, destination, result)?;
+    Ok(true)
 }
 
 /// Zero-extend an integer value of width <= 64 to u64.
@@ -2692,7 +3072,9 @@ fn widen_to_u64(
         .map(|ty| ty.width())
         .ok_or_else(|| "bit intrinsic on non-integer type".to_string())?;
     if width > 64 {
-        return Err("unsupported 128-bit bit intrinsic".to_string());
+        // Every 128-bit consumer splits halves via `split_u128_halves`
+        // instead of widening; this guards against a new caller forgetting.
+        return Err("128-bit operand reached widen_to_u64 (split into halves instead)".to_string());
     }
     let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
     Ok(cast_value_to_type(ctx, insert_block, value, u64_ty))
@@ -2737,14 +3119,12 @@ fn emit_cttz64(
     emit_popcount64(ctx, insert_block, masked)
 }
 
-/// 128-bit trailing-zero count on 64-bit halves:
-/// `cttz(x) = cttz64(lo) + (lo == 0 ? cttz64(hi) : 0)`. `cttz64` already
-/// yields 64 for a zero half, so the total is 128 for `x == 0`.
-fn emit_cttz128(
+/// The low and high 64-bit halves of a 128-bit value, as u64s.
+fn split_u128_halves(
     ctx: &mut Context,
     insert_block: Ptr<BasicBlock>,
     input: Value,
-) -> Result<Value, String> {
+) -> Result<(Value, Value), String> {
     let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
     let bits = cast_value_to_type(ctx, insert_block, input, u128_ty);
     let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
@@ -2757,6 +3137,19 @@ fn emit_cttz128(
         insert_block,
     );
     let hi = cast_value_to_type(ctx, insert_block, hi_wide, u64_ty);
+    Ok((lo, hi))
+}
+
+/// 128-bit trailing-zero count on 64-bit halves:
+/// `cttz(x) = cttz64(lo) + (lo == 0 ? cttz64(hi) : 0)`. `cttz64` already
+/// yields 64 for a zero half, so the total is 128 for `x == 0`.
+fn emit_cttz128(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    input: Value,
+) -> Result<Value, String> {
+    let (lo, hi) = split_u128_halves(ctx, insert_block, input)?;
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
 
     let lo_count = emit_cttz64(ctx, insert_block, lo, 64)?;
     let hi_count = emit_cttz64(ctx, insert_block, hi, 64)?;
@@ -2841,18 +3234,8 @@ fn emit_ctlz128(
     insert_block: Ptr<BasicBlock>,
     input: Value,
 ) -> Result<Value, String> {
-    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
-    let bits = cast_value_to_type(ctx, insert_block, input, u128_ty);
+    let (lo, hi) = split_u128_halves(ctx, insert_block, input)?;
     let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
-    let lo = cast_value_to_type(ctx, insert_block, bits, u64_ty);
-    let sixty_four = integer_constant(ctx, u128_ty, 64)?;
-    sixty_four.get_operation().insert_at_back(insert_block, ctx);
-    let hi_wide = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, bits, sixty_four.get_result(ctx)).get_operation(),
-        ctx,
-        insert_block,
-    );
-    let hi = cast_value_to_type(ctx, insert_block, hi_wide, u64_ty);
 
     let hi_count = emit_ctlz64(ctx, insert_block, hi, 64)?;
     let lo_count = emit_ctlz64(ctx, insert_block, lo, 64)?;
@@ -2935,6 +3318,138 @@ fn emit_popcount64(
     let fifty_six = constant(ctx, 56)?;
     let total = stair_mir::ops::ShrOp::new(ctx, spread, fifty_six).get_operation();
     Ok(emit(ctx, insert_block, total))
+}
+
+/// A u128 value assembled as `(hi << 64) | lo` from two u64 halves.
+fn join_u128_halves(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    lo: Value,
+    hi: Value,
+) -> Result<Value, String> {
+    let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+    let lo_wide = cast_value_to_type(ctx, insert_block, lo, u128_ty);
+    let hi_wide = cast_value_to_type(ctx, insert_block, hi, u128_ty);
+    let sixty_four = integer_constant(ctx, u128_ty, 64)?;
+    sixty_four.get_operation().insert_at_back(insert_block, ctx);
+    let shifted = emit_op(
+        stair_mir::ops::ShlOp::new(ctx, hi_wide, sixty_four.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    Ok(emit_op(
+        stair_mir::ops::BitOrOp::new(ctx, shifted, lo_wide).get_operation(),
+        ctx,
+        insert_block,
+    ))
+}
+
+/// Byte swap of the low `width` bits of a u64 value (`width` a multiple of
+/// 8): byte lane `i` moves to lane `width/8 - 1 - i`, one lane at a time
+/// (correctness over speed, matching the other bit-intrinsic expansions).
+fn emit_bswap64(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    x: Value,
+    width: u32,
+) -> Result<Value, String> {
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    let constant = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+        let op = integer_constant(ctx, u64_ty, bits)?;
+        op.get_operation().insert_at_back(insert_block, ctx);
+        Ok(op.get_result(ctx))
+    };
+    let lanes = width / 8;
+    let byte_mask = constant(ctx, 0xff)?;
+    let mut result = constant(ctx, 0)?;
+    for lane in 0..lanes {
+        let down = constant(ctx, (lane * 8) as u128)?;
+        let shifted = emit_op(
+            stair_mir::ops::ShrOp::new(ctx, x, down).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let byte = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, shifted, byte_mask).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let up = constant(ctx, ((lanes - 1 - lane) * 8) as u128)?;
+        let placed = emit_op(
+            stair_mir::ops::ShlOp::new(ctx, byte, up).get_operation(),
+            ctx,
+            insert_block,
+        );
+        result = emit_op(
+            stair_mir::ops::BitOrOp::new(ctx, result, placed).get_operation(),
+            ctx,
+            insert_block,
+        );
+    }
+    Ok(result)
+}
+
+/// Bit reversal of the low `width` bits of a u64 value: the classic SWAR
+/// swaps of adjacent 1-, 2-, and 4-bit groups reverse each byte, a byte swap
+/// reverses the full 64 bits, and (for `width < 64`) a final right shift
+/// re-aligns the reversed field, pushing out the reversed zero-extension
+/// garbage that landed below it.
+fn emit_bitreverse64(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    mut x: Value,
+    width: u32,
+) -> Result<Value, String> {
+    let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+    let constant = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+        let op = integer_constant(ctx, u64_ty, bits)?;
+        op.get_operation().insert_at_back(insert_block, ctx);
+        Ok(op.get_result(ctx))
+    };
+    for (mask_bits, shift) in [
+        (0x5555_5555_5555_5555u128, 1u128),
+        (0x3333_3333_3333_3333, 2),
+        (0x0f0f_0f0f_0f0f_0f0f, 4),
+    ] {
+        // x = ((x >> s) & m) | ((x & m) << s)
+        let mask = constant(ctx, mask_bits)?;
+        let amount = constant(ctx, shift)?;
+        let down = emit_op(
+            stair_mir::ops::ShrOp::new(ctx, x, amount).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let down = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, down, mask).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let up = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, x, mask).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let up = emit_op(
+            stair_mir::ops::ShlOp::new(ctx, up, amount).get_operation(),
+            ctx,
+            insert_block,
+        );
+        x = emit_op(
+            stair_mir::ops::BitOrOp::new(ctx, down, up).get_operation(),
+            ctx,
+            insert_block,
+        );
+    }
+    x = emit_bswap64(ctx, insert_block, x, 64)?;
+    if width < 64 {
+        let down = constant(ctx, (64 - width) as u128)?;
+        x = emit_op(
+            stair_mir::ops::ShrOp::new(ctx, x, down).get_operation(),
+            ctx,
+            insert_block,
+        );
+    }
+    Ok(x)
 }
 
 fn import_upstream_instance<'tcx>(
@@ -3205,6 +3720,401 @@ fn lower_abi_call_arg(
             Ok(())
         }
     }
+}
+
+/// Whether a value's static type is a 128-bit integer.
+fn is_128_bit_integer_value(ctx: &Context, value: Value) -> bool {
+    value
+        .get_type(ctx)
+        .deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|ty| ty.width() == 128)
+}
+
+/// 128-bit division and remainder lower to the compiler-builtins libcalls
+/// (`__udivti3` family), the way every backend handles them: there is no
+/// wider type to widen into, and the Rust sysroot's compiler-builtins
+/// already provides the symbols.
+fn lower_i128_divrem(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    insert_block: Ptr<BasicBlock>,
+    op: BinOp,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let signed = !is_unsigned_integer_value(ctx, lhs);
+    let callee: crate::identifier::Identifier = match (op, signed) {
+        (BinOp::Div, true) => "__divti3",
+        (BinOp::Div, false) => "__udivti3",
+        (BinOp::Rem, true) => "__modti3",
+        (BinOp::Rem, false) => "__umodti3",
+        _ => return Err(format!("lower_i128_divrem on non-div/rem binop {op:?}")),
+    }
+    .try_into()
+    .unwrap();
+    let int_ty = lhs.get_type(ctx);
+    declare_external_function(
+        ctx,
+        module_body,
+        callee.clone(),
+        vec![int_ty, int_ty],
+        Some(int_ty),
+    );
+    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, vec![lhs, rhs], Some(int_ty));
+    call.get_operation().insert_at_back(insert_block, ctx);
+    Ok(call.get_result(ctx))
+}
+
+/// 128-bit int -> float casts lower to the compiler-builtins libcalls
+/// (`__floattidf` family): they round correctly and there is no wider
+/// integer to decompose through.
+fn lower_i128_to_float(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    insert_block: Ptr<BasicBlock>,
+    input: Value,
+    float_ty: TypeHandle,
+) -> Result<Value, String> {
+    let signed = !is_unsigned_integer_value(ctx, input);
+    let to_f32 = float_ty.deref(ctx).downcast_ref::<FP32Type>().is_some();
+    if !to_f32 && float_ty.deref(ctx).downcast_ref::<FP64Type>().is_none() {
+        return Err("unsupported float type for 128-bit int-to-float cast".to_string());
+    }
+    let callee: crate::identifier::Identifier = match (signed, to_f32) {
+        (true, true) => "__floattisf",
+        (true, false) => "__floattidf",
+        (false, true) => "__floatuntisf",
+        (false, false) => "__floatuntidf",
+    }
+    .try_into()
+    .unwrap();
+    let int_ty = input.get_type(ctx);
+    declare_external_function(ctx, module_body, callee.clone(), vec![int_ty], Some(float_ty));
+    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, vec![input], Some(float_ty));
+    call.get_operation().insert_at_back(insert_block, ctx);
+    Ok(call.get_result(ctx))
+}
+
+/// Saturating float -> 128-bit int casts (Rust `as` semantics): the
+/// compiler-builtins `__fixdfti` family does the in-range conversion, and an
+/// explicit branch-free clamp enforces the saturation contract — MAX above
+/// the range, MIN (0 for unsigned) below it, 0 for NaN — instead of relying
+/// on the libcall's own out-of-range behavior.
+fn lower_float_to_i128_sat(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    insert_block: Ptr<BasicBlock>,
+    input: Value,
+    dest_ty: TypeHandle,
+) -> Result<Value, String> {
+    let float_ty = input.get_type(ctx);
+    let from_f32 = float_ty.deref(ctx).downcast_ref::<FP32Type>().is_some();
+    if !from_f32 && float_ty.deref(ctx).downcast_ref::<FP64Type>().is_none() {
+        return Err("unsupported float type for 128-bit float-to-int cast".to_string());
+    }
+    let signed = dest_ty
+        .deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|ty| ty.signedness() == Signedness::Signed);
+    let callee: crate::identifier::Identifier = match (signed, from_f32) {
+        (true, true) => "__fixsfti",
+        (true, false) => "__fixdfti",
+        (false, true) => "__fixunssfti",
+        (false, false) => "__fixunsdfti",
+    }
+    .try_into()
+    .unwrap();
+    declare_external_function(
+        ctx,
+        module_body,
+        callee.clone(),
+        vec![float_ty],
+        Some(dest_ty),
+    );
+    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, vec![input], Some(dest_ty));
+    call.get_operation().insert_at_back(insert_block, ctx);
+    let raw = call.get_result(ctx);
+
+    // A float constant in the input's own width. `2^127` and `-1.0` are
+    // exact in both f32 and f64; `2^128` is exact in f64 and rounds to +inf
+    // in f32, which compares exactly as needed (only +inf saturates high).
+    let float_const = |ctx: &mut Context, value: f64| -> Result<Value, String> {
+        let bits = if from_f32 {
+            (value as f32).to_bits() as u128
+        } else {
+            value.to_bits() as u128
+        };
+        let op = constant_from_bits(ctx, float_ty, bits)?;
+        op.get_operation().insert_at_back(insert_block, ctx);
+        Ok(op.get_result(ctx))
+    };
+    let int_const = |ctx: &mut Context, bits: u128| -> Result<Value, String> {
+        let op = integer_constant(ctx, dest_ty, bits)?;
+        op.get_operation().insert_at_back(insert_block, ctx);
+        Ok(op.get_result(ctx))
+    };
+    let zero = int_const(ctx, 0)?;
+    let ones = int_const(ctx, u128::MAX)?;
+    // All-ones when the (ordered) float compare holds, zero otherwise —
+    // every ordered predicate is false for NaN, which is what routes NaN to
+    // the final zero mask below.
+    let mask_of = |ctx: &mut Context,
+                   insert_block: Ptr<BasicBlock>,
+                   cond: Value|
+     -> Result<Value, String> {
+        let wide = cast_value_to_type(ctx, insert_block, cond, dest_ty);
+        Ok(emit_op(
+            stair_mir::ops::SubOp::new(ctx, zero, wide).get_operation(),
+            ctx,
+            insert_block,
+        ))
+    };
+
+    let two_pow_127 = (1u128 << 127) as f64;
+    let (upper_bound, high_sat_bits, mask_low_sat, mask_keep) = if signed {
+        // Overflow high at x >= 2^127; low at x < -2^127 (exactly -2^127 is
+        // i128::MIN, which the libcall already produces).
+        let low_bound = float_const(ctx, -two_pow_127)?;
+        let below = emit_op(
+            stair_mir::ops::LtOp::new(ctx, input, low_bound).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let mask_low = mask_of(ctx, insert_block, below)?;
+        // Ordered self-equality: false exactly for NaN.
+        let ordered = emit_op(
+            stair_mir::ops::EqOp::new(ctx, input, input).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let mask_ordered = mask_of(ctx, insert_block, ordered)?;
+        (two_pow_127, u128::MAX >> 1, mask_low, mask_ordered)
+    } else {
+        // Overflow high at x >= 2^128; everything in (-1, 2^128) converts,
+        // and NaN or x <= -1 goes to zero (`x > -1.0` is false for both).
+        let minus_one = float_const(ctx, -1.0)?;
+        let in_low_range = emit_op(
+            stair_mir::ops::GtOp::new(ctx, input, minus_one).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let mask_keep = mask_of(ctx, insert_block, in_low_range)?;
+        (two_pow_127 * 2.0, u128::MAX, zero, mask_keep)
+    };
+
+    let upper = float_const(ctx, upper_bound)?;
+    let above = emit_op(
+        stair_mir::ops::GeOp::new(ctx, input, upper).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let mask_high = mask_of(ctx, insert_block, above)?;
+    let not_high = emit_op(
+        stair_mir::ops::BitXorOp::new(ctx, mask_high, ones).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let high_sat = int_const(ctx, high_sat_bits)?;
+    let high_sel = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, high_sat, mask_high).get_operation(),
+        ctx,
+        insert_block,
+    );
+
+    let mut result = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, raw, not_high).get_operation(),
+        ctx,
+        insert_block,
+    );
+    if signed {
+        let not_low = emit_op(
+            stair_mir::ops::BitXorOp::new(ctx, mask_low_sat, ones).get_operation(),
+            ctx,
+            insert_block,
+        );
+        result = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, result, not_low).get_operation(),
+            ctx,
+            insert_block,
+        );
+        let min_sat = int_const(ctx, 1u128 << 127)?;
+        let low_sel = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, min_sat, mask_low_sat).get_operation(),
+            ctx,
+            insert_block,
+        );
+        result = emit_op(
+            stair_mir::ops::BitOrOp::new(ctx, result, low_sel).get_operation(),
+            ctx,
+            insert_block,
+        );
+        result = emit_op(
+            stair_mir::ops::BitOrOp::new(ctx, result, high_sel).get_operation(),
+            ctx,
+            insert_block,
+        );
+        // NaN: every compare above was false, so force the result to zero.
+        result = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, result, mask_keep).get_operation(),
+            ctx,
+            insert_block,
+        );
+    } else {
+        result = emit_op(
+            stair_mir::ops::BitOrOp::new(ctx, result, high_sel).get_operation(),
+            ctx,
+            insert_block,
+        );
+        result = emit_op(
+            stair_mir::ops::BitAndOp::new(ctx, result, mask_keep).get_operation(),
+            ctx,
+            insert_block,
+        );
+    }
+    Ok(result)
+}
+
+/// Casts between 128-bit integers and floats, which bypass the generic
+/// `CastOp` path (no 128-bit fcvt exists; see [lower_i128_to_float] and
+/// [lower_float_to_i128_sat]). Returns `None` for every other cast.
+fn lower_128_bit_float_cast<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    state: &FunctionImportState<'tcx>,
+    insert_block: Ptr<BasicBlock>,
+    body: &Body<'tcx>,
+    operand: &Operand<'tcx>,
+    src_ty: Ty<'tcx>,
+    dst_ty: Ty<'tcx>,
+) -> Result<Option<Value>, String> {
+    use rustc_middle::ty::TyKind;
+    let is_int128 = |ty: Ty<'tcx>| {
+        matches!(
+            runtime_ty(ty).kind(),
+            TyKind::Int(rustc_middle::ty::IntTy::I128)
+                | TyKind::Uint(rustc_middle::ty::UintTy::U128)
+        )
+    };
+    let is_float = |ty: Ty<'tcx>| matches!(runtime_ty(ty).kind(), TyKind::Float(_));
+    if is_int128(src_ty) && is_float(dst_ty) {
+        let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
+        let float_ty = convert_immediate_ty(tcx, ctx, dst_ty)?;
+        return Ok(Some(lower_i128_to_float(
+            ctx,
+            state.module_body,
+            insert_block,
+            input,
+            float_ty,
+        )?));
+    }
+    if is_float(src_ty) && is_int128(dst_ty) {
+        let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
+        let dest_ty = convert_immediate_ty(tcx, ctx, dst_ty)?;
+        return Ok(Some(lower_float_to_i128_sat(
+            ctx,
+            state.module_body,
+            insert_block,
+            input,
+            dest_ty,
+        )?));
+    }
+    Ok(None)
+}
+
+/// Signed saturating add/sub, branch-free at any width (128 included): the
+/// wrapping result, with overflow detected by the sign-bit rule from
+/// [lower_signed_overflow_binary] turned into an all-ones mask via an
+/// arithmetic shift, selecting `MAX ^ (lhs >>s (w-1))` — MAX for a
+/// non-negative lhs, MIN for a negative one — exactly when overflow occurs.
+fn lower_signed_saturating(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    is_add: bool,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let int_ty = lhs.get_type(ctx);
+    let width = int_ty
+        .deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .map(|ty| ty.width())
+        .ok_or_else(|| "saturating intrinsic on non-integer type".to_string())?;
+    let wrapped = emit_op(
+        if is_add {
+            stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation()
+        } else {
+            stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation()
+        },
+        ctx,
+        insert_block,
+    );
+    // Same overflow rule as lower_signed_overflow_binary: the sign bit of
+    // `(res ^ lhs) & (res ^ rhs)` (add) / `(lhs ^ rhs) & (lhs ^ res)` (sub).
+    let (xor_a, xor_b) = if is_add {
+        ((wrapped, lhs), (wrapped, rhs))
+    } else {
+        ((lhs, rhs), (lhs, wrapped))
+    };
+    let a = emit_op(
+        stair_mir::ops::BitXorOp::new(ctx, xor_a.0, xor_a.1).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let b = emit_op(
+        stair_mir::ops::BitXorOp::new(ctx, xor_b.0, xor_b.1).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let sign = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, a, b).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let top_bit = integer_constant(ctx, int_ty, (width - 1) as u128)?;
+    top_bit.get_operation().insert_at_back(insert_block, ctx);
+    let top_bit = top_bit.get_result(ctx);
+    // `int_ty` is Signed, so the sign-aware shift is arithmetic: all-ones
+    // when the sign bit is set, zero otherwise.
+    let overflow_mask = emit_op(
+        stair_mir::ops::SignAwareShrOp::new(ctx, sign, top_bit).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let lhs_sign = emit_op(
+        stair_mir::ops::SignAwareShrOp::new(ctx, lhs, top_bit).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let max = integer_constant(ctx, int_ty, u128::MAX >> (129 - width as usize))?;
+    max.get_operation().insert_at_back(insert_block, ctx);
+    let saturated = emit_op(
+        stair_mir::ops::BitXorOp::new(ctx, lhs_sign, max.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let ones = integer_constant(ctx, int_ty, u128::MAX >> (128 - width as usize))?;
+    ones.get_operation().insert_at_back(insert_block, ctx);
+    let keep_mask = emit_op(
+        stair_mir::ops::BitXorOp::new(ctx, overflow_mask, ones.get_result(ctx)).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let kept = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, wrapped, keep_mask).get_operation(),
+        ctx,
+        insert_block,
+    );
+    let sat_sel = emit_op(
+        stair_mir::ops::BitAndOp::new(ctx, saturated, overflow_mask).get_operation(),
+        ctx,
+        insert_block,
+    );
+    Ok(emit_op(
+        stair_mir::ops::BitOrOp::new(ctx, kept, sat_sel).get_operation(),
+        ctx,
+        insert_block,
+    ))
 }
 
 fn lower_overflow_binary(
@@ -3983,6 +4893,9 @@ fn import_rvalue<'tcx>(
                 let ordering_ty = mono_ty(tcx, state, rvalue.ty(body, tcx));
                 return lower_three_way_cmp(tcx, ctx, insert_block, ordering_ty, lhs, rhs);
             }
+            if matches!(op, BinOp::Div | BinOp::Rem) && is_128_bit_integer_value(ctx, lhs) {
+                return lower_i128_divrem(ctx, state.module_body, insert_block, *op, lhs, rhs);
+            }
             let op = match op {
                 BinOp::Add | BinOp::AddUnchecked => {
                     stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation()
@@ -4031,6 +4944,20 @@ fn import_rvalue<'tcx>(
             if let Some(value) =
                 lower_pointer_unsize_cast(tcx, ctx, state, insert_block, body, kind, operand, *ty)?
             {
+                return Ok(value);
+            }
+            let src_ty = mono_ty(tcx, state, operand.ty(body, tcx));
+            let dst_ty = mono_ty(tcx, state, *ty);
+            if let Some(value) = lower_128_bit_float_cast(
+                tcx,
+                ctx,
+                state,
+                insert_block,
+                body,
+                operand,
+                src_ty,
+                dst_ty,
+            )? {
                 return Ok(value);
             }
             let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;

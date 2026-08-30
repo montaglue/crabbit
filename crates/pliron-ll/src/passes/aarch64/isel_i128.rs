@@ -203,9 +203,14 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(ctx, opcode, hi.clone(), lhs_hi, rhs_hi).insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
-        BinaryKind::SDiv | BinaryKind::UDiv | BinaryKind::SRem | BinaryKind::URem => Err(
-            input_error_noloc!(Aarch64Err::UnsupportedOp(format!("128-bit {kind:?}"))),
-        ),
+        // Unreachable from the crabbit importer, which lowers 128-bit
+        // div/rem to the `__divti3`-family libcalls before isel; kept as a
+        // guard for hand-built LLVM-dialect input.
+        BinaryKind::SDiv | BinaryKind::UDiv | BinaryKind::SRem | BinaryKind::URem => {
+            Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                "128-bit {kind:?} (lower to the __divti3-family libcalls before isel)"
+            ))))
+        }
     }
 }
 

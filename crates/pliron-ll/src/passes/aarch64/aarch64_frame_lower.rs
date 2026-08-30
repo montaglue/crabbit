@@ -36,14 +36,63 @@ impl Pass for Aarch64FrameLowerPass {
 
 fn lower_function_frame(ctx: &mut Context, func: FuncOp) {
     let stack_size = func.stack_size(ctx);
+    let entry = func.entry_block(ctx);
+    // Incoming stack arguments are fixed objects above the frame: once the
+    // link register save and the frame allocation are in place, they sit
+    // at `frame + lr save + offset` from sp.
+    let lr_save_bytes = link_register_save_bytes(ctx, entry);
+    rewrite_stack_arg_loads(ctx, func, stack_size + lr_save_bytes);
     if stack_size == 0 {
         return;
     }
 
-    let entry = func.entry_block(ctx);
     insert_prologue(ctx, entry, stack_size);
     insert_epilogues(ctx, func, stack_size);
     legalize_large_sp_address_offsets(ctx, func);
+}
+
+/// The bytes the entry block's leading link-register save (`str lr,
+/// [sp, #-n]!`) pushes, or 0 when the function saves no link register.
+fn link_register_save_bytes(ctx: &Context, entry: Ptr<BasicBlock>) -> u64 {
+    let mut cursor = entry.deref(ctx).get_head();
+    while let Some(op) = cursor {
+        if !aarch64_ops::is_instruction(ctx, op) {
+            cursor = op.deref(ctx).get_next();
+            continue;
+        }
+        let Some(opcode) = aarch64_ops::opcode(ctx, op) else {
+            return 0;
+        };
+        if opcode == aarch64_ops::StrPreSpOp::OPCODE
+            && aarch64_ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()) == Some(LR)
+        {
+            return aarch64_ops::imm(ctx, op).unwrap_or(0);
+        }
+        return 0;
+    }
+    0
+}
+
+/// Turn every `ldr_stack_arg rd, #offset` (an incoming stack argument,
+/// addressed relative to sp at function entry) into a plain sp-relative
+/// load at `offset + frame_bytes`, so it can sit anywhere after the
+/// prologue — in particular after the register allocator's spill stores,
+/// which must not run before the frame exists.
+fn rewrite_stack_arg_loads(ctx: &mut Context, func: FuncOp, frame_bytes: u64) {
+    let blocks: Vec<_> = func.get_region(ctx).deref(ctx).iter(ctx).collect();
+    for block in blocks {
+        let insts: Vec<_> = block.deref(ctx).iter(ctx).collect();
+        for op in insts {
+            if aarch64_ops::opcode(ctx, op) != Some(aarch64_ops::LdrStackArgOp::OPCODE) {
+                continue;
+            }
+            let rd = aarch64_ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref())
+                .expect("ldr_stack_arg must define a destination register");
+            let offset = aarch64_ops::imm(ctx, op).unwrap_or(0);
+            aarch64_ops::ldr_sp_offset(ctx, rd, offset + frame_bytes).insert_before(ctx, op);
+            Operation::erase(op, ctx);
+        }
+    }
 }
 
 /// `add xd, sp, #imm` only encodes offsets up to 4095. Rewrite larger slot
@@ -148,6 +197,9 @@ fn sp_mem_reg_offset_form(
     }
 }
 
+/// Allocate the frame right after the link-register save (when there is
+/// one), before anything else in the entry block: every later sp-relative
+/// access, spill stores included, assumes the frame exists.
 fn insert_prologue(ctx: &mut Context, entry: Ptr<BasicBlock>, stack_size: u64) {
     let mut after = None;
     let mut cursor = entry.deref(ctx).get_head();
@@ -155,10 +207,9 @@ fn insert_prologue(ctx: &mut Context, entry: Ptr<BasicBlock>, stack_size: u64) {
         let Some(opcode) = aarch64_ops::opcode(ctx, op) else {
             break;
         };
-        let is_stack_arg_load = opcode == aarch64_ops::LdrStackArgOp::OPCODE;
         let is_lr_save = opcode == aarch64_ops::StrPreSpOp::OPCODE
             && aarch64_ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()) == Some(LR);
-        if !is_stack_arg_load && !is_lr_save {
+        if !is_lr_save {
             break;
         }
         after = Some(op);
@@ -299,12 +350,12 @@ mod tests {
     }
 
     #[test]
-    fn prologue_is_inserted_after_stack_arg_loads_and_lr_save_only() {
+    fn prologue_is_inserted_after_lr_save_only() {
         let mut ctx = context();
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
-        aarch64_ops::ldr_stack_arg(&mut ctx, Register::gpr(0), 0).insert_at_back(entry, &ctx);
         aarch64_ops::str_pre_sp(&mut ctx, LR, 16).insert_at_back(entry, &ctx);
+        aarch64_ops::ldr_stack_arg(&mut ctx, Register::gpr(0), 0).insert_at_back(entry, &ctx);
         aarch64_ops::str_pre_sp(&mut ctx, FP, 16).insert_at_back(entry, &ctx);
         aarch64_ops::mov(&mut ctx, Register::gpr(1), Register::gpr(0)).insert_at_back(entry, &ctx);
 
@@ -313,12 +364,78 @@ mod tests {
         assert_eq!(
             opcodes_and_imms(&ctx, entry),
             [
-                ("ldr_stack_arg".to_string(), Some(0)),
                 ("str_pre_sp".to_string(), Some(16)),
                 ("sub_sp_imm".to_string(), Some(4095)),
                 ("sub_sp_imm".to_string(), Some(905)),
+                ("ldr_stack_arg".to_string(), Some(0)),
                 ("str_pre_sp".to_string(), Some(16)),
                 ("mov".to_string(), None),
+            ]
+        );
+    }
+
+    /// Incoming stack arguments are addressed past the frame and the link
+    /// register save once those are in place, wherever the load ended up
+    /// (here: after a spill store the register allocator inserted).
+    #[test]
+    fn stack_arg_loads_are_rebased_past_the_frame_and_lr_save() {
+        let mut ctx = context();
+        let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+        let func = func(&mut ctx);
+        func.set_stack_size(&mut ctx, 32);
+        func.get_operation().insert_at_back(body, &ctx);
+        let entry = func.entry_block(&ctx);
+        aarch64_ops::str_pre_sp(&mut ctx, LR, 16).insert_at_back(entry, &ctx);
+        aarch64_ops::ldr_stack_arg(&mut ctx, Register::gpr(0), 0).insert_at_back(entry, &ctx);
+        aarch64_ops::str_sp_offset(&mut ctx, Register::gpr(0), 8).insert_at_back(entry, &ctx);
+        aarch64_ops::ldr_stack_arg(&mut ctx, Register::gpr(0), 8).insert_at_back(entry, &ctx);
+        aarch64_ops::ldr_post_sp(&mut ctx, LR, 16).insert_at_back(entry, &ctx);
+        aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
+
+        Aarch64FrameLowerPass
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        assert_eq!(
+            opcodes_and_imms(&ctx, entry),
+            [
+                ("str_pre_sp".to_string(), Some(16)),
+                ("sub_sp_imm".to_string(), Some(32)),
+                ("ldr_sp_offset".to_string(), Some(48)),
+                ("str_sp_offset".to_string(), Some(8)),
+                ("ldr_sp_offset".to_string(), Some(56)),
+                ("add_sp_imm".to_string(), Some(32)),
+                ("ldr_post_sp".to_string(), Some(16)),
+                ("ret".to_string(), None),
+            ]
+        );
+    }
+
+    /// A leaf function with no frame still sees its stack arguments past
+    /// the link-register save.
+    #[test]
+    fn stack_arg_loads_are_rebased_without_a_frame() {
+        let mut ctx = context();
+        let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+        let func = func(&mut ctx);
+        func.get_operation().insert_at_back(body, &ctx);
+        let entry = func.entry_block(&ctx);
+        aarch64_ops::str_pre_sp(&mut ctx, LR, 16).insert_at_back(entry, &ctx);
+        aarch64_ops::ldr_stack_arg(&mut ctx, Register::gpr(0), 8).insert_at_back(entry, &ctx);
+        aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
+
+        Aarch64FrameLowerPass
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        assert_eq!(
+            opcodes_and_imms(&ctx, entry),
+            [
+                ("str_pre_sp".to_string(), Some(16)),
+                ("ldr_sp_offset".to_string(), Some(24)),
+                ("ret".to_string(), None),
             ]
         );
     }

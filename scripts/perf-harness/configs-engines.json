@@ -1,0 +1,5 @@
+[
+  { "name": "baseline", "env": {} },
+  { "name": "eregalloc-c0", "env": { "CRABBIT_REGALLOC": "eregalloc", "CRABBIT_REGALLOC_ORACLE": "c0" } },
+  { "name": "eregalloc-c2", "env": { "CRABBIT_REGALLOC": "eregalloc", "CRABBIT_REGALLOC_ORACLE": "c2" } }
+]

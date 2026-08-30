@@ -251,13 +251,79 @@ fn block_contains_call(ctx: &Context, block: Ptr<BasicBlock>) -> bool {
     while let Some(op_ptr) = op {
         let op_obj = Operation::get_op_dyn(op_ptr, ctx);
         // `llvm.frem` lowers to a call to fmod/fmodf, so it clobbers the
-        // link register like any explicit call.
-        if op_obj.downcast_ref::<CallOp>().is_some() || op_obj.downcast_ref::<FRemOp>().is_some() {
+        // link register like any explicit call. Calls to the intrinsic
+        // declarations that select to inline instructions do not.
+        if let Some(call) = op_obj.downcast_ref::<CallOp>() {
+            let inline_intrinsic = match call.callee(ctx) {
+                CallOpCallable::Direct(name) => {
+                    saturating_fp_to_int_intrinsic(name.as_ref()).is_some()
+                        || fp_math_intrinsic(name.as_ref()).is_some()
+                }
+                CallOpCallable::Indirect(_) => false,
+            };
+            if !inline_intrinsic {
+                return true;
+            }
+        } else if op_obj.downcast_ref::<FRemOp>().is_some() {
             return true;
         }
         op = op_ptr.deref(ctx).get_next();
     }
     false
+}
+
+/// The bytes of outgoing stack-argument area a call with `args` needs,
+/// mirroring the register/stack split the call lowering performs: integers
+/// and pointers draw from x0-x7, FP scalars from v0-v7, 128-bit integers
+/// take two GPR slots, and overflow goes to 8-byte stack slots.
+fn outgoing_stack_bytes_for_call(ctx: &Context, args: &[Value]) -> u64 {
+    let mut next_gpr = 0u8;
+    let mut next_fpr = 0u8;
+    let mut stack = 0u64;
+    let mut take_gpr = |next_gpr: &mut u8, stack: &mut u64| {
+        if *next_gpr < 8 {
+            *next_gpr += 1;
+        } else {
+            *stack += 8;
+        }
+    };
+    for arg in args {
+        let ty = arg.get_type(ctx);
+        if fp_kind(ctx, ty).is_some() {
+            if next_fpr < 8 {
+                next_fpr += 1;
+            } else {
+                stack += 8;
+            }
+        } else if is_128_bit_integer(ctx, ty) {
+            take_gpr(&mut next_gpr, &mut stack);
+            take_gpr(&mut next_gpr, &mut stack);
+        } else {
+            take_gpr(&mut next_gpr, &mut stack);
+        }
+    }
+    stack
+}
+
+/// The largest outgoing stack-argument area any call in `blocks` needs.
+/// Like LLVM's fixed outgoing-argument area, it is reserved at the bottom
+/// of the frame (offset 0 from sp) for the whole function, so no call site
+/// has to move sp: a spill reload between argument setup and the `bl`
+/// would otherwise read through a shifted sp.
+fn max_outgoing_stack_bytes(ctx: &Context, blocks: &[Ptr<BasicBlock>]) -> u64 {
+    let mut max = 0u64;
+    for block in blocks {
+        let mut op = block.deref(ctx).get_head();
+        while let Some(op_ptr) = op {
+            let op_obj = Operation::get_op_dyn(op_ptr, ctx);
+            if let Some(call) = op_obj.downcast_ref::<CallOp>() {
+                let args = call.args(ctx);
+                max = max.max(outgoing_stack_bytes_for_call(ctx, &args));
+            }
+            op = op_ptr.deref(ctx).get_next();
+        }
+    }
+    align_to_16(max)
 }
 
 fn lower_function(
@@ -287,6 +353,12 @@ fn lower_function(
     let mut values = HashMap::<Value, LoweredValue>::new();
     let mut next_vreg = 0usize;
     let mut arg_copies: Vec<(Register, Register)> = Vec::new();
+    // The link-register save leads the entry block; frame lowering puts the
+    // frame allocation right after it and rebases the incoming stack
+    // argument loads below past both.
+    if has_call {
+        aarch64_ops::str_pre_sp(ctx, LR, 16).insert_at_back(entry, ctx);
+    }
     for (arg, location) in collect_entry_arguments(ctx, llvm_func)?
         .into_iter()
         .zip(abi.args)
@@ -312,9 +384,8 @@ fn lower_function(
             // Copy incoming ABI registers into virtual registers: the raw
             // x0..x7 are clobbered by the first call (or argument setup),
             // while a promoted argument value may live for the whole
-            // function. The copies are queued so the entry block keeps its
-            // stack-arg-loads/link-register-save prefix, which frame
-            // lowering inserts the stack adjustment after.
+            // function. The copies are queued after the stack-argument
+            // loads so those stay a contiguous prefix.
             AbiLocation::GprPair(lo, hi) => {
                 let lo_vreg = fresh_vreg(&mut next_vreg);
                 let hi_vreg = fresh_vreg(&mut next_vreg);
@@ -342,9 +413,6 @@ fn lower_function(
         }
     }
 
-    if has_call {
-        aarch64_ops::str_pre_sp(ctx, LR, 16).insert_at_back(entry, ctx);
-    }
     for (dst, src) in arg_copies {
         emit_move(ctx, entry, dst, src)?;
     }
@@ -364,7 +432,8 @@ fn lower_function(
 
     let mut next_literal = 0usize;
     let mut next_edge_block = 0usize;
-    let mut stack = StackAllocator::default();
+    // Frame slots start above the outgoing stack-argument area.
+    let mut stack = StackAllocator::new(max_outgoing_stack_bytes(ctx, &blocks));
     let sret_result_slot = if let AbiLocation::IndirectResult { reg } = abi.result {
         let sret_ptr_ty = word_ty(ctx);
         let slot = stack.allocate(ctx, sret_ptr_ty)?;
@@ -719,6 +788,54 @@ fn lower_function(
                     values.insert(result, lowered);
                     continue;
                 }
+                // Float math with a single-instruction lowering arrives as
+                // calls to `llvm_<op>_f{32,64}` declarations (sqrt, fabs,
+                // the rounding family, min/max); select the FP instruction
+                // instead of emitting an unresolvable call.
+                if let CallOpCallable::Direct(name) = &callee
+                    && let Some(intrinsic) = fp_math_intrinsic(name.as_ref())
+                {
+                    let result = call.get_operation().deref(ctx).get_result(0);
+                    let fp = fp_kind(ctx, result.get_type(ctx)).ok_or_else(|| {
+                        input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                            "float math intrinsic `{name}` on non-scalar-float type {}",
+                            pliron::printable::Printable::disp(&result.get_type(ctx), ctx)
+                        )))
+                    })?;
+                    let mut operands = Vec::with_capacity(args.len());
+                    for arg in &args {
+                        let lowered = lookup_value(ctx, &values, *arg)?;
+                        operands.push(materialize_fp(
+                            ctx,
+                            insert_block,
+                            lowered,
+                            fp,
+                            &mut next_vreg,
+                            "float math intrinsic argument",
+                        )?);
+                    }
+                    let dst = fresh_fpr(&mut next_vreg, fp);
+                    match (intrinsic, operands.as_slice()) {
+                        (FpMathIntrinsic::Unary(d, s), [src]) => {
+                            let opcode = if fp == FpKind::F64 { d } else { s };
+                            aarch64_ops::unary(ctx, opcode, dst.clone(), src.clone())
+                                .insert_at_back(insert_block, ctx);
+                        }
+                        (FpMathIntrinsic::Binary(d, s), [lhs, rhs]) => {
+                            let opcode = if fp == FpKind::F64 { d } else { s };
+                            aarch64_ops::binary(ctx, opcode, dst.clone(), lhs.clone(), rhs.clone())
+                                .insert_at_back(insert_block, ctx);
+                        }
+                        _ => {
+                            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                                "float math intrinsic `{name}` with {} arguments",
+                                args.len()
+                            ))));
+                        }
+                    }
+                    values.insert(result, LoweredValue::Reg(dst));
+                    continue;
+                }
                 let callee_ptr = if let CallOpCallable::Indirect(callee_value) = &callee {
                     let lowered = lookup_value(ctx, &values, *callee_value)?;
                     Some(materialize_pointer(
@@ -814,11 +931,9 @@ fn lower_function(
                         push_gpr(src, &mut arg_moves, &mut next_gpr, &mut next_stack);
                     }
                 }
-                let outgoing_stack_size = align_to_16(next_stack);
-                if outgoing_stack_size > 0 {
-                    aarch64_ops::sub_sp_imm(ctx, outgoing_stack_size)
-                        .insert_at_back(insert_block, ctx);
-                }
+                // The stack slots land in the function's reserved outgoing
+                // area at the bottom of the frame; sp does not move.
+                debug_assert!(align_to_16(next_stack) <= stack.outgoing_area_bytes());
                 if let Some(callee_ptr) = &callee_ptr {
                     // x16 is an intra-procedure-call scratch register outside
                     // the allocatable set, so it survives the argument moves.
@@ -845,9 +960,7 @@ fn lower_function(
                     }
                 }
                 if let Some(slot) = indirect_result_slot {
-                    // sp is already lowered by the outgoing stack-argument
-                    // area here, so compensate to reach the frame slot.
-                    aarch64_ops::add_sp_offset(ctx, X8, slot.offset + outgoing_stack_size)
+                    aarch64_ops::add_sp_offset(ctx, X8, slot.offset)
                         .insert_at_back(insert_block, ctx);
                 }
                 match callee {
@@ -857,10 +970,6 @@ fn lower_function(
                     CallOpCallable::Indirect(_) => {
                         aarch64_ops::blr(ctx, X16).insert_at_back(insert_block, ctx);
                     }
-                }
-                if outgoing_stack_size > 0 {
-                    aarch64_ops::add_sp_imm(ctx, outgoing_stack_size)
-                        .insert_at_back(insert_block, ctx);
                 }
                 if let Some(result) = result {
                     let lowered = match result_location.unwrap() {
@@ -1076,13 +1185,21 @@ fn lower_function(
                     values.insert(result, LoweredValue::Imm(imm));
                     continue;
                 }
-                // Arithmetic shift right needs a sign-extended left operand:
-                // the (signless) type does not carry the signedness, the op
-                // does.
-                let lhs_ty = if kind == BinaryKind::AShr {
+                // Arithmetic shift right and signed division/remainder need
+                // sign-extended operands: the 64-bit `sdiv`/`asr` forms are
+                // used for every width, and the (signless) type does not
+                // carry the signedness, the op does.
+                let signed_operands =
+                    matches!(kind, BinaryKind::AShr | BinaryKind::SDiv | BinaryKind::SRem);
+                let lhs_ty = if signed_operands {
                     signed_variant_ty(ctx, lhs.get_type(ctx))
                 } else {
                     lhs.get_type(ctx)
+                };
+                let rhs_ty = if matches!(kind, BinaryKind::SDiv | BinaryKind::SRem) {
+                    signed_variant_ty(ctx, rhs.get_type(ctx))
+                } else {
+                    rhs.get_type(ctx)
                 };
                 let lhs = materialize_typed(
                     ctx,
@@ -1096,7 +1213,7 @@ fn lower_function(
                     ctx,
                     insert_block,
                     rhs_value,
-                    rhs.get_type(ctx),
+                    rhs_ty,
                     &mut next_vreg,
                     "binary rhs",
                 )?;
@@ -1498,12 +1615,24 @@ pub(super) struct StackSlot {
     pub(super) offset: u64,
 }
 
-#[derive(Default)]
 struct StackAllocator {
+    /// The outgoing stack-argument area reserved below every frame slot.
+    outgoing_area: u64,
     next_offset: u64,
 }
 
 impl StackAllocator {
+    fn new(outgoing_area: u64) -> Self {
+        Self {
+            outgoing_area,
+            next_offset: outgoing_area,
+        }
+    }
+
+    fn outgoing_area_bytes(&self) -> u64 {
+        self.outgoing_area
+    }
+
     fn allocate(
         &mut self,
         ctx: &Context,
@@ -2424,8 +2553,13 @@ fn int_to_fp(
 ) -> STAIRResult<LoweredValue> {
     let src_ty = value.get_type(ctx);
     if is_128_bit_integer(ctx, src_ty) {
+        // Unreachable from the crabbit importer, which lowers 128-bit
+        // int-to-float casts to the `__floattidf`-family libcalls before
+        // isel; kept as a guard for hand-built LLVM-dialect input.
         return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-            "128-bit integer to floating-point conversion".to_string()
+            "128-bit integer to floating-point conversion (lower to the __floattidf-family \
+             libcalls before isel)"
+                .to_string()
         )));
     }
     let fp = fp_kind(ctx, result.get_type(ctx)).ok_or_else(|| {
@@ -2482,10 +2616,14 @@ fn fp_to_int(
     let use_64 = match width {
         64 => true,
         32 => false,
+        // i128 destinations are unreachable from the crabbit importer, which
+        // lowers 128-bit float-to-int casts to the `__fixdfti`-family
+        // libcalls plus an explicit clamp before isel.
         other => {
             return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                 "saturating float-to-int conversion to i{other} (only 32- and 64-bit \
-                 destinations have a matching fcvtz form)"
+                 destinations have a matching fcvtz form; lower i128 to the \
+                 __fixdfti-family libcalls before isel)"
             ))));
         }
     };
@@ -2503,6 +2641,46 @@ fn fp_to_int(
     let dst = fresh_vreg(next_vreg);
     aarch64_ops::unary(ctx, opcode, dst, src).insert_at_back(block, ctx);
     Ok(LoweredValue::Reg(dst))
+}
+
+/// A float math intrinsic with a one-instruction AArch64 lowering, as the
+/// `(d form, s form)` opcode pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FpMathIntrinsic {
+    Unary(aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode),
+    Binary(aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode),
+}
+
+/// The `llvm_<op>_f{32,64}` declarations the importer routes float math
+/// through (mirroring LLVM's `llvm.<op>.f32` intrinsics): `sqrt`, `fabs`,
+/// `floor`/`ceil`/`trunc`/`round`/`rint` and `minnum`/`maxnum`/`minimum`/
+/// `maximum`. Transcendentals (`exp2` and friends) never come here: the
+/// importer emits libm calls for those.
+pub(super) fn fp_math_intrinsic(name: &str) -> Option<FpMathIntrinsic> {
+    use FpMathIntrinsic::{Binary, Unary};
+    use aarch64_ops::Aarch64Opcode as Opc;
+    let op = name.strip_prefix("llvm_")?;
+    let op = op
+        .strip_suffix("_f32")
+        .or_else(|| op.strip_suffix("_f64"))?;
+    Some(match op {
+        "sqrt" => Unary(Opc::FsqrtD, Opc::FsqrtS),
+        "fabs" => Unary(Opc::FabsD, Opc::FabsS),
+        "floor" => Unary(Opc::FrintmD, Opc::FrintmS),
+        "ceil" => Unary(Opc::FrintpD, Opc::FrintpS),
+        "trunc" => Unary(Opc::FrintzD, Opc::FrintzS),
+        // Rust `round`: half away from zero.
+        "round" => Unary(Opc::FrintaD, Opc::FrintaS),
+        // Rust `round_ties_even`.
+        "rint" => Unary(Opc::FrintnD, Opc::FrintnS),
+        // IEEE minNum/maxNum (Rust `min`/`max`): a NaN operand loses.
+        "minnum" => Binary(Opc::FminnmD, Opc::FminnmS),
+        "maxnum" => Binary(Opc::FmaxnmD, Opc::FmaxnmS),
+        // IEEE-2019 minimum/maximum (Rust `minimum`/`maximum`): NaN wins.
+        "minimum" => Binary(Opc::FminD, Opc::FminS),
+        "maximum" => Binary(Opc::FmaxD, Opc::FmaxS),
+        _ => return None,
+    })
 }
 
 /// The `llvm_fptosi_sat_iN_fM` / `llvm_fptoui_sat_iN_fM` intrinsic family

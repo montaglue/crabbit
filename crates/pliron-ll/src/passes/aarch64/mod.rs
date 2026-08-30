@@ -52,6 +52,18 @@ pub use self::target::TargetOs;
 /// passes are shared. Translation to object-container bytes happens outside
 /// the pipeline, in [write_macho_object_from_ir] / [write_elf_object_from_ir].
 pub fn pipeline(os: TargetOs) -> Passes {
+    pipeline_with_allocator(os, Aarch64RegisterAllocatePass)
+}
+
+/// [pipeline] with `allocator` in the register-allocation slot (between
+/// `aarch64-target-opts-pre-ra` and `aarch64-frame-lower`). `allocator`
+/// must satisfy [Aarch64RegisterAllocatePass]'s post-conditions: every
+/// virtual register rewritten to a physical register or a spill-slot access
+/// through the reserved scratch registers, and `FuncOp::stack_size` raised
+/// by the spill area. This is the seam through which research allocators
+/// (e.g. the eregalloc engine, which lives in a crate that depends on this
+/// one and so cannot be named here) enter the pipeline.
+pub fn pipeline_with_allocator(os: TargetOs, allocator: impl Pass + 'static) -> Passes {
     let mut passes = Passes::default();
     passes.add_pass(VerifyLlvmForAarch64Pass::new(os));
     passes.add_pass(LlvmAarch64AbiPass::new(os));
@@ -59,7 +71,7 @@ pub fn pipeline(os: TargetOs) -> Passes {
     passes.add_pass(Aarch64LegalizePass);
     passes.add_pass(Aarch64MachineCfgCleanupPass);
     passes.add_pass(Aarch64TargetOptsPreRaPass);
-    passes.add_pass(Aarch64RegisterAllocatePass);
+    passes.add_pass(allocator);
     passes.add_pass(Aarch64FrameLowerPass);
     passes.add_pass(Aarch64PostRaOptsPass);
     passes.add_pass(Aarch64BlockPlacementPass);
@@ -102,6 +114,7 @@ mod tests {
     #[allow(unused_imports)]
     use pliron::builtin::op_interfaces::{
         AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+        SymbolOpInterface as _,
     };
     #[allow(unused_imports)]
     use pliron_llvm::op_interfaces::{
@@ -122,14 +135,15 @@ mod tests {
                 ops::GepIndex,
                 ops::{
                     AddOp, AllocaOp, BrOp, CondBrOp, FuncOp, GetElementPtrOp, LoadOp,
-                    ReturnOp, StoreOp,
+                    ReturnOp, SDivOp, SRemOp, StoreOp, UDivOp,
                 },
                 types::{ArrayType, FuncType},
             },
             macho,
         },
-        ir::{basic_block::BasicBlock, op::Op},
+        ir::{basic_block::BasicBlock, op::Op, value::Value},
         linked_list::ContainsLinkedList,
+        r#type::TypeHandle,
         utils::apint::APInt,
     };
 
@@ -288,6 +302,327 @@ mod tests {
         let object = aarch64_macho_lower(&mut ctx, module.get_operation()).unwrap();
         assert_eq!(object.symbols(&ctx)[0].name, "_ninth");
         assert!(!object.text(&ctx).is_empty());
+    }
+
+    /// The `aarch64.func` the pipeline produced for `module`, after running
+    /// the passes up to and including `last`.
+    fn machine_function_after(
+        ctx: &mut Context,
+        module: builtin::ops::ModuleOp,
+        mut passes: Passes,
+    ) -> aarch64::ops::FuncOp {
+        let root = module.get_operation();
+        passes
+            .run(root, ctx, &mut AnalysisManager::default())
+            .unwrap();
+        let machine_body = root
+            .deref(ctx)
+            .get_region(0)
+            .deref(ctx)
+            .get_head()
+            .unwrap();
+        machine_body
+            .deref(ctx)
+            .iter(ctx)
+            .find_map(|op| util::cast_operation::<aarch64::ops::FuncOp>(ctx, op))
+            .unwrap()
+    }
+
+    fn isel_passes() -> Passes {
+        let mut passes = Passes::default();
+        passes.add_pass(VerifyLlvmForAarch64Pass::new(TargetOs::Linux));
+        passes.add_pass(LlvmAarch64AbiPass::new(TargetOs::Linux));
+        passes.add_pass(LlvmToAarch64IselPass);
+        passes
+    }
+
+    fn block_mnemonics(ctx: &Context, block: Ptr<BasicBlock>) -> Vec<&'static str> {
+        block
+            .deref(ctx)
+            .iter(ctx)
+            .filter_map(|op| aarch64::ops::mnemonic(ctx, op))
+            .collect()
+    }
+
+    /// The mnemonic of the instruction in `block` defining `reg`.
+    fn defining_mnemonic(
+        ctx: &Context,
+        block: Ptr<BasicBlock>,
+        reg: aarch64::registers::Register,
+    ) -> Option<&'static str> {
+        block.deref(ctx).iter(ctx).find_map(|op| {
+            (aarch64::ops::reg(ctx, op, aarch64::ops::ATTR_KEY_AARCH64_RD.as_ref()) == Some(reg))
+                .then(|| aarch64::ops::mnemonic(ctx, op))
+                .flatten()
+        })
+    }
+
+    fn int_binary_module(
+        ctx: &mut Context,
+        width: u32,
+        build: fn(&mut Context, Value, Value) -> Ptr<Operation>,
+    ) -> builtin::ops::ModuleOp {
+        let module = builtin::ops::ModuleOp::new(ctx, "test".try_into().unwrap());
+        let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
+        let int_ty =
+            builtin::types::IntegerType::get(ctx, width, builtin::types::Signedness::Signless);
+        let func_ty = FuncType::get(ctx, int_ty.into(), vec![int_ty.into(), int_ty.into()], false);
+        let func = FuncOp::new(ctx, "binop".try_into().unwrap(), func_ty);
+        func.set_attr_llvm_function_linkage(ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(ctx);
+        func.get_operation().insert_at_back(body, ctx);
+        let entry = func.get_entry_block(ctx).unwrap();
+        let args: Vec<_> = entry.deref(ctx).arguments().collect();
+        let op = build(ctx, args[0], args[1]);
+        op.insert_at_back(entry, ctx);
+        let result = op.deref(ctx).get_result(0);
+        ReturnOp::new(ctx, Some(result))
+            .get_operation()
+            .insert_at_back(entry, ctx);
+        module
+    }
+
+    /// Signed division and remainder run on the 64-bit `sdiv`, so a
+    /// narrower dividend/divisor must be sign-extended first: the
+    /// zero-extended `-7i32 / 3` would otherwise give 1431655763. The
+    /// sign-extension sequence ends in a `sub` (`(x ^ sign) - sign`); the
+    /// unsigned forms only mask (`and`).
+    #[test]
+    fn narrow_signed_division_sign_extends_both_operands() {
+        for width in [8u32, 16, 32] {
+            for (build, div_mnemonic) in [
+                (
+                    (|ctx: &mut Context, l, r| SDivOp::new(ctx, l, r).get_operation())
+                        as fn(&mut Context, Value, Value) -> Ptr<Operation>,
+                    "sdiv",
+                ),
+                (
+                    |ctx: &mut Context, l, r| SRemOp::new(ctx, l, r).get_operation(),
+                    "sdiv",
+                ),
+            ] {
+                let mut ctx = context();
+                let module = int_binary_module(&mut ctx, width, build);
+                let func = machine_function_after(&mut ctx, module, isel_passes());
+                let entry = func.entry_block(&ctx);
+                let div = entry
+                    .deref(&ctx)
+                    .iter(&ctx)
+                    .find(|op| aarch64::ops::mnemonic(&ctx, *op) == Some(div_mnemonic))
+                    .expect("signed division selects sdiv");
+                for key in [
+                    aarch64::ops::ATTR_KEY_AARCH64_RN.as_ref(),
+                    aarch64::ops::ATTR_KEY_AARCH64_RM.as_ref(),
+                ] {
+                    let operand = aarch64::ops::reg(&ctx, div, key).unwrap();
+                    assert_eq!(
+                        defining_mnemonic(&ctx, entry, operand),
+                        Some("sub"),
+                        "i{width} {div_mnemonic} operand {key} is not sign-extended"
+                    );
+                }
+            }
+        }
+
+        let mut ctx = context();
+        let module = int_binary_module(&mut ctx, 32, |ctx, l, r| {
+            UDivOp::new(ctx, l, r).get_operation()
+        });
+        let func = machine_function_after(&mut ctx, module, isel_passes());
+        let entry = func.entry_block(&ctx);
+        let div = entry
+            .deref(&ctx)
+            .iter(&ctx)
+            .find(|op| aarch64::ops::mnemonic(&ctx, *op) == Some("udiv"))
+            .unwrap();
+        let rn = aarch64::ops::reg(&ctx, div, aarch64::ops::ATTR_KEY_AARCH64_RN.as_ref()).unwrap();
+        assert_eq!(defining_mnemonic(&ctx, entry, rn), Some("and"));
+    }
+
+    /// A call with stack-passed arguments stores them into the outgoing
+    /// area reserved at the bottom of the caller's frame; sp never moves
+    /// around the call (a spill reload between the argument stores and the
+    /// `bl` would otherwise read through a shifted sp), and the callee
+    /// loads them past its own frame and link-register save.
+    #[test]
+    fn ten_integer_args_use_the_reserved_outgoing_area() {
+        let mut ctx = context();
+        let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+        let i64_ty =
+            builtin::types::IntegerType::get(&mut ctx, 64, builtin::types::Signedness::Signless);
+        let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![i64_ty.into(); 10], false);
+
+        // callee(a0..a9) -> a9 + a8: forces both stack arguments live past a
+        // call so the loads and the frame interact.
+        let callee = FuncOp::new(&mut ctx, "callee".try_into().unwrap(), func_ty);
+        callee.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        callee.get_or_create_entry_block(&mut ctx);
+        callee.get_operation().insert_at_back(body, &ctx);
+        let callee_entry = callee.get_entry_block(&ctx).unwrap();
+        let callee_args: Vec<_> = callee_entry.deref(&ctx).arguments().collect();
+        let sum = AddOp::new_with_overflow_flag(
+            &mut ctx,
+            callee_args[8],
+            callee_args[9],
+            Default::default(),
+        );
+        sum.get_operation().insert_at_back(callee_entry, &ctx);
+        let sum_result = sum.get_result(&ctx);
+        ReturnOp::new(&mut ctx, Some(sum_result))
+            .get_operation()
+            .insert_at_back(callee_entry, &ctx);
+
+        // caller(a0..a9) -> callee(a0..a9)
+        let caller = FuncOp::new(&mut ctx, "caller".try_into().unwrap(), func_ty);
+        caller.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        caller.get_or_create_entry_block(&mut ctx);
+        caller.get_operation().insert_at_back(body, &ctx);
+        let caller_entry = caller.get_entry_block(&ctx).unwrap();
+        let caller_args: Vec<_> = caller_entry.deref(&ctx).arguments().collect();
+        let call = crate::dialects::llvm::ops::CallOp::new(
+            &mut ctx,
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("callee".try_into().unwrap()),
+            func_ty,
+            caller_args,
+        );
+        call.get_operation().insert_at_back(caller_entry, &ctx);
+        let call_result = call.get_operation().deref(&ctx).get_result(0);
+        ReturnOp::new(&mut ctx, Some(call_result))
+            .get_operation()
+            .insert_at_back(caller_entry, &ctx);
+
+        let mut passes = isel_passes();
+        passes.add_pass(Aarch64LegalizePass);
+        passes.add_pass(Aarch64MachineCfgCleanupPass);
+        passes.add_pass(Aarch64TargetOptsPreRaPass);
+        passes.add_pass(Aarch64RegisterAllocatePass);
+        passes.add_pass(Aarch64FrameLowerPass);
+        let root = module.get_operation();
+        passes
+            .run(root, &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+        let machine_body = root
+            .deref(&ctx)
+            .get_region(0)
+            .deref(&ctx)
+            .get_head()
+            .unwrap();
+        let machine_funcs: Vec<_> = machine_body
+            .deref(&ctx)
+            .iter(&ctx)
+            .filter_map(|op| util::cast_operation::<aarch64::ops::FuncOp>(&ctx, op))
+            .collect();
+        let machine_callee = machine_funcs
+            .iter()
+            .find(|func| func.get_symbol_name(&ctx).to_string() == "callee")
+            .unwrap();
+        let machine_caller = machine_funcs
+            .iter()
+            .find(|func| func.get_symbol_name(&ctx).to_string() == "caller")
+            .unwrap();
+
+        // Caller: the frame covers the 16-byte outgoing area, the prologue
+        // is the only sp adjustment before the `bl`, and the two stack
+        // arguments are stored at sp+0 and sp+8 right before the call.
+        assert!(machine_caller.stack_size(&ctx) >= 16);
+        let caller_entry = machine_caller.entry_block(&ctx);
+        let caller_insts: Vec<_> = caller_entry.deref(&ctx).iter(&ctx).collect();
+        let bl_index = caller_insts
+            .iter()
+            .position(|op| aarch64::ops::mnemonic(&ctx, *op) == Some("call"))
+            .expect("caller emits call");
+        let sp_adjusts_before_call = caller_insts[..bl_index]
+            .iter()
+            .filter(|op| {
+                matches!(
+                    aarch64::ops::mnemonic(&ctx, **op),
+                    Some("sub_sp_imm") | Some("add_sp_imm")
+                )
+            })
+            .count();
+        assert_eq!(sp_adjusts_before_call, 1, "only the prologue adjusts sp before the call");
+        let outgoing_stores: Vec<u64> = caller_insts[..bl_index]
+            .iter()
+            .filter(|op| aarch64::ops::mnemonic(&ctx, **op) == Some("str_sp_offset"))
+            .filter_map(|op| aarch64::ops::imm(&ctx, *op))
+            .filter(|imm| *imm < 16)
+            .collect();
+        assert_eq!(outgoing_stores, vec![0, 8]);
+
+        // Callee: after frame lowering the stack argument loads are plain
+        // sp-relative loads rebased past the frame; `ldr_stack_arg` is gone.
+        let callee_entry = machine_callee.entry_block(&ctx);
+        let callee_mnemonics = block_mnemonics(&ctx, callee_entry);
+        assert!(!callee_mnemonics.contains(&"ldr_stack_arg"), "{callee_mnemonics:?}");
+        let frame = machine_callee.stack_size(&ctx);
+        let arg_loads: Vec<u64> = callee_entry
+            .deref(&ctx)
+            .iter(&ctx)
+            .filter(|op| aarch64::ops::mnemonic(&ctx, *op) == Some("ldr_sp_offset"))
+            .filter_map(|op| aarch64::ops::imm(&ctx, op))
+            .filter(|imm| *imm >= frame)
+            .collect();
+        assert_eq!(arg_loads, vec![frame, frame + 8]);
+    }
+
+    /// `llvm_<op>_f{32,64}` calls select the FP instruction instead of a
+    /// call.
+    #[test]
+    fn fp_math_intrinsic_calls_select_fp_instructions() {
+        for (name, mnemonic, is_f32, binary) in [
+            ("llvm_sqrt_f64", "fsqrt_d", false, false),
+            ("llvm_sqrt_f32", "fsqrt_s", true, false),
+            ("llvm_fabs_f64", "fabs_d", false, false),
+            ("llvm_floor_f32", "frintm_s", true, false),
+            ("llvm_ceil_f64", "frintp_d", false, false),
+            ("llvm_trunc_f64", "frintz_d", false, false),
+            ("llvm_round_f64", "frinta_d", false, false),
+            ("llvm_rint_f32", "frintn_s", true, false),
+            ("llvm_minnum_f64", "fminnm_d", false, true),
+            ("llvm_maxnum_f32", "fmaxnm_s", true, true),
+            ("llvm_minimum_f64", "fmin_d", false, true),
+            ("llvm_maximum_f64", "fmax_d", false, true),
+        ] {
+            let mut ctx = context();
+            let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+            let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+            let fp_ty: TypeHandle = if is_f32 {
+                FP32Type::get(&ctx).into()
+            } else {
+                crate::dialects::builtin::types::FP64Type::get(&ctx).into()
+            };
+            let arity = if binary { 2 } else { 1 };
+            let func_ty = FuncType::get(&mut ctx, fp_ty, vec![fp_ty; arity], false);
+            let decl = FuncOp::new(&mut ctx, name.try_into().unwrap(), func_ty);
+            decl.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+            decl.get_operation().insert_at_back(body, &ctx);
+
+            let func = FuncOp::new(&mut ctx, "user".try_into().unwrap(), func_ty);
+            func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+            func.get_or_create_entry_block(&mut ctx);
+            func.get_operation().insert_at_back(body, &ctx);
+            let entry = func.get_entry_block(&ctx).unwrap();
+            let args: Vec<_> = entry.deref(&ctx).arguments().collect();
+            let call = crate::dialects::llvm::ops::CallOp::new(
+                &mut ctx,
+                pliron::builtin::op_interfaces::CallOpCallable::Direct(name.try_into().unwrap()),
+                func_ty,
+                args,
+            );
+            call.get_operation().insert_at_back(entry, &ctx);
+            let result = call.get_operation().deref(&ctx).get_result(0);
+            ReturnOp::new(&mut ctx, Some(result))
+                .get_operation()
+                .insert_at_back(entry, &ctx);
+
+            let machine = machine_function_after(&mut ctx, module, isel_passes());
+            let mnemonics = block_mnemonics(&ctx, machine.entry_block(&ctx));
+            assert!(mnemonics.contains(&mnemonic), "{name}: {mnemonics:?}");
+            assert!(!mnemonics.contains(&"call"), "{name}: {mnemonics:?}");
+        }
+        assert!(llvm_to_aarch64_isel::fp_math_intrinsic("llvm_exp2_f32").is_none());
+        assert!(llvm_to_aarch64_isel::fp_math_intrinsic("sqrtf32").is_none());
     }
 
     #[test]

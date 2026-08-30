@@ -13,6 +13,7 @@
 //! arithmetic shift) re-sign-extend explicitly, and operations that can
 //! overflow the narrow width mask afterwards.
 
+
 use std::collections::HashMap;
 
 use thiserror::Error;
@@ -26,15 +27,20 @@ use pliron_llvm::op_interfaces::IsDeclaration;
 use crate::{
     context::{Context, Ptr},
     dialects::{
-        builtin::{attributes::IntegerAttr, ops::ModuleOp, types::IntegerType},
+        builtin::{
+            attributes::{FPDoubleAttr, FPSingleAttr, IntegerAttr},
+            ops::ModuleOp,
+            types::{FP32Type, FP64Type, IntegerType},
+        },
         llvm::{
-            attributes::ICmpPredicateAttr,
+            attributes::{FCmpPredicateAttr, ICmpPredicateAttr},
             ops::{
-                AShrOp, AddOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
-                FuncOp as LlvmFuncOp, GepIndex, GetElementPtrOp, ICmpOp, IntToPtrOp, LShrOp,
-                LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp, SExtOp, SRemOp,
-                ShlOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, UnreachableOp, XorOp,
-                ZExtOp,
+                AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
+                FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp,
+                FRemOp, FSubOp, FuncOp as LlvmFuncOp, GepIndex, GetElementPtrOp, GlobalOp,
+                ICmpOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp,
+                SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp,
+                UDivOp, UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp,
             },
             types::{ArrayType, PointerType},
         },
@@ -57,6 +63,8 @@ pub enum NvptxErr {
     UnsupportedType(String),
     #[error("value was used before NVPTX emission defined it: {0}")]
     UndefinedValue(String),
+    #[error("unsupported global for NVPTX emission: {0}")]
+    UnsupportedGlobal(String),
 }
 
 /// The PTX module header parameters: target SM and PTX ISA version.
@@ -100,16 +108,101 @@ pub fn write_ptx_from_ir(
         target.ptx_isa.0, target.ptx_isa.1, target.sm
     ));
 
+    // Module-level globals first: their state space decides how
+    // `llvm.addressof` materializes the address inside kernels.
+    let mut globals: HashMap<String, GlobalSpace> = HashMap::new();
+    for op_ptr in body.deref(ctx).iter(ctx) {
+        let op_obj = Operation::get_op_dyn(op_ptr, ctx);
+        if let Some(global) = op_obj.downcast_ref::<GlobalOp>() {
+            let (name, space, text) = emit_global(ctx, global)?;
+            globals.insert(name, space);
+            out.push_str(&text);
+        }
+    }
+
     for op_ptr in body.deref(ctx).iter(ctx) {
         let op_obj = Operation::get_op_dyn(op_ptr, ctx);
         if let Some(func) = op_obj.downcast_ref::<LlvmFuncOp>() {
-            if !func.is_declaration(ctx) {
-                out.push('\n');
-                out.push_str(&emit_kernel(ctx, func)?);
+            if func.is_declaration(ctx) {
+                continue;
             }
+            // Kernels are the externally visible definitions. Internal
+            // definitions are helpers the importer pulled in for inlining;
+            // a surviving call to one is reported by `emit_call`.
+            if func.get_attr_llvm_function_linkage(ctx)
+                .is_some_and(|linkage| {
+                    matches!(
+                        *linkage,
+                        crate::dialects::llvm::attributes::LinkageAttr::InternalLinkage
+                            | crate::dialects::llvm::attributes::LinkageAttr::PrivateLinkage
+                    )
+                })
+            {
+                continue;
+            }
+            out.push('\n');
+            out.push_str(&emit_kernel(ctx, func, &globals)?);
         }
     }
     Ok(out)
+}
+
+/// The PTX state space a module global lives in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlobalSpace {
+    /// `.global`: device memory, statically initialized.
+    Global,
+    /// `.shared`: per-CTA shared memory (a `#[link_section = ".shared"]`
+    /// static, docs/KERNEL-ABI.md).
+    Shared,
+}
+
+/// A module global as a PTX variable declaration.
+fn emit_global(ctx: &Context, global: &GlobalOp) -> STAIRResult<(String, GlobalSpace, String)> {
+    let name = global.get_symbol_name(ctx).to_string();
+    let Some(data) = crate::ll::global_data(ctx, global) else {
+        return Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
+            "`{name}` has no data initializer (extern globals are not supported in kernels)"
+        ))));
+    };
+    if !data.relocs.is_empty() {
+        return Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
+            "`{name}` holds pointers (relocations are not supported in kernels)"
+        ))));
+    }
+    let align = data.align.max(1);
+    let len = data.bytes.len().max(1);
+    let section = crate::ll::global_section(ctx, global);
+    match section.as_deref() {
+        Some(".shared") => {
+            if data.bytes.iter().any(|&b| b != 0) {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
+                    "`{name}` is in `.shared` but has a non-zero initializer \
+                     (shared memory cannot be statically initialized)"
+                ))));
+            }
+            Ok((
+                name.clone(),
+                GlobalSpace::Shared,
+                format!(".shared .align {align} .b8 {name}[{len}];\n"),
+            ))
+        }
+        Some(other) => Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
+            "`{name}` is in link section `{other}` (only `.shared` is meaningful in kernels)"
+        )))),
+        None => {
+            let init: Vec<String> = data.bytes.iter().map(|b| b.to_string()).collect();
+            let text = if data.bytes.is_empty() {
+                format!(".global .align {align} .b8 {name}[{len}];\n")
+            } else {
+                format!(
+                    ".global .align {align} .b8 {name}[{len}] = {{{}}};\n",
+                    init.join(", ")
+                )
+            };
+            Ok((name, GlobalSpace::Global, text))
+        }
+    }
 }
 
 // Register model ------------------------------------------------------------
@@ -119,6 +212,8 @@ enum RegClass {
     Pred,
     B32,
     B64,
+    F32,
+    F64,
 }
 
 impl RegClass {
@@ -127,6 +222,8 @@ impl RegClass {
             RegClass::Pred => "%p",
             RegClass::B32 => "%r",
             RegClass::B64 => "%rd",
+            RegClass::F32 => "%f",
+            RegClass::F64 => "%fd",
         }
     }
 
@@ -135,6 +232,8 @@ impl RegClass {
             RegClass::Pred => ".pred",
             RegClass::B32 => ".b32",
             RegClass::B64 => ".b64",
+            RegClass::F32 => ".f32",
+            RegClass::F64 => ".f64",
         }
     }
 
@@ -144,6 +243,8 @@ impl RegClass {
             RegClass::Pred => "pred",
             RegClass::B32 => "b32",
             RegClass::B64 => "b64",
+            RegClass::F32 => "f32",
+            RegClass::F64 => "f64",
         }
     }
 
@@ -152,11 +253,32 @@ impl RegClass {
             RegClass::Pred => 0,
             RegClass::B32 => 1,
             RegClass::B64 => 2,
+            RegClass::F32 => 3,
+            RegClass::F64 => 4,
+        }
+    }
+
+    fn is_float(self) -> bool {
+        matches!(self, RegClass::F32 | RegClass::F64)
+    }
+
+    /// The PTX type of a float class (`f32`/`f64`).
+    fn float_ty(self) -> &'static str {
+        match self {
+            RegClass::F32 => "f32",
+            RegClass::F64 => "f64",
+            _ => unreachable!("float_ty on an integer register class"),
         }
     }
 }
 
-const REG_CLASSES: [RegClass; 3] = [RegClass::Pred, RegClass::B32, RegClass::B64];
+const REG_CLASSES: [RegClass; 5] = [
+    RegClass::Pred,
+    RegClass::B32,
+    RegClass::B64,
+    RegClass::F32,
+    RegClass::F64,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Reg {
@@ -187,18 +309,30 @@ fn classify(ctx: &Context, ty: TypeHandle) -> STAIRResult<RegClass> {
     if ty_ref.downcast_ref::<PointerType>().is_some() {
         return Ok(RegClass::B64);
     }
+    if ty_ref.downcast_ref::<FP32Type>().is_some() {
+        return Ok(RegClass::F32);
+    }
+    if ty_ref.downcast_ref::<FP64Type>().is_some() {
+        return Ok(RegClass::F64);
+    }
     Err(input_error_noloc!(NvptxErr::UnsupportedType(
         ty.disp(ctx).to_string()
     )))
 }
 
-/// The integer bit width of `ty`; pointers count as 64.
+/// The bit width of `ty`; pointers count as 64.
 fn width_of(ctx: &Context, ty: TypeHandle) -> STAIRResult<u32> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         return Ok(int_ty.width() as u32);
     }
     if ty_ref.downcast_ref::<PointerType>().is_some() {
+        return Ok(64);
+    }
+    if ty_ref.downcast_ref::<FP32Type>().is_some() {
+        return Ok(32);
+    }
+    if ty_ref.downcast_ref::<FP64Type>().is_some() {
         return Ok(64);
     }
     Err(input_error_noloc!(NvptxErr::UnsupportedType(
@@ -213,6 +347,12 @@ fn size_of_ty(ctx: &Context, ty: TypeHandle) -> STAIRResult<u64> {
         return Ok((int_ty.width() as u64).div_ceil(8).max(1));
     }
     if ty_ref.downcast_ref::<PointerType>().is_some() {
+        return Ok(8);
+    }
+    if ty_ref.downcast_ref::<FP32Type>().is_some() {
+        return Ok(4);
+    }
+    if ty_ref.downcast_ref::<FP64Type>().is_some() {
         return Ok(8);
     }
     if let Some(array_ty) = ty_ref.downcast_ref::<ArrayType>() {
@@ -264,8 +404,9 @@ fn sreg_for_callee(name: &str) -> Option<&'static str> {
 
 struct FuncEmitter<'c> {
     ctx: &'c Context,
+    globals: &'c HashMap<String, GlobalSpace>,
     values: HashMap<Value, Reg>,
-    reg_counts: [usize; 3],
+    reg_counts: [usize; 5],
     /// Straight-line body text: labels and instructions.
     code: String,
     /// Edge blocks for conditional branches with block arguments; appended
@@ -276,7 +417,11 @@ struct FuncEmitter<'c> {
     block_labels: HashMap<Ptr<BasicBlock>, String>,
 }
 
-fn emit_kernel(ctx: &Context, func: &LlvmFuncOp) -> STAIRResult<String> {
+fn emit_kernel(
+    ctx: &Context,
+    func: &LlvmFuncOp,
+    globals: &HashMap<String, GlobalSpace>,
+) -> STAIRResult<String> {
     let name = func.get_symbol_name(ctx).to_string();
     let region = func
         .get_region(ctx)
@@ -289,8 +434,9 @@ fn emit_kernel(ctx: &Context, func: &LlvmFuncOp) -> STAIRResult<String> {
 
     let mut emitter = FuncEmitter {
         ctx,
+        globals,
         values: HashMap::new(),
-        reg_counts: [0; 3],
+        reg_counts: [0; 5],
         code: String::new(),
         edges: String::new(),
         next_edge: 0,
@@ -306,6 +452,8 @@ fn emit_kernel(ctx: &Context, func: &LlvmFuncOp) -> STAIRResult<String> {
         let (decl_ty, load_ty) = match class {
             RegClass::B32 => ("u32", "u32"),
             RegClass::B64 => ("u64", "u64"),
+            RegClass::F32 => ("f32", "f32"),
+            RegClass::F64 => ("f64", "f64"),
             RegClass::Pred => {
                 return Err(input_error_noloc!(NvptxErr::UnsupportedType(
                     "i1 kernel parameter".to_string()
@@ -428,6 +576,16 @@ impl<'c> FuncEmitter<'c> {
                 self.inst(format!("mov.u64 {reg}, {};", imm as u64));
                 reg
             }
+            RegClass::F32 => {
+                let reg = self.fresh(RegClass::F32);
+                self.inst(format!("mov.f32 {reg}, 0f{:08X};", imm as u32));
+                reg
+            }
+            RegClass::F64 => {
+                let reg = self.fresh(RegClass::F64);
+                self.inst(format!("mov.f64 {reg}, 0d{:016X};", imm as u64));
+                reg
+            }
         }
     }
 
@@ -467,19 +625,66 @@ impl<'c> FuncEmitter<'c> {
 
         if let Some(constant) = op_obj.downcast_ref::<crate::dialects::builtin::ops::ConstantOp>() {
             let attr = constant.get_value(ctx);
-            let attr = attr
-                .downcast_ref::<IntegerAttr>()
-                .ok_or_else(|| {
-                    input_error_noloc!(NvptxErr::UnsupportedOp(
-                        "non-integer constant".to_string()
-                    ))
-                })?;
             let result = constant.get_result(ctx);
             let width = width_of(ctx, result.get_type(ctx))?;
             let class = classify(ctx, result.get_type(ctx))?;
-            let imm = attr.value().to_u128() & width_mask(width);
-            let reg = self.materialize_const(class, imm);
+            // FP constants carry their IEEE bit pattern.
+            let imm = if let Some(fp32) = attr.downcast_ref::<FPSingleAttr>() {
+                pliron::utils::apfloat::Float::to_bits(fp32.0)
+            } else if let Some(fp64) = attr.downcast_ref::<FPDoubleAttr>() {
+                pliron::utils::apfloat::Float::to_bits(fp64.0)
+            } else if let Some(int) = attr.downcast_ref::<IntegerAttr>() {
+                int.value().to_u128()
+            } else {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "constant of unsupported attribute kind {attr:?}"
+                ))));
+            };
+            let reg = self.materialize_const(class, imm & width_mask(width));
             self.values.insert(result, reg);
+        } else if let Some(kind) = binary_float_kind(&*op_obj) {
+            self.emit_float_binary(op_ptr, kind)?;
+        } else if let Some(fneg) = op_obj.downcast_ref::<FNegOp>() {
+            let src = self.lookup(fneg.get_operand(ctx))?;
+            let dst = self.fresh(src.class);
+            self.inst(format!("neg.{} {dst}, {src};", src.class.float_ty()));
+            self.values.insert(fneg.get_result(ctx), dst);
+        } else if let Some(fcmp) = op_obj.downcast_ref::<FCmpOp>() {
+            self.emit_fcmp(fcmp)?;
+        } else if let Some(select) = op_obj.downcast_ref::<SelectOp>() {
+            self.emit_select(select)?;
+        } else if let Some(cast) = op_obj.downcast_ref::<SIToFPOp>() {
+            self.emit_int_to_float(cast.get_operand(ctx), cast.get_result(ctx), true)?;
+        } else if let Some(cast) = op_obj.downcast_ref::<UIToFPOp>() {
+            self.emit_int_to_float(cast.get_operand(ctx), cast.get_result(ctx), false)?;
+        } else if let Some(cast) = op_obj.downcast_ref::<FPToSIOp>() {
+            self.emit_float_to_int(cast.get_operand(ctx), cast.get_result(ctx), true)?;
+        } else if let Some(cast) = op_obj.downcast_ref::<FPToUIOp>() {
+            self.emit_float_to_int(cast.get_operand(ctx), cast.get_result(ctx), false)?;
+        } else if let Some(cast) = op_obj.downcast_ref::<FPExtOp>() {
+            let src = self.lookup(cast.get_operand(ctx))?;
+            let dst = self.fresh(RegClass::F64);
+            self.inst(format!("cvt.f64.f32 {dst}, {src};"));
+            self.values.insert(cast.get_result(ctx), dst);
+        } else if let Some(cast) = op_obj.downcast_ref::<FPTruncOp>() {
+            let src = self.lookup(cast.get_operand(ctx))?;
+            let dst = self.fresh(RegClass::F32);
+            self.inst(format!("cvt.rn.f32.f64 {dst}, {src};"));
+            self.values.insert(cast.get_result(ctx), dst);
+        } else if let Some(addr) = op_obj.downcast_ref::<AddressOfOp>() {
+            let name = addr.get_global_name(ctx).to_string();
+            let Some(space) = self.globals.get(&name).copied() else {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
+                    "address of `{name}`, which is not a global of the kernel module"
+                ))));
+            };
+            let dst = self.fresh(RegClass::B64);
+            self.inst(format!("mov.u64 {dst}, {name};"));
+            match space {
+                GlobalSpace::Shared => self.inst(format!("cvta.shared.u64 {dst}, {dst};")),
+                GlobalSpace::Global => self.inst(format!("cvta.global.u64 {dst}, {dst};")),
+            }
+            self.values.insert(addr.get_result(ctx), dst);
         } else if let Some(undef) = op_obj.downcast_ref::<UndefOp>() {
             let result = undef.get_result(ctx);
             let class = classify(ctx, result.get_type(ctx))?;
@@ -833,9 +1038,9 @@ impl<'c> FuncEmitter<'c> {
                             self.inst(format!("cvt.s64.s32 {wide}, {extended};"));
                             wide
                         }
-                        RegClass::Pred => {
+                        RegClass::Pred | RegClass::F32 | RegClass::F64 => {
                             return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                                "i1 gep index".to_string()
+                                "non-integer gep index".to_string()
                             )));
                         }
                     };
@@ -866,9 +1071,13 @@ impl<'c> FuncEmitter<'c> {
         }
         let class = classify(ctx, result.get_type(ctx))?;
         let dst = self.fresh(class);
-        // Sub-word loads zero-extend into the wider register, which is
-        // exactly the narrow-value invariant.
-        self.inst(format!("ld.u{width} {dst}, [{addr}];"));
+        if class.is_float() {
+            self.inst(format!("ld.{} {dst}, [{addr}];", class.float_ty()));
+        } else {
+            // Sub-word loads zero-extend into the wider register, which is
+            // exactly the narrow-value invariant.
+            self.inst(format!("ld.u{width} {dst}, [{addr}];"));
+        }
         self.values.insert(result, dst);
         Ok(())
     }
@@ -884,7 +1093,11 @@ impl<'c> FuncEmitter<'c> {
             )));
         }
         let src = self.lookup(value)?;
-        self.inst(format!("st.u{width} [{addr}], {src};"));
+        if src.class.is_float() {
+            self.inst(format!("st.{} [{addr}], {src};", src.class.float_ty()));
+        } else {
+            self.inst(format!("st.u{width} [{addr}], {src};"));
+        }
         Ok(())
     }
 
@@ -906,13 +1119,290 @@ impl<'c> FuncEmitter<'c> {
             self.values.insert(result, dst);
             return Ok(());
         }
-        if canonical == "nvvm_barrier0" {
-            self.inst("bar.sync 0;".to_string());
+        let operands: Vec<Value> = {
+            let op = call.get_operation().deref(ctx);
+            (0..op.get_num_operands()).map(|i| op.get_operand(i)).collect()
+        };
+        // Direct calls carry only the arguments as operands.
+        let args = operands;
+        let result = || call.get_operation().deref(ctx).get_result(0);
+
+        match canonical.as_str() {
+            "nvvm_barrier0" => {
+                self.inst("bar.sync 0;".to_string());
+                return Ok(());
+            }
+            "nvvm_membar_gl" => {
+                self.inst("membar.gl;".to_string());
+                return Ok(());
+            }
+            "nvvm_membar_cta" => {
+                self.inst("membar.cta;".to_string());
+                return Ok(());
+            }
+            "nvvm_membar_sys" => {
+                self.inst("membar.sys;".to_string());
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Atomics: `atom{.scope}.add.<ty> d, [a], b`.
+        let atomic = match canonical.as_str() {
+            "nvvm_atomic_add_gen_i" => Some(("", "add", "u32", RegClass::B32)),
+            "nvvm_atomic_add_gen_i_cta" => Some((".cta", "add", "u32", RegClass::B32)),
+            "nvvm_atomic_add_gen_i_sys" => Some((".sys", "add", "u32", RegClass::B32)),
+            "nvvm_atomic_add_gen_f" => Some(("", "add", "f32", RegClass::F32)),
+            "nvvm_atomic_add_gen_f_cta" => Some((".cta", "add", "f32", RegClass::F32)),
+            "nvvm_atomic_add_gen_ll" => Some(("", "add", "u64", RegClass::B64)),
+            "nvvm_atomic_add_gen_d" => Some(("", "add", "f64", RegClass::F64)),
+            "nvvm_atomic_max_gen_i" => Some(("", "max", "s32", RegClass::B32)),
+            "nvvm_atomic_min_gen_i" => Some(("", "min", "s32", RegClass::B32)),
+            "nvvm_atomic_max_gen_ui" => Some(("", "max", "u32", RegClass::B32)),
+            "nvvm_atomic_min_gen_ui" => Some(("", "min", "u32", RegClass::B32)),
+            "nvvm_atomic_and_gen_i" => Some(("", "and", "b32", RegClass::B32)),
+            "nvvm_atomic_or_gen_i" => Some(("", "or", "b32", RegClass::B32)),
+            "nvvm_atomic_xor_gen_i" => Some(("", "xor", "b32", RegClass::B32)),
+            "nvvm_atomic_exch_gen_i" => Some(("", "exch", "b32", RegClass::B32)),
+            _ => None,
+        };
+        if let Some((scope, op, ty, class)) = atomic {
+            if args.len() != 2 {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "`{callee}` expects (ptr, value), got {} operands",
+                    args.len()
+                ))));
+            }
+            let addr = self.lookup(args[0])?;
+            let value = self.lookup(args[1])?;
+            let dst = self.fresh(class);
+            self.inst(format!("atom{scope}.{op}.{ty} {dst}, [{addr}], {value};"));
+            self.values.insert(result(), dst);
             return Ok(());
         }
+
+        // Math: unary/binary float instructions.
+        let math: Option<(&str, RegClass, usize)> = match canonical.as_str() {
+            "nvvm_sqrt_rn_f" | "nvvm_sqrt_f" | "sqrt_f32" => Some(("sqrt.rn.f32", RegClass::F32, 1)),
+            "nvvm_sqrt_approx_f" => Some(("sqrt.approx.f32", RegClass::F32, 1)),
+            "nvvm_rsqrt_approx_f" => Some(("rsqrt.approx.f32", RegClass::F32, 1)),
+            "nvvm_ex2_approx_f" | "exp2_f32" => Some(("ex2.approx.f32", RegClass::F32, 1)),
+            "nvvm_lg2_approx_f" | "log2_f32" => Some(("lg2.approx.f32", RegClass::F32, 1)),
+            "nvvm_sin_approx_f" => Some(("sin.approx.f32", RegClass::F32, 1)),
+            "nvvm_cos_approx_f" => Some(("cos.approx.f32", RegClass::F32, 1)),
+            "nvvm_rcp_approx_f" => Some(("rcp.approx.f32", RegClass::F32, 1)),
+            "nvvm_fabs_f" | "fabs_f32" => Some(("abs.f32", RegClass::F32, 1)),
+            "nvvm_floor_f" | "floor_f32" => Some(("cvt.rmi.f32.f32", RegClass::F32, 1)),
+            "nvvm_ceil_f" | "ceil_f32" => Some(("cvt.rpi.f32.f32", RegClass::F32, 1)),
+            "nvvm_round_f" | "nvvm_rint_f" => Some(("cvt.rni.f32.f32", RegClass::F32, 1)),
+            "nvvm_trunc_f" | "trunc_f32" => Some(("cvt.rzi.f32.f32", RegClass::F32, 1)),
+            "nvvm_fmax_f" | "maxnum_f32" => Some(("max.f32", RegClass::F32, 2)),
+            "nvvm_fmin_f" | "minnum_f32" => Some(("min.f32", RegClass::F32, 2)),
+            "nvvm_fma_rn_f" | "fma_f32" => Some(("fma.rn.f32", RegClass::F32, 3)),
+            "nvvm_sqrt_rn_d" | "sqrt_f64" => Some(("sqrt.rn.f64", RegClass::F64, 1)),
+            "nvvm_rsqrt_approx_d" => Some(("rsqrt.approx.f64", RegClass::F64, 1)),
+            "nvvm_fabs_d" | "fabs_f64" => Some(("abs.f64", RegClass::F64, 1)),
+            "nvvm_floor_d" | "floor_f64" => Some(("cvt.rmi.f64.f64", RegClass::F64, 1)),
+            "nvvm_ceil_d" | "ceil_f64" => Some(("cvt.rpi.f64.f64", RegClass::F64, 1)),
+            "nvvm_fmax_d" | "maxnum_f64" => Some(("max.f64", RegClass::F64, 2)),
+            "nvvm_fmin_d" | "minnum_f64" => Some(("min.f64", RegClass::F64, 2)),
+            "nvvm_fma_rn_d" | "fma_f64" => Some(("fma.rn.f64", RegClass::F64, 3)),
+            _ => None,
+        };
+        if let Some((mnemonic, class, arity)) = math {
+            if args.len() != arity {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "`{callee}` expects {arity} operand(s), got {}",
+                    args.len()
+                ))));
+            }
+            let mut regs = Vec::new();
+            for arg in &args {
+                regs.push(self.lookup(*arg)?.to_string());
+            }
+            let dst = self.fresh(class);
+            self.inst(format!("{mnemonic} {dst}, {};", regs.join(", ")));
+            self.values.insert(result(), dst);
+            return Ok(());
+        }
+
         Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
-            "call to `{callee}` (only NVVM intrinsics are supported in kernels yet)"
+            "call to `{callee}` (only NVVM intrinsics are supported in kernels; \
+             device function calls are not implemented)"
         ))))
+    }
+
+    fn emit_float_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryFloatKind) -> STAIRResult<()> {
+        let ctx = self.ctx;
+        let (lhs, rhs, result) = {
+            let op_deref = op_ptr.deref(ctx);
+            (
+                op_deref.get_operand(0),
+                op_deref.get_operand(1),
+                op_deref.get_result(0),
+            )
+        };
+        let a = self.lookup(lhs)?;
+        let b = self.lookup(rhs)?;
+        let class = classify(ctx, result.get_type(ctx))?;
+        if !class.is_float() {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                "float arithmetic on a non-float type".to_string()
+            )));
+        }
+        let ty = class.float_ty();
+        let dst = self.fresh(class);
+        let mnemonic = match kind {
+            BinaryFloatKind::FAdd => format!("add.rn.{ty}"),
+            BinaryFloatKind::FSub => format!("sub.rn.{ty}"),
+            BinaryFloatKind::FMul => format!("mul.rn.{ty}"),
+            BinaryFloatKind::FDiv => format!("div.rn.{ty}"),
+            BinaryFloatKind::FRem => {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                    "frem has no PTX instruction (use fmod via intrinsics)".to_string()
+                )));
+            }
+        };
+        self.inst(format!("{mnemonic} {dst}, {a}, {b};"));
+        self.values.insert(result, dst);
+        Ok(())
+    }
+
+    fn emit_fcmp(&mut self, fcmp: &FCmpOp) -> STAIRResult<()> {
+        let ctx = self.ctx;
+        let lhs = fcmp.get_operation().deref(ctx).get_operand(0);
+        let rhs = fcmp.get_operation().deref(ctx).get_operand(1);
+        let result = fcmp.get_result(ctx);
+        let a = self.lookup(lhs)?;
+        let b = self.lookup(rhs)?;
+        let ty = a.class.float_ty();
+        let pred = self.fresh(RegClass::Pred);
+        let cmp = match fcmp.predicate(ctx) {
+            FCmpPredicateAttr::False => {
+                let zero = self.fresh(RegClass::B32);
+                self.inst(format!("mov.u32 {zero}, 0;"));
+                self.inst(format!("setp.ne.b32 {pred}, {zero}, 0;"));
+                self.values.insert(result, pred);
+                return Ok(());
+            }
+            FCmpPredicateAttr::True => {
+                let one = self.fresh(RegClass::B32);
+                self.inst(format!("mov.u32 {one}, 1;"));
+                self.inst(format!("setp.ne.b32 {pred}, {one}, 0;"));
+                self.values.insert(result, pred);
+                return Ok(());
+            }
+            FCmpPredicateAttr::OEQ => "eq",
+            FCmpPredicateAttr::OGT => "gt",
+            FCmpPredicateAttr::OGE => "ge",
+            FCmpPredicateAttr::OLT => "lt",
+            FCmpPredicateAttr::OLE => "le",
+            FCmpPredicateAttr::ONE => "ne",
+            FCmpPredicateAttr::ORD => "num",
+            FCmpPredicateAttr::UEQ => "equ",
+            FCmpPredicateAttr::UGT => "gtu",
+            FCmpPredicateAttr::UGE => "geu",
+            FCmpPredicateAttr::ULT => "ltu",
+            FCmpPredicateAttr::ULE => "leu",
+            FCmpPredicateAttr::UNE => "neu",
+            FCmpPredicateAttr::UNO => "nan",
+        };
+        self.inst(format!("setp.{cmp}.{ty} {pred}, {a}, {b};"));
+        self.values.insert(result, pred);
+        Ok(())
+    }
+
+    fn emit_select(&mut self, select: &SelectOp) -> STAIRResult<()> {
+        let ctx = self.ctx;
+        let op = select.get_operation();
+        let (cond, on_true, on_false) = {
+            let op = op.deref(ctx);
+            (op.get_operand(0), op.get_operand(1), op.get_operand(2))
+        };
+        let result = select.get_result(ctx);
+        let cond = self.lookup(cond)?;
+        let a = self.lookup(on_true)?;
+        let b = self.lookup(on_false)?;
+        if cond.class != RegClass::Pred {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                "select with a non-i1 condition".to_string()
+            )));
+        }
+        let class = classify(ctx, result.get_type(ctx))?;
+        let dst = self.fresh(class);
+        if class == RegClass::Pred {
+            // d = (c & a) | (!c & b)
+            let not_c = self.fresh(RegClass::Pred);
+            let t1 = self.fresh(RegClass::Pred);
+            let t2 = self.fresh(RegClass::Pred);
+            self.inst(format!("not.pred {not_c}, {cond};"));
+            self.inst(format!("and.pred {t1}, {cond}, {a};"));
+            self.inst(format!("and.pred {t2}, {not_c}, {b};"));
+            self.inst(format!("or.pred {dst}, {t1}, {t2};"));
+        } else {
+            self.inst(format!("selp.{} {dst}, {a}, {b}, {cond};", class.mov_suffix()));
+        }
+        self.values.insert(result, dst);
+        Ok(())
+    }
+
+    fn emit_int_to_float(&mut self, src_val: Value, result: Value, signed: bool) -> STAIRResult<()> {
+        let ctx = self.ctx;
+        let src = self.lookup(src_val)?;
+        let src_width = width_of(ctx, src_val.get_type(ctx))?;
+        let dst_class = classify(ctx, result.get_type(ctx))?;
+        if !dst_class.is_float() || src.class.is_float() {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                "int-to-float cast with wrong operand classes".to_string()
+            )));
+        }
+        let src = match src.class {
+            RegClass::Pred => {
+                let bit = self.fresh(RegClass::B32);
+                self.inst(format!("selp.b32 {bit}, 1, 0, {src};"));
+                bit
+            }
+            RegClass::B32 if signed => self.signed32(src, src_width),
+            _ => src,
+        };
+        let src_ty = match (src.class, signed) {
+            (RegClass::B64, true) => "s64",
+            (RegClass::B64, false) => "u64",
+            (_, true) => "s32",
+            (_, false) => "u32",
+        };
+        let dst = self.fresh(dst_class);
+        self.inst(format!("cvt.rn.{}.{src_ty} {dst}, {src};", dst_class.float_ty()));
+        self.values.insert(result, dst);
+        Ok(())
+    }
+
+    fn emit_float_to_int(&mut self, src_val: Value, result: Value, signed: bool) -> STAIRResult<()> {
+        let ctx = self.ctx;
+        let src = self.lookup(src_val)?;
+        let dst_width = width_of(ctx, result.get_type(ctx))?;
+        let dst_class = classify(ctx, result.get_type(ctx))?;
+        if !src.class.is_float() || dst_class.is_float() || dst_class == RegClass::Pred {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                "float-to-int cast with wrong operand classes".to_string()
+            )));
+        }
+        let dst_ty = match (dst_class, signed) {
+            (RegClass::B64, true) => "s64",
+            (RegClass::B64, false) => "u64",
+            (_, true) => "s32",
+            (_, false) => "u32",
+        };
+        let dst = self.fresh(dst_class);
+        self.inst(format!("cvt.rzi.{dst_ty}.{} {dst}, {src};", src.class.float_ty()));
+        // Narrow results keep the zero-extended invariant (Rust `as` casts
+        // saturate, then truncate to the narrow width via `cvt` semantics;
+        // PTX cvt already saturates to the destination type).
+        if dst_class == RegClass::B32 {
+            self.mask32(dst, dst_width);
+        }
+        self.values.insert(result, dst);
+        Ok(())
     }
 
     fn emit_cond_br(&mut self, cond_br: &CondBrOp) -> STAIRResult<()> {
@@ -1016,6 +1506,31 @@ enum BinaryIntKind {
     Shl,
     LShr,
     AShr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BinaryFloatKind {
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FRem,
+}
+
+fn binary_float_kind(any: &dyn Op) -> Option<BinaryFloatKind> {
+    if any.downcast_ref::<FAddOp>().is_some() {
+        Some(BinaryFloatKind::FAdd)
+    } else if any.downcast_ref::<FSubOp>().is_some() {
+        Some(BinaryFloatKind::FSub)
+    } else if any.downcast_ref::<FMulOp>().is_some() {
+        Some(BinaryFloatKind::FMul)
+    } else if any.downcast_ref::<FDivOp>().is_some() {
+        Some(BinaryFloatKind::FDiv)
+    } else if any.downcast_ref::<FRemOp>().is_some() {
+        Some(BinaryFloatKind::FRem)
+    } else {
+        None
+    }
 }
 
 fn binary_int_kind(any: &dyn Op) -> Option<BinaryIntKind> {

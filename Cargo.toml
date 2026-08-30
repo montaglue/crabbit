@@ -33,9 +33,20 @@ pliron-inspect-driver = { path = "../pliron-inspect/crates/driver", version = "0
 # dialect or crabbit's own `cmir`, never both.
 dialect-mir = { path = "../cuda-oxide/crates/dialect-mir", version = "0.2.1" }
 mir-lower = { path = "../cuda-oxide/crates/mir-lower", version = "0.2.1" }
+# cuda-oxide's textual LLVM IR exporter: the bridge from crabbit's kernel
+# module to the LLVM NVPTX toolchain (the "rust-llvm" comparison arm).
+llvm-export = { path = "../cuda-oxide/crates/llvm-export", version = "0.2.1" }
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }
+# Research engines, consumed as sibling path deps (the cuda-oxide pattern;
+# see eregalloc/INTEGRATION-CONTRACT.md). Only the `crabbit` root crate may
+# depend on them: eregalloc-passes itself depends on pliron-ll, so a
+# pliron-ll → eregalloc-passes edge would be a package cycle. The CMT crates
+# keep their upstream package names; the `package =` rename gives the
+# `cmt_*` idents.
+eregalloc-passes = { path = "../eregalloc/eregalloc-passes" }
+cmt-spectral-cfg = { path = "../combinatorial-matrix-theory/compilers/crates/spectral-cfg", package = "spectral-cfg" }
 crabbit = { path = "crates/crabbit", version = "0.1.0" }
 crabbit-mir = { path = "crates/mir", version = "0.1.0" }
 awint = "0"

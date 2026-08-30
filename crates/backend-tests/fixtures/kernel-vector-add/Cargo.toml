@@ -1,0 +1,21 @@
+[package]
+name = "kernel-vector-add"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+stair-device = { path = "../../../../../kernel-corpus/crates/stair-device" }
+
+[profile.dev]
+overflow-checks = false
+panic = "abort"
+
+[profile.release]
+overflow-checks = false
+panic = "abort"
+
+[workspace]

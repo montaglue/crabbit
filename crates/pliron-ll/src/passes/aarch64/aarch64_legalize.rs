@@ -80,6 +80,10 @@ fn expected_operand_classes(
         // FP data-processing: everything in the FP file.
         Opc::FaddD | Opc::FaddS | Opc::FsubD | Opc::FsubS | Opc::FmulD | Opc::FmulS
         | Opc::FdivD | Opc::FdivS | Opc::FnegD | Opc::FnegS | Opc::FcmpD | Opc::FcmpS
+        | Opc::FabsD | Opc::FabsS | Opc::FsqrtD | Opc::FsqrtS | Opc::FrintmD | Opc::FrintmS
+        | Opc::FrintpD | Opc::FrintpS | Opc::FrintzD | Opc::FrintzS | Opc::FrintaD
+        | Opc::FrintaS | Opc::FrintnD | Opc::FrintnS | Opc::FminnmD | Opc::FminnmS
+        | Opc::FmaxnmD | Opc::FmaxnmS | Opc::FminD | Opc::FminS | Opc::FmaxD | Opc::FmaxS
         | Opc::FcvtDS | Opc::FcvtSD | Opc::FmovD | Opc::FmovS | Opc::FmovImmD
         | Opc::FmovImmS => (Fpr, Fpr, Fpr),
         // FP data register, GPR base for loads/stores; no rm.
