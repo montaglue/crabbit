@@ -448,3 +448,80 @@ fn unsupported_intrinsic_is_named() {
         .expect_err("must reject");
     assert!(err.to_string().contains("llvm_nvvm_wmma_load"), "{err}");
 }
+
+/// GPU leg of the backward-attribution design (docs/PROFILE-FEEDBACK-
+/// BACKWARD.md): the PTX linemap must not perturb the emitted PTX, and it
+/// must cover every line of every entry — each line either lowers stamped
+/// source ops or carries a named synthetic root.
+#[test]
+fn linemap_covers_every_line_and_never_changes_ptx() {
+    use pliron_ll::conversion::pass::{AnalysisManager, Pass};
+
+    let mut ctx = Context::new();
+    let module = builtin::ops::ModuleOp::new(&mut ctx, "kernels".try_into().unwrap());
+    let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+
+    let i64_ty = i64_ty(&mut ctx);
+    let ptr = ptr_ty(&mut ctx);
+    let func = new_kernel(&mut ctx, body, "lm", vec![ptr, ptr]);
+    let entry = func.get_entry_block(&ctx).unwrap();
+    let args: Vec<_> = entry.deref(&ctx).arguments().collect();
+    let (a, out) = (args[0], args[1]);
+
+    let load = LoadOp::new(&mut ctx, a, i64_ty);
+    load.get_operation().insert_at_back(entry, &ctx);
+    let v = load.get_result(&ctx);
+    let sum = AddOp::new_with_overflow_flag(&mut ctx, v, v, Default::default());
+    sum.get_operation().insert_at_back(entry, &ctx);
+    let sum = sum.get_result(&ctx);
+    StoreOp::new(&mut ctx, sum, out)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+
+    // Stamp source ids the way the kernel pipeline's mid-end head does.
+    unsafe { std::env::set_var("CRABBIT_PROFILE_MAP", "1") };
+    pliron_ll::passes::llvm::op_ids::LlvmOpIdPass
+        .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+        .expect("op-id stamping");
+
+    let plain = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
+        .expect("plain emission");
+    let (ptx, linemap) = nvptx::write_ptx_with_forced_linemap(
+        &ctx,
+        module.get_operation(),
+        &PtxTarget::default(),
+    )
+    .expect("linemap emission");
+    unsafe { std::env::remove_var("CRABBIT_PROFILE_MAP") };
+
+    assert_eq!(plain, ptx, "linemap recording must never change the PTX");
+
+    let map: serde_json::Value = serde_json::from_str(&linemap).expect("valid JSON");
+    let entry_map = map.get("lm").expect("entry present");
+    let start = entry_map["start"].as_u64().unwrap() as usize;
+    let end = entry_map["end"].as_u64().unwrap() as usize;
+    let lines = entry_map["lines"].as_object().unwrap();
+    let total_lines = ptx.matches('\n').count();
+    assert!(start >= 1 && end <= total_lines && start < end, "{start}..{end} vs {total_lines}");
+    let mut op_lines = 0;
+    for lineno in start..=end {
+        let value = lines
+            .get(&lineno.to_string())
+            .unwrap_or_else(|| panic!("line {lineno} unmapped in {linemap}"));
+        match value {
+            serde_json::Value::Array(ids) => {
+                assert!(!ids.is_empty());
+                op_lines += 1;
+            }
+            serde_json::Value::String(root) => {
+                assert!(root.starts_with("ptx:"), "unexpected root {root}");
+            }
+            other => panic!("unexpected linemap value {other}"),
+        }
+    }
+    assert!(op_lines >= 4, "expected ld/add/st/ret lines with op ids, got {op_lines}");
+    assert!(entry_map["midend"].is_null());
+}

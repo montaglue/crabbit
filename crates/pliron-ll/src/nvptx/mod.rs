@@ -92,6 +92,52 @@ pub fn write_ptx_from_ir(
     root: Ptr<Operation>,
     target: &PtxTarget,
 ) -> STAIRResult<String> {
+    Ok(write_ptx_and_linemap_from_ir(ctx, root, target)?.0)
+}
+
+/// True when PTX linemap emission is requested (`CRABBIT_PTX_LINEMAP` or
+/// the umbrella `CRABBIT_PROFILE_MAP`). The linemap never alters the
+/// emitted PTX; the gate only controls whether the sidecar JSON is built.
+pub fn linemap_enabled() -> bool {
+    ["CRABBIT_PTX_LINEMAP", "CRABBIT_PROFILE_MAP"].iter().any(|var| {
+        std::env::var(var).is_ok_and(|value| !value.is_empty() && value != "0")
+    })
+}
+
+/// [write_ptx_from_ir], additionally returning the PTX linemap JSON (the
+/// GPU analogue of the machine op-map, docs/PROFILE-FEEDBACK-BACKWARD.md)
+/// when [linemap_enabled]: per `.entry`, a map from ABSOLUTE 1-based line
+/// numbers in the returned PTX text to the source-level llvm op ids that
+/// line lowers (`[id, …]`) or a synthetic root (`"ptx:entry"`,
+/// `"ptx:label"`, `"ptx:decl"`, `"ptx:unattributed"`). `midend` is `null`
+/// by design: the kernel pipeline carries a single (source) numbering —
+/// mid-end adjoints are resolved at emission via `effective_sources`.
+pub fn write_ptx_and_linemap_from_ir(
+    ctx: &Context,
+    root: Ptr<Operation>,
+    target: &PtxTarget,
+) -> STAIRResult<(String, Option<String>)> {
+    write_ptx_linemap_inner(ctx, root, target, linemap_enabled())
+}
+
+/// [write_ptx_and_linemap_from_ir] with the linemap forced on regardless
+/// of environment — for callers (the analysis server) whose enablement
+/// comes from per-run config rather than process env.
+pub fn write_ptx_with_forced_linemap(
+    ctx: &Context,
+    root: Ptr<Operation>,
+    target: &PtxTarget,
+) -> STAIRResult<(String, String)> {
+    let (ptx, map) = write_ptx_linemap_inner(ctx, root, target, true)?;
+    Ok((ptx, map.expect("linemap forced on")))
+}
+
+fn write_ptx_linemap_inner(
+    ctx: &Context,
+    root: Ptr<Operation>,
+    target: &PtxTarget,
+    want_linemap: bool,
+) -> STAIRResult<(String, Option<String>)> {
     let root_op = Operation::get_op_dyn(root, ctx);
     let module = root_op
         .downcast_ref::<ModuleOp>()
@@ -103,6 +149,8 @@ pub fn write_ptx_from_ir(
         .expect("builtin.module has a body block");
 
     let mut out = String::new();
+    let mut line = 3usize; // header lines below
+    let mut entries: Vec<(String, usize, usize, Vec<LineTag>)> = Vec::new();
     out.push_str(&format!(
         ".version {}.{}\n.target sm_{}\n.address_size 64\n",
         target.ptx_isa.0, target.ptx_isa.1, target.sm
@@ -116,6 +164,7 @@ pub fn write_ptx_from_ir(
         if let Some(global) = op_obj.downcast_ref::<GlobalOp>() {
             let (name, space, text) = emit_global(ctx, global)?;
             globals.insert(name, space);
+            line += text.matches('\n').count();
             out.push_str(&text);
         }
     }
@@ -141,10 +190,45 @@ pub fn write_ptx_from_ir(
                 continue;
             }
             out.push('\n');
-            out.push_str(&emit_kernel(ctx, func, &globals)?);
+            line += 1;
+            let (text, tags) = emit_kernel(ctx, func, &globals)?;
+            let start = line + 1;
+            line += text.matches('\n').count();
+            entries.push((
+                func.get_symbol_name(ctx).to_string(),
+                start,
+                line,
+                tags,
+            ));
+            out.push_str(&text);
         }
     }
-    Ok(out)
+    let linemap = if want_linemap {
+        let mut map = serde_json::Map::new();
+        for (name, start, end, tags) in entries {
+            let mut lines = serde_json::Map::new();
+            for (offset, tag) in tags.iter().enumerate() {
+                let value = match tag {
+                    LineTag::Ops(ids) => serde_json::json!(ids),
+                    LineTag::Root(root) => serde_json::json!(root),
+                };
+                lines.insert((start + offset).to_string(), value);
+            }
+            map.insert(
+                name,
+                serde_json::json!({
+                    "start": start,
+                    "end": end,
+                    "lines": lines,
+                    "midend": serde_json::Value::Null,
+                }),
+            );
+        }
+        Some(serde_json::Value::Object(map).to_string())
+    } else {
+        None
+    };
+    Ok((out, linemap))
 }
 
 /// The PTX state space a module global lives in.
@@ -402,6 +486,19 @@ fn sreg_for_callee(name: &str) -> Option<&'static str> {
 
 // Function emission ---------------------------------------------------------
 
+/// One emitted PTX line's attribution (docs/PROFILE-FEEDBACK-BACKWARD.md,
+/// GPU leg): the SOURCE-level op ids the line lowers ([opmap::
+/// effective_sources] — the kernel pipeline has a single numbering, so the
+/// mid-end adjoints are already resolved here), or a named synthetic root
+/// for lines that lower no op.
+///
+/// [opmap::effective_sources]: crate::passes::aarch64::opmap::effective_sources
+#[derive(Clone, Debug)]
+enum LineTag {
+    Ops(Vec<i64>),
+    Root(&'static str),
+}
+
 struct FuncEmitter<'c> {
     ctx: &'c Context,
     globals: &'c HashMap<String, GlobalSpace>,
@@ -415,13 +512,19 @@ struct FuncEmitter<'c> {
     edges: String,
     next_edge: usize,
     block_labels: HashMap<Ptr<BasicBlock>, String>,
+    /// One entry per line of [Self::code] / [Self::edges], in order. The
+    /// recorder never changes the emitted text (asserted by the on/off
+    /// identity test); it only rides along.
+    tags: Vec<LineTag>,
+    edge_tags: Vec<LineTag>,
+    current: LineTag,
 }
 
 fn emit_kernel(
     ctx: &Context,
     func: &LlvmFuncOp,
     globals: &HashMap<String, GlobalSpace>,
-) -> STAIRResult<String> {
+) -> STAIRResult<(String, Vec<LineTag>)> {
     let name = func.get_symbol_name(ctx).to_string();
     let region = func
         .get_region(ctx)
@@ -441,6 +544,9 @@ fn emit_kernel(
         edges: String::new(),
         next_edge: 0,
         block_labels: HashMap::new(),
+        tags: Vec::new(),
+        edge_tags: Vec::new(),
+        current: LineTag::Root("ptx:entry"),
     };
 
     // Kernel parameters are the entry block's arguments.
@@ -482,35 +588,47 @@ fn emit_kernel(
 
     for load in param_loads {
         emitter.code.push_str(&load);
+        emitter.tags.push(LineTag::Root("ptx:entry"));
     }
     for block in blocks.iter().copied() {
         if block != entry {
             let label = emitter.block_labels[&block].clone();
             emitter.code.push_str(&format!("{label}:\n"));
+            emitter.tags.push(LineTag::Root("ptx:label"));
         }
         emitter.emit_block(block)?;
     }
 
     let mut out = String::new();
-    out.push_str(&format!(".visible .entry {name}(\n"));
-    out.push_str(&param_decls.join(",\n"));
-    out.push_str("\n)\n{\n");
+    let mut tags: Vec<LineTag> = Vec::new();
+    let decl = |out: &mut String, tags: &mut Vec<LineTag>, text: &str| {
+        tags.extend(std::iter::repeat_n(
+            LineTag::Root("ptx:decl"),
+            text.matches('\n').count(),
+        ));
+        out.push_str(text);
+    };
+    decl(&mut out, &mut tags, &format!(".visible .entry {name}(\n"));
+    decl(&mut out, &mut tags, &param_decls.join(",\n"));
+    decl(&mut out, &mut tags, "\n)\n{\n");
     for class in REG_CLASSES {
         let count = emitter.reg_counts[class.index()];
         if count > 0 {
-            out.push_str(&format!(
-                "\t.reg {} {}<{}>;\n",
-                class.decl(),
-                class.prefix(),
-                count
-            ));
+            decl(
+                &mut out,
+                &mut tags,
+                &format!("\t.reg {} {}<{}>;\n", class.decl(), class.prefix(), count),
+            );
         }
     }
-    out.push('\n');
+    decl(&mut out, &mut tags, "\n");
     out.push_str(&emitter.code);
+    tags.extend(emitter.tags);
     out.push_str(&emitter.edges);
-    out.push_str("}\n");
-    Ok(out)
+    tags.extend(emitter.edge_tags);
+    decl(&mut out, &mut tags, "}\n");
+    debug_assert_eq!(out.matches('\n').count(), tags.len());
+    Ok((out, tags))
 }
 
 /// Reverse post-order of the blocks reachable from `entry`, so a dominating
@@ -547,6 +665,7 @@ impl<'c> FuncEmitter<'c> {
         self.code.push('\t');
         self.code.push_str(&text);
         self.code.push('\n');
+        self.tags.push(self.current.clone());
     }
 
     fn lookup(&self, value: Value) -> STAIRResult<Reg> {
@@ -621,6 +740,15 @@ impl<'c> FuncEmitter<'c> {
 
     fn emit_op(&mut self, op_ptr: Ptr<Operation>) -> STAIRResult<()> {
         let ctx = self.ctx;
+        // Attribution bracket: every line emitted while lowering this op —
+        // including edge-block copies materialized for its branches —
+        // belongs to the op's source-level parents.
+        let sources = crate::passes::aarch64::opmap::effective_sources(ctx, op_ptr);
+        self.current = if sources.is_empty() {
+            LineTag::Root("ptx:unattributed")
+        } else {
+            LineTag::Ops(sources)
+        };
         let op_obj = Operation::get_op_dyn(op_ptr, ctx);
 
         if let Some(constant) = op_obj.downcast_ref::<crate::dialects::builtin::ops::ConstantOp>() {
@@ -1438,11 +1566,15 @@ impl<'c> FuncEmitter<'c> {
         // Emit the copies into the edge buffer by temporarily swapping it in
         // as the instruction sink.
         let saved = std::mem::take(&mut self.code);
+        let saved_tags = std::mem::take(&mut self.tags);
         self.code.push_str(&format!("{edge_label}:\n"));
+        self.tags.push(self.current.clone());
         self.emit_block_arg_copies(dest, args)?;
         self.inst(format!("bra {dest_label};"));
         let edge_text = std::mem::replace(&mut self.code, saved);
+        let edge_tags = std::mem::replace(&mut self.tags, saved_tags);
         self.edges.push_str(&edge_text);
+        self.edge_tags.extend(edge_tags);
         Ok(edge_label)
     }
 

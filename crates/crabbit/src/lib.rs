@@ -211,18 +211,32 @@ fn emit_kernels(
             .parse()
             .map_err(|_| format!("CRABBIT_PTX_SM must be an integer SM number, got `{sm}`"))?;
     }
-    let ptx = pliron_ll::nvptx::write_ptx_from_ir(&imported.ctx, imported.kernel_module, &target)
-        .map_err(|error| format!("NVPTX emission failed: {error}"))?;
+    let (ptx, linemap) =
+        pliron_ll::nvptx::write_ptx_and_linemap_from_ir(&imported.ctx, imported.kernel_module, &target)
+            .map_err(|error| format!("NVPTX emission failed: {error}"))?;
+    // The GPU analogue of the machine op-map: `<ptx>.linemap.json` next to
+    // every copy of the PTX we write (gated inside the emitter).
+    let write_linemap = |ptx_path: &std::path::Path| -> Result<(), String> {
+        if let Some(json) = &linemap {
+            let path = ptx_path.with_extension("ptx.linemap.json");
+            std::fs::write(&path, json).map_err(|error| {
+                format!("failed to write PTX linemap `{}`: {error}", path.display())
+            })?;
+        }
+        Ok(())
+    };
 
     let sidecar = object.with_extension("ptx");
     std::fs::write(&sidecar, &ptx).map_err(|error| {
         format!("failed to write PTX sidecar `{}`: {error}", sidecar.display())
     })?;
+    write_linemap(&sidecar)?;
     if let Ok(out) = std::env::var("CRABBIT_PTX_OUT")
         && !out.is_empty()
     {
         std::fs::write(&out, &ptx)
             .map_err(|error| format!("failed to write CRABBIT_PTX_OUT `{out}`: {error}"))?;
+        write_linemap(std::path::Path::new(&out))?;
     }
     if let Ok(out) = std::env::var("CRABBIT_LL_OUT")
         && !out.is_empty()
