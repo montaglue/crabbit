@@ -12,6 +12,7 @@ pub mod ll;
 pub mod macho;
 pub mod nvptx;
 pub mod passes;
+pub mod target_profile;
 pub mod targets;
 pub mod triple;
 pub mod x86_64;
