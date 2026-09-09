@@ -24,6 +24,7 @@ pliron-llvm = { version = "0.17.0", default-features = false }
 # Our own sibling repo (montaglue/pliron-inspect), consumed by path while
 # both projects move together; NOT yet published to crates.io.
 pliron-inspect-driver = { path = "../pliron-inspect/crates/driver", version = "0.1.0" }
+pliron-inspect-protocol = { path = "../pliron-inspect/crates/protocol", version = "0.1.0" }
 # cuda-oxide's MIR-on-pliron port, consumed from the sibling clone's
 # `crabbit-patches` branch: NVlabs upstream rev b099f64c plus a minimal,
 # upstreamable patch series (see that branch's log; discipline: every patch
@@ -48,6 +49,7 @@ pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }
 eregalloc-passes = { path = "../eregalloc/eregalloc-passes" }
 cmt-spectral-cfg = { path = "../combinatorial-matrix-theory/compilers/crates/spectral-cfg", package = "spectral-cfg" }
 crabbit = { path = "crates/crabbit", version = "0.1.0" }
+research-config = { path = "crates/research-config", version = "0.1.0", default-features = false }
 crabbit-mir = { path = "crates/mir", version = "0.1.0" }
 awint = "0"
 combine = "4"

@@ -1,0 +1,22 @@
+[package]
+name = "research-config"
+description = "crabbit research-engine configuration (CRABBIT_REGALLOC/_ORACLE/_BLOCK_FREQ parsing and allocator construction), shared by the rustc backend and the resident driver so flag semantics cannot drift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pliron.workspace = true
+pliron-ll.workspace = true
+serde_json.workspace = true
+eregalloc-passes = { workspace = true, optional = true }
+cmt-spectral-cfg = { workspace = true, optional = true }
+
+[features]
+# Both research engines are on by default so every existing workflow,
+# harness invocation, and test keeps working unchanged; each can be
+# dropped to build without the corresponding sibling checkout.
+default = ["eregalloc", "cmt"]
+eregalloc = ["dep:eregalloc-passes"]
+cmt = ["dep:cmt-spectral-cfg"]

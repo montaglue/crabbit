@@ -3,3 +3,7 @@ name = "backend-tests"
 version = "0.0.0"
 edition = "2024"
 publish = false
+
+[dev-dependencies]
+pliron.workspace = true
+pliron-ll.workspace = true

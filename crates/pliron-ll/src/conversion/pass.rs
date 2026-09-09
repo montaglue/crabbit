@@ -87,9 +87,69 @@ pub struct Passes {
     config: PMConfig,
 }
 
+/// What [Passes::run_observed]'s observer returns: keep going or stop the
+/// pipeline cleanly after the current pass (used for cancellation and for
+/// "run the first k passes" replay).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassControl {
+    Continue,
+    Stop,
+}
+
 impl Passes {
     pub fn add_pass(&mut self, pass: impl Pass + 'static) {
         self.passes.push(Box::new(pass));
+    }
+
+    /// Move every pass of `other` to the end of this pipeline, flattening
+    /// it (unlike `add_pass(other)`, which would nest it as a single
+    /// opaque entry — invisible to per-pass observers).
+    pub fn extend(&mut self, other: Passes) {
+        self.passes.extend(other.passes);
+    }
+
+    /// The passes' names, in run order.
+    pub fn names(&self) -> Vec<String> {
+        self.passes.iter().map(|p| p.name().to_string()).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.passes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.passes.is_empty()
+    }
+
+    /// [Passes::run], but calling `observer` after every pass with the
+    /// pass index, its name, and the context/root (for progress reporting
+    /// or IR capture). The observer returning [PassControl::Stop] ends the
+    /// run cleanly (Ok) without executing the remaining passes.
+    pub fn run_observed(
+        &mut self,
+        op: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+        observer: &mut dyn FnMut(usize, &str, &Context, Ptr<Operation>) -> PassControl,
+    ) -> pliron::result::Result<PassResult> {
+        let mut aggregate = changed();
+        for (count, pass) in self.passes.iter_mut().enumerate() {
+            let result = pass.run(op, ctx, analyses)?;
+            if matches!(result.ir_changed, pliron::irbuild::IRStatus::Changed) {
+                *analyses = AnalysisManager::default();
+            }
+            aggregate.ir_changed = match (aggregate.ir_changed, result.ir_changed) {
+                (pliron::irbuild::IRStatus::Changed, _)
+                | (_, pliron::irbuild::IRStatus::Changed) => {
+                    pliron::irbuild::IRStatus::Changed
+                }
+                _ => pliron::irbuild::IRStatus::Unchanged,
+            };
+            if observer(count, pass.name(), ctx, op) == PassControl::Stop {
+                break;
+            }
+        }
+        Ok(aggregate)
     }
 
     pub fn set_config(&mut self, config: PMConfig) {

@@ -11,9 +11,17 @@ readme = "../../README.md"
 keywords = ["pliron", "compiler", "cli", "debugging", "inspect"]
 categories = ["compilers", "command-line-utilities"]
 
+[lib]
+name = "crabbit_inspect_driver"
+path = "src/lib.rs"
+
 [[bin]]
 name = "crabbit-inspect-driver"
 path = "src/main.rs"
+
+[[bin]]
+name = "crabbit-analysisd"
+path = "src/bin/analysisd.rs"
 
 [dependencies]
 pliron.workspace = true
@@ -21,5 +29,15 @@ pliron-llvm.workspace = true
 pliron-ll.workspace = true
 crabbit-mir.workspace = true
 pliron-inspect-driver.workspace = true
+research-config.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+pliron-inspect-protocol.workspace = true
+
+[features]
+default = ["eregalloc", "cmt"]
+eregalloc = ["research-config/eregalloc"]
+cmt = ["research-config/cmt"]

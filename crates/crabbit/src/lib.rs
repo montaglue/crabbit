@@ -55,6 +55,13 @@ impl CodegenBackend for StairBackend {
         sess.target.cpu.as_ref().to_owned()
     }
 
+    /// Report the ABI-mandated baseline features (e.g. `neon` on AArch64) as
+    /// enabled. The backend generates code under the target's default ABI and
+    /// never disables a baseline feature; without this, rustc cannot see that
+    /// the ABI-required features are on and warns on every compile that
+    /// `neon` "must be enabled to ensure that the ABI of the current target
+    /// can be implemented correctly".
+
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>, _crate_info: &CrateInfo) -> Box<dyn Any> {
         Box::new(importer::import_crate(tcx))
     }
@@ -67,7 +74,7 @@ impl CodegenBackend for StairBackend {
     ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>) {
         let mut imported = ongoing_codegen
             .downcast::<importer::ImportedCrate>()
-            .expect("stair-rust backend received unexpected codegen payload");
+            .expect("crabbit backend received unexpected codegen payload");
 
         if !imported.unsupported.is_empty() {
             let details = imported
@@ -77,13 +84,13 @@ impl CodegenBackend for StairBackend {
                 .collect::<Vec<_>>()
                 .join("\n");
             sess.dcx().fatal(format!(
-                "stair-rust cannot import the requested MIR subset:\n{details}"
+                "crabbit cannot import the requested MIR subset:\n{details}"
             ));
         }
 
         let object = emit_object(sess, outputs, &mut imported).unwrap_or_else(|error| {
             sess.dcx()
-                .fatal(format!("stair-rust codegen failed: {error}"))
+                .fatal(format!("crabbit codegen failed: {error}"))
         });
 
         let module = CompiledModule {
@@ -114,7 +121,7 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String>
     let triple = Triple::parse(&sess.target.llvm_target);
     targets::lookup(&triple).ok_or_else(|| {
         format!(
-            "no STAIR object backend is registered for target `{}` (parsed as `{triple}`); \
+            "no crabbit object backend is registered for target `{}` (parsed as `{triple}`); \
              registered backends: {}",
             sess.target.llvm_target,
             targets::registered_names().collect::<Vec<_>>().join(", ")
@@ -124,24 +131,26 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String>
 
 /// The full MIR-to-machine-code pipeline for `target`, as pliron [Passes].
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
-/// pliron's mem2reg promotes the importer's alloca-per-local pattern to SSA
+/// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
-fn pipeline(target: &TargetBackend) -> Result<Passes, String> {
+fn pipeline(target: &TargetBackend, already_lowered: bool) -> Result<Passes, String> {
     let mut passes = Passes::default();
-    add_midend_passes(&mut passes, &pliron_ll::target_profile::TargetProfile::host_cpu());
+    if already_lowered {
+        // CRABBIT_EMIT_IR ran lower-dialect-mir standalone (to print the
+        // module in its pure-LLVM-dialect form); continue from there.
+        pliron_ll::passes::llvm::add_llvm_midend_passes(
+            &mut passes,
+            &pliron_ll::target_profile::TargetProfile::host_cpu(),
+        );
+    } else {
+        add_midend_passes(&mut passes, &pliron_ll::target_profile::TargetProfile::host_cpu());
+    }
     // The machine pipeline, with the register allocator swapped for the
-    // engine chosen by CRABBIT_REGALLOC (see [regalloc_engine]).
+    // engine chosen by CRABBIT_REGALLOC (see [regalloc_engine]; the
+    // engine→allocator mapping lives in research-config so its cargo
+    // features gate it in one place).
     let engine = regalloc_engine::RegallocEngine::from_env()?;
-    let machine = match engine.allocator() {
-        None => target.pipeline(),
-        Some(allocator) => target.pipeline_with_allocator(allocator).ok_or_else(|| {
-            format!(
-                "CRABBIT_REGALLOC=eregalloc is not supported by the `{}` backend (no swappable allocator)",
-                target.name
-            )
-        })?,
-    };
-    passes.add_pass(machine);
+    passes.add_pass(engine.machine_pipeline(target)?);
     Ok(passes)
 }
 
@@ -150,8 +159,9 @@ fn pipeline(target: &TargetBackend) -> Result<Passes, String> {
 /// pipeline and the kernel pipeline.
 fn add_midend_passes(passes: &mut Passes, profile: &pliron_ll::target_profile::TargetProfile) {
     passes.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
-    // The LLVM-dialect mid-end proper lives in pliron-ll so the pass list
-    // is shared with the kernel pipeline and cannot drift between the two.
+    // The LLVM-dialect mid-end proper is shared with the resident
+    // driver/server (which starts from post-lowering IR), so its pass list
+    // lives in pliron-ll and cannot drift between the two entry points.
     pliron_ll::passes::llvm::add_llvm_midend_passes(passes, profile);
 }
 
@@ -159,10 +169,45 @@ fn add_midend_passes(passes: &mut Passes, profile: &pliron_ll::target_profile::T
 /// virtual registers and ptxas does the machine work, so translation to
 /// PTX text ([pliron_ll::nvptx::write_ptx_from_ir]) happens outside the
 /// pass pipeline, like the object writers.
-fn kernel_pipeline() -> Passes {
+fn kernel_pipeline(already_lowered: bool) -> Passes {
     let mut passes = Passes::default();
-    add_midend_passes(&mut passes, &pliron_ll::target_profile::TargetProfile::gpu_kernel());
+    let profile = pliron_ll::target_profile::TargetProfile::gpu_kernel();
+    if already_lowered {
+        pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
+    } else {
+        add_midend_passes(&mut passes, &profile);
+    }
     passes
+}
+
+/// `CRABBIT_EMIT_IR=<dir>`: emit the module as printed IR immediately
+/// after `lower-dialect-mir` (pure LLVM dialect — parseable without the
+/// mir dialect or rustc), for the resident driver/server. Runs the lower
+/// pass standalone on `module` and writes `<dir>/<stem>.plir`; the caller
+/// must then continue with an `already_lowered` pipeline.
+fn emit_lowered_ir(
+    ctx: &mut pliron::context::Context,
+    module: pliron::context::Ptr<pliron::operation::Operation>,
+    dir: &std::path::Path,
+    stem: &str,
+) -> Result<(), String> {
+    let mut lower = Passes::default();
+    lower.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
+    lower
+        .run(module, ctx, &mut AnalysisManager::default())
+        .map_err(|error| format!("lower-dialect-mir (CRABBIT_EMIT_IR) failed: {error}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("failed to create CRABBIT_EMIT_IR dir: {error}"))?;
+    let path = dir.join(format!("{stem}.plir"));
+    std::fs::write(&path, module.disp(ctx).to_string())
+        .map_err(|error| format!("failed to write `{}`: {error}", path.display()))
+}
+
+fn emit_ir_dir() -> Option<std::path::PathBuf> {
+    std::env::var("CRABBIT_EMIT_IR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// Lower the imported `rust_kernels` module and write its PTX next to
@@ -172,9 +217,19 @@ fn emit_kernels(
     imported: &mut importer::ImportedCrate,
     object: &std::path::Path,
     tracing: bool,
+    ir_stem: &str,
 ) -> Result<std::path::PathBuf, String> {
     let mut analyses = AnalysisManager::default();
-    let mut pipeline = kernel_pipeline();
+    let emit_dir = emit_ir_dir();
+    if let Some(dir) = &emit_dir {
+        emit_lowered_ir(
+            &mut imported.ctx,
+            imported.kernel_module,
+            dir,
+            &format!("{ir_stem}-kernels"),
+        )?;
+    }
+    let mut pipeline = kernel_pipeline(emit_dir.is_some());
     let mut dump_dir = None;
     if tracing {
         let dir = std::env::temp_dir().join(format!("stair-kernel-pass-dumps-{}", trace_version()));
@@ -214,8 +269,13 @@ fn emit_kernels(
     let (ptx, linemap) =
         pliron_ll::nvptx::write_ptx_and_linemap_from_ir(&imported.ctx, imported.kernel_module, &target)
             .map_err(|error| format!("NVPTX emission failed: {error}"))?;
+
+    let sidecar = object.with_extension("ptx");
+    std::fs::write(&sidecar, &ptx).map_err(|error| {
+        format!("failed to write PTX sidecar `{}`: {error}", sidecar.display())
+    })?;
     // The GPU analogue of the machine op-map: `<ptx>.linemap.json` next to
-    // every copy of the PTX we write (gated inside the emitter).
+    // every PTX we write (docs/PROFILE-FEEDBACK-BACKWARD.md, ncu leg).
     let write_linemap = |ptx_path: &std::path::Path| -> Result<(), String> {
         if let Some(json) = &linemap {
             let path = ptx_path.with_extension("ptx.linemap.json");
@@ -225,11 +285,6 @@ fn emit_kernels(
         }
         Ok(())
     };
-
-    let sidecar = object.with_extension("ptx");
-    std::fs::write(&sidecar, &ptx).map_err(|error| {
-        format!("failed to write PTX sidecar `{}`: {error}", sidecar.display())
-    })?;
     write_linemap(&sidecar)?;
     if let Ok(out) = std::env::var("CRABBIT_PTX_OUT")
         && !out.is_empty()
@@ -285,7 +340,16 @@ fn emit_object(
     let tracing = std::env::var("CRABBIT_TRACE").is_ok_and(|value| !value.is_empty() && value != "0");
 
     let mut analyses = AnalysisManager::default();
-    let mut pipeline = pipeline(target)?;
+    let emit_dir = emit_ir_dir();
+    if let Some(dir) = &emit_dir {
+        emit_lowered_ir(
+            &mut imported.ctx,
+            imported.module,
+            dir,
+            &format!("{}-stair_rust", trace_project(sess)),
+        )?;
+    }
+    let mut pipeline = pipeline(target, emit_dir.is_some())?;
     let mut dump_dir = None;
     let mut initial_dump = None;
     let version = trace_version();
@@ -371,7 +435,7 @@ fn emit_object(
         })?;
     }
     if imported.kernel_count > 0 {
-        emit_kernels(imported, &object, tracing)?;
+        emit_kernels(imported, &object, tracing, &format!("{}-stair_rust", trace_project(sess)))?;
     }
     Ok(object)
 }
@@ -458,7 +522,7 @@ pub mod ir {
 }
 pub use pliron::{
     arg_err, arg_err_noloc, arg_error, arg_error_noloc, create_err, create_error,
-    dict_key, impl_verify_succ, indented_block, input_err, input_err_noloc,
+    dict_key, indented_block, input_err, input_err_noloc,
     input_error, input_error_noloc, type_to_trait, verify_err, verify_err_noloc,
     verify_error, verify_error_noloc,
 };
