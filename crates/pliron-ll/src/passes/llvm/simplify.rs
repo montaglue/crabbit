@@ -177,6 +177,7 @@ fn replace_with_constant(
 /// replace; a pre-existing `value` (e.g. `x+0 → x`) is already attributed
 /// and the walk stops immediately.
 pub(crate) fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value: Value) {
+    crate::passes::aarch64::opmap::derive_chain_from(ctx, value, op);
     let result = op.deref(ctx).get_result(0);
     result.replace_some_uses_with(ctx, |_, _| true, &value);
     Operation::erase(op, ctx);

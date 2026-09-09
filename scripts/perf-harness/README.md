@@ -118,3 +118,17 @@ ranking with vs without sinking" is itself an experiment worth running.
 
 ## Backward attribution round 2 (2026-08-31)
 
+- The mid-end now stamps source-level op ids (`llvm-op-ids` at the head of
+  the shared mid-end) and every merging/creating pass declares its adjoint
+  (GVN merges become multi-parent `derived_from`; inlined ops carry
+  `ll.inlined_from` = the call-site id). The blockmap sidecar gains a
+  top-level `__midend__` table (fresh RA-boundary id → source parents);
+  `profile_ingest.py` emits a third `source` level in `op_costs.json`
+  (equal-weight splits for merges).
+- `CRABBIT_MEASURED_COSTS=<op_costs.json>` (under
+  `CRABBIT_REGALLOC=eregalloc`): per-function measured restore costs from
+  the `lifted` level replace the oracle's estimates (experiment E1's
+  knob). Missing files/symbols fall back to estimates, never error.
+- The analysis server answers `run_costs` (heat-map join of an op_costs
+  payload with the ops at the `source`/`ra` boundary, plus per-root
+  semantic accounting).

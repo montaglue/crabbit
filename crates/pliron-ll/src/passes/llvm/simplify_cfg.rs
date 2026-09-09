@@ -3,7 +3,6 @@
 //! straight-line block pairs and bypass empty forwarding blocks.
 //!
 
-use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -90,9 +89,15 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
                     cond_br.successor_operands(ctx, 1),
                 )
             };
-            CondBrOp::new(ctx, direct_cond, true_dest, true_ops, false_dest, false_ops)
-                .get_operation()
-                .insert_before(ctx, term);
+            {
+                let new_term = CondBrOp::new(ctx, direct_cond, true_dest, true_ops, false_dest, false_ops);
+                let new_op = new_term.get_operation();
+                new_op.insert_before(ctx, term);
+                // ADJOINT: the rewritten terminator derives from the one
+                // it replaces (branch-threading / constant-fold of a
+                // cond-br is 1→1).
+                crate::passes::aarch64::opmap::derive_new_from(ctx, new_op, term);
+            }
             Operation::erase(term, ctx);
             changed = true;
             continue;
@@ -116,10 +121,16 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
         } else {
             (cond_br.get_operation().deref(ctx).get_successor(1), cond_br.successor_operands(ctx, 1))
         };
-        BrOp::new(ctx, dest, operands)
-            .get_operation()
-            .insert_before(ctx, term);
-        Operation::erase(term, ctx);
+        {
+                let new_term = BrOp::new(ctx, dest, operands);
+                let new_op = new_term.get_operation();
+                new_op.insert_before(ctx, term);
+                // ADJOINT: the rewritten terminator derives from the one
+                // it replaces (branch-threading / constant-fold of a
+                // cond-br is 1→1).
+                crate::passes::aarch64::opmap::derive_new_from(ctx, new_op, term);
+            }
+            Operation::erase(term, ctx);
         changed = true;
     }
     changed
@@ -341,9 +352,11 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 let Some(new_operands) = substituted(&pred_br.successor_operands(ctx, 0)) else {
                     continue;
                 };
-                BrOp::new(ctx, dest, new_operands)
-                    .get_operation()
-                    .insert_before(ctx, pred_term);
+                {
+                    let new_op = BrOp::new(ctx, dest, new_operands).get_operation();
+                    new_op.insert_before(ctx, pred_term);
+                    crate::passes::aarch64::opmap::derive_new_from(ctx, new_op, pred_term);
+                }
                 Operation::erase(pred_term, ctx);
                 changed = true;
             } else if pred_opid == CondBrOp::get_opid_static() {
@@ -375,9 +388,13 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
                     continue;
                 }
                 let condition = pred_cbr.get_operand_condition(ctx);
-                CondBrOp::new(ctx, condition, true_dest, true_ops, false_dest, false_ops)
-                    .get_operation()
-                    .insert_before(ctx, pred_term);
+                {
+                    let new_op =
+                        CondBrOp::new(ctx, condition, true_dest, true_ops, false_dest, false_ops)
+                            .get_operation();
+                    new_op.insert_before(ctx, pred_term);
+                    crate::passes::aarch64::opmap::derive_new_from(ctx, new_op, pred_term);
+                }
                 Operation::erase(pred_term, ctx);
                 changed = true;
             }
@@ -390,6 +407,7 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::dialects::builtin::ops::ConstantOp;
     #[allow(unused_imports)]
     use pliron::builtin::op_interfaces::{
         AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,

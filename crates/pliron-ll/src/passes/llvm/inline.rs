@@ -4,7 +4,6 @@
 //! internal functions that are no longer referenced anywhere in the module
 //! are removed.
 
-use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{
     AtMostOneRegionInterface as _, CallOpCallable, CallOpInterface as _,
 };
@@ -250,6 +249,16 @@ fn inline_call(
         op.insert_at_back(tail, ctx);
     }
 
+    // ADJOINT (backward attribution, the cross-function hop): every op
+    // cloned into the caller keeps its callee-local `ll.op_id` and gains
+    // `ll.inlined_from` = the CALL SITE's effective source id, so its
+    // cost lifts to the call site in the caller's numbering. The two
+    // plumbing branches (return→continuation, call→entry) belong to the
+    // call site the same way.
+    let callsite_source = crate::passes::aarch64::opmap::effective_sources(ctx, call_op)
+        .first()
+        .copied();
+
     // Clone the callee body in reverse post-order so every SSA definition
     // is cloned before its uses.
     for &old_block in &rpo {
@@ -259,13 +268,18 @@ fn inline_call(
             if Operation::get_opid(old_op, ctx) == ReturnOp::get_opid_static() {
                 let operands: Vec<_> = old_op.deref(ctx).operands().collect();
                 let mapped = map_values(ctx, &value_map, &operands)?;
-                BrOp::new(ctx, tail, mapped)
-                    .get_operation()
-                    .insert_at_back(new_block, ctx);
+                let ret_br = BrOp::new(ctx, tail, mapped).get_operation();
+                ret_br.insert_at_back(new_block, ctx);
+                if let Some(source) = callsite_source {
+                    crate::passes::aarch64::opmap::set_inlined_from(ctx, ret_br, source);
+                }
                 continue;
             }
             let new_op = clone_operation(ctx, old_op, &value_map, &block_map)?;
             new_op.insert_at_back(new_block, ctx);
+            if let Some(source) = callsite_source {
+                crate::passes::aarch64::opmap::set_inlined_from(ctx, new_op, source);
+            }
             for res_idx in 0..old_op.deref(ctx).get_num_results() {
                 value_map.insert(
                     old_op.deref(ctx).get_result(res_idx),
@@ -278,9 +292,11 @@ fn inline_call(
     // Redirect the caller into the inlined entry and replace the call
     // result with the continuation block argument.
     let args = call.args(ctx);
-    BrOp::new(ctx, block_map[&callee_blocks[0]], args)
-        .get_operation()
-        .insert_at_back(call_block, ctx);
+    let entry_br = BrOp::new(ctx, block_map[&callee_blocks[0]], args).get_operation();
+    entry_br.insert_at_back(call_block, ctx);
+    if let Some(source) = callsite_source {
+        crate::passes::aarch64::opmap::set_inlined_from(ctx, entry_br, source);
+    }
     if tail.deref(ctx).get_num_arguments() > 0 {
         let result = call_op.deref(ctx).get_result(0);
         let replacement = tail.deref(ctx).get_argument(0);
@@ -462,6 +478,7 @@ fn collect_referenced_symbols(
 
 #[cfg(test)]
 mod tests {
+    use crate::dialects::builtin::ops::ConstantOp;
     #[allow(unused_imports)]
     use pliron::builtin::op_interfaces::{
         AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,

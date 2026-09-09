@@ -42,7 +42,7 @@ use crate::{
         r#type::{TypeHandle, Typed},
         value::Value,
     },
-    linked_list::ContainsLinkedList,
+    linked_list::{ContainsLinkedList, LinkedList as _},
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::STAIRResult,
     utils::apint::APInt,
@@ -190,6 +190,16 @@ fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> STAIRResult<()> {
         let one_val = one.get_result(ctx);
         let slot_alloca = AllocaOp::new(ctx, leaf.ty, one_val);
         slot_alloca.get_operation().insert_after(ctx, insert_after);
+        crate::passes::aarch64::opmap::derive_new_from(
+            ctx,
+            one.get_operation(),
+            alloca.get_operation(),
+        );
+        crate::passes::aarch64::opmap::derive_new_from(
+            ctx,
+            slot_alloca.get_operation(),
+            alloca.get_operation(),
+        );
         insert_after = slot_alloca.get_operation();
         if let Some(name) = &base_name {
             if let Ok(slot_name) = Identifier::try_from(format!("{name}_f{idx}")) {
@@ -386,6 +396,9 @@ fn rewrite_whole_load(
         insert.get_operation().insert_before(ctx, load_op);
         aggregate = insert.get_result(ctx);
     }
+    // ADJOINT: the rebuild chain (undef + leaf loads + insertvalues)
+    // derives from the rewritten whole load.
+    crate::passes::aarch64::opmap::derive_chain_from(ctx, aggregate, load_op);
     let result = load.get_result(ctx);
     result.replace_some_uses_with(ctx, |_, _| true, &aggregate);
     Operation::erase(load_op, ctx);
@@ -398,6 +411,7 @@ fn rewrite_whole_store(
     slot_allocas: &[Value],
 ) {
     let store_op = store.get_operation();
+    let bracket_prev = store_op.deref(ctx).get_prev();
     let value = store.get_operand_value(ctx);
     for (leaf, &slot_alloca) in leaves.iter().zip(slot_allocas) {
         let leaf_value = resolve_leaf(ctx, value, &leaf.path, leaf.ty, store_op);
@@ -405,6 +419,9 @@ fn rewrite_whole_store(
             .get_operation()
             .insert_before(ctx, store_op);
     }
+    // ADJOINT: everything inserted before the store (extracts, leaf
+    // stores, casts) derives from it.
+    crate::passes::aarch64::opmap::stamp_expansion_before(ctx, store_op, bracket_prev);
     Operation::erase(store_op, ctx);
 }
 
@@ -460,6 +477,7 @@ fn resolve_leaf(
 
 fn rewrite_scalar_load(ctx: &mut Context, load: LoadOp, leaf_ty: TypeHandle, slot_alloca: Value) {
     let load_op = load.get_operation();
+    let bracket_prev = load_op.deref(ctx).get_prev();
     let result = load.get_result(ctx);
     let result_ty = result.get_type(ctx);
     let leaf_load = LoadOp::new(ctx, slot_alloca, leaf_ty);
@@ -471,6 +489,7 @@ fn rewrite_scalar_load(ctx: &mut Context, load: LoadOp, leaf_ty: TypeHandle, slo
         value = cast.get_result(ctx);
     }
     result.replace_some_uses_with(ctx, |_, _| true, &value);
+    crate::passes::aarch64::opmap::stamp_expansion_before(ctx, load_op, bracket_prev);
     Operation::erase(load_op, ctx);
 }
 
@@ -481,10 +500,12 @@ fn rewrite_scalar_store(
     slot_alloca: Value,
 ) {
     let store_op = store.get_operation();
+    let bracket_prev = store_op.deref(ctx).get_prev();
     let value = adapt_value(ctx, store.get_operand_value(ctx), leaf_ty, store_op);
     StoreOp::new(ctx, value, slot_alloca)
         .get_operation()
         .insert_before(ctx, store_op);
+    crate::passes::aarch64::opmap::stamp_expansion_before(ctx, store_op, bracket_prev);
     Operation::erase(store_op, ctx);
 }
 

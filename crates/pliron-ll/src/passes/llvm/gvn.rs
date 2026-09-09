@@ -44,6 +44,7 @@ use crate::{
     conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
 };
 
+use crate::passes::aarch64::opmap;
 use super::{
     analysis::dominator_tree,
     inline::collect_functions,
@@ -202,7 +203,20 @@ fn expr_key(
     None
 }
 
+/// ADJOINT (backward attribution): GVN merges are N→1 — the surviving
+/// `value`'s defining op absorbs the erased op's identity as a
+/// multi-parent `derived_from` (equal weights; docs/PROFILE-FEEDBACK-
+/// BACKWARD.md "merge" rule). Applies to CSE dedup and to redundant-load
+/// elimination / store-to-load forwarding alike.
 fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value: Value) {
+    if let Some(surviving) = value.defining_op() {
+        let mut sources = opmap::effective_sources(ctx, surviving);
+        let erased_sources = opmap::effective_sources(ctx, op);
+        if !erased_sources.is_empty() && !sources.is_empty() {
+            sources.extend(erased_sources);
+            opmap::set_derived_from_many(ctx, surviving, sources);
+        }
+    }
     let result = op.deref(ctx).get_result(0);
     result.replace_some_uses_with(ctx, |_, _| true, &value);
     Operation::erase(op, ctx);

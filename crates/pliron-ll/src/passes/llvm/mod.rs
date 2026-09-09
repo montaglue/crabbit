@@ -6,6 +6,7 @@ pub mod gvn;
 pub mod inline;
 pub mod licm;
 pub mod midend_gate;
+pub mod op_ids;
 pub mod pin_type_punned_slots;
 pub mod simplify;
 pub mod simplify_cfg;
@@ -26,6 +27,9 @@ use crate::target_profile::TargetProfile;
 /// ([TargetProfile], crabbit's miniature TargetTransformInfo) — the pass
 /// LIST is identical everywhere, the answers passes get are not.
 pub fn add_llvm_midend_passes(passes: &mut Passes, profile: &TargetProfile) {
+    // Attribution head: source ids for the backward lift (no-op unless
+    // CRABBIT_BLOCKMAP/CRABBIT_PROFILE_MAP is set).
+    passes.add_pass(op_ids::LlvmOpIdPass);
     passes.add_pass(inline::LLVMInlinePass::default());
     passes.add_pass(simplify::LLVMSimplifyPass);
     passes.add_pass(simplify_cfg::LLVMSimplifyCfgPass);
