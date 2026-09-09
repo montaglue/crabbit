@@ -4,3 +4,8 @@
 # fixture build artifacts
 crates/backend-tests/fixtures/*/target/
 rustc-ice-*.txt
+
+# Build products in measurement dirs (dylib snapshots recorded by sha in meta.json)
+__pycache__/
+*.pyc
+scripts/perf-harness/results/**/*.so

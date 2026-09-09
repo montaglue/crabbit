@@ -1,0 +1,1 @@
+STOPPED 2026-08-31 01:55 by user decision: mid-end implementation starts now; timing runs would be contaminated. Re-run the pre-midend reference later from the preserved backend snapshot libcrabbit.so (sha df2122f6...). Partial data: fixtures complete, corpus 3/14. Not data.
