@@ -4,7 +4,10 @@
 
 use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
-use pliron_llvm::op_interfaces::CastOpInterface as _;
+use pliron_llvm::op_interfaces::{
+    CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
+};
+use pliron_llvm::ops::GepIndex;
 use crate::ll::ops::CStrOp;
 use std::num::NonZero;
 
@@ -22,7 +25,7 @@ use crate::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, FCmpOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
+                AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, FCmpOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
                 LShrOp, LoadOp, MulOp, OrOp, PtrToIntOp, SDivOp, SExtOp, SRemOp, ShlOp,
                 PoisonOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
             },
@@ -74,7 +77,7 @@ impl Pass for LLVMSimplifyPass {
     }
 }
 
-fn function_ops(ctx: &Context, region: Ptr<Region>) -> Vec<Ptr<Operation>> {
+pub(crate) fn function_ops(ctx: &Context, region: Ptr<Region>) -> Vec<Ptr<Operation>> {
     let mut ops = Vec::new();
     for block in region.deref(ctx).iter(ctx) {
         ops.extend(block.deref(ctx).iter(ctx));
@@ -107,7 +110,7 @@ impl ConstOperand {
     }
 }
 
-fn mask_to_width(bits: u128, width: u32) -> u128 {
+pub(crate) fn mask_to_width(bits: u128, width: u32) -> u128 {
     if width >= 128 {
         bits
     } else {
@@ -115,7 +118,7 @@ fn mask_to_width(bits: u128, width: u32) -> u128 {
     }
 }
 
-fn sign_extend(bits: u128, width: u32) -> i128 {
+pub(crate) fn sign_extend(bits: u128, width: u32) -> i128 {
     let masked = mask_to_width(bits, width);
     if width == 0 || width >= 128 {
         return masked as i128;
@@ -145,16 +148,6 @@ pub(crate) fn as_const_operand(ctx: &Context, value: Value) -> Option<ConstOpera
     })
 }
 
-fn is_undef(ctx: &Context, value: Value) -> bool {
-    value
-        .defining_op()
-        .filter(|_| value.find_index(ctx) == 0)
-        .is_some_and(|op| {
-            let opid = Operation::get_opid(op, ctx);
-            opid == UndefOp::get_opid_static() || opid == PoisonOp::get_opid_static()
-        })
-}
-
 /// Materialize an integer constant right before `before`, replacing all
 /// uses of `before`'s single result, and erase `before`.
 fn replace_with_constant(
@@ -175,7 +168,15 @@ fn replace_with_constant(
 }
 
 /// Replace all uses of `op`'s single result with `value` and erase `op`.
-fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value: Value) {
+///
+/// ADJOINT (backward attribution): the replacement chain — `value`'s
+/// defining op and, transitively, its unattributed operand-defining ops —
+/// derives from `op`. This one hook is the adjoint of every simplify
+/// fold AND of div-strength-reduce's expansions (both funnel through
+/// here): freshly created replacement ops derive from the op they
+/// replace; a pre-existing `value` (e.g. `x+0 → x`) is already attributed
+/// and the walk stops immediately.
+pub(crate) fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value: Value) {
     let result = op.deref(ctx).get_result(0);
     result.replace_some_uses_with(ctx, |_, _| true, &value);
     Operation::erase(op, ctx);
@@ -211,9 +212,48 @@ fn fold_op(ctx: &mut Context, op: Ptr<Operation>) -> STAIRResult<bool> {
         return Ok(fold_extractvalue(ctx, op));
     }
     if opid == GetElementPtrOp::get_opid_static() {
-        return Ok(fold_gep_aggregate_base(ctx, op));
+        if fold_gep_aggregate_base(ctx, op) {
+            return Ok(true);
+        }
+        return Ok(flatten_gep_of_gep(ctx, op));
     }
     Ok(false)
+}
+
+/// Flatten `gep<T>(gep<T>(p, [a]), [b])` — two pure pointer-arithmetic geps
+/// over the same element type with single constant indices — into
+/// `gep<T>(p, [a+b])`.
+fn flatten_gep_of_gep(ctx: &mut Context, op: Ptr<Operation>) -> bool {
+    let gep = GetElementPtrOp::from_operation(op);
+    let outer_index = match gep.indices(ctx).as_slice() {
+        [GepIndex::Constant(c)] => *c,
+        _ => return false,
+    };
+    let base = gep.get_operand_src_ptr(ctx);
+    let Some(base_op) = base.defining_op().filter(|_| base.find_index(ctx) == 0) else {
+        return false;
+    };
+    if Operation::get_opid(base_op, ctx) != GetElementPtrOp::get_opid_static() {
+        return false;
+    }
+    let inner = GetElementPtrOp::from_operation(base_op);
+    if inner.src_elem_type(ctx) != gep.src_elem_type(ctx) {
+        return false;
+    }
+    let inner_index = match inner.indices(ctx).as_slice() {
+        [GepIndex::Constant(c)] => *c,
+        _ => return false,
+    };
+    let Some(sum) = inner_index.checked_add(outer_index) else {
+        return false;
+    };
+    let elem_ty = gep.src_elem_type(ctx);
+    let inner_base = inner.get_operand_src_ptr(ctx);
+    let merged = GetElementPtrOp::new(ctx, inner_base, vec![GepIndex::Constant(sum)], elem_ty);
+    merged.get_operation().insert_before(ctx, op);
+    let merged_value = merged.get_result(ctx);
+    replace_op_with_value(ctx, op, merged_value);
+    true
 }
 
 /// A gep whose base is an aggregate value addresses through the
@@ -270,6 +310,7 @@ fn is_int_binary_arith(opid: &OpId) -> bool {
         || *opid == XorOp::get_opid_static()
         || *opid == ShlOp::get_opid_static()
         || *opid == LShrOp::get_opid_static()
+        || *opid == AShrOp::get_opid_static()
         || *opid == UDivOp::get_opid_static()
         || *opid == SDivOp::get_opid_static()
         || *opid == URemOp::get_opid_static()
@@ -313,7 +354,7 @@ fn fold_int_binary(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
         as_const_operand(ctx, lhs_v),
         as_const_operand(ctx, rhs_v),
     ) else {
-        return false;
+        return simplify_partial_const(ctx, op, opid, lhs_v, rhs_v);
     };
     let width = lhs.width;
     let l = lhs.masked();
@@ -340,6 +381,11 @@ fn fold_int_binary(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
             return false;
         }
         l >> r
+    } else if *opid == AShrOp::get_opid_static() {
+        if r >= width as u128 {
+            return false;
+        }
+        (sign_extend(l, width) >> r) as u128
     } else if *opid == UDivOp::get_opid_static() {
         if r == 0 {
             return false;
@@ -367,6 +413,119 @@ fn fold_int_binary(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
     // constant's integer type so signedness is preserved.
     replace_with_constant(ctx, op, lhs.ty, bits);
     true
+}
+
+/// Simplifications for an integer binary op with at most one constant
+/// operand: constant-to-the-right canonicalization for add/mul, identity
+/// and annihilator folds, `(a+c1)+c2 → a+(c1+c2)` / `(a*c1)*c2 → a*(c1*c2)`
+/// reassociation, and `x * 2^k → x << k`.
+fn simplify_partial_const(
+    ctx: &mut Context,
+    op: Ptr<Operation>,
+    opid: &OpId,
+    lhs_v: Value,
+    rhs_v: Value,
+) -> bool {
+    let is_add = *opid == AddOp::get_opid_static();
+    let is_mul = *opid == MulOp::get_opid_static();
+
+    // Canonicalize `c + a` / `c * a` to `a + c` / `a * c` so the rewrites
+    // below (and the reassociation match) only need to look right.
+    if (is_add || is_mul)
+        && as_const_operand(ctx, lhs_v).is_some()
+        && as_const_operand(ctx, rhs_v).is_none()
+    {
+        Operation::replace_operand(op, ctx, 0, rhs_v);
+        Operation::replace_operand(op, ctx, 1, lhs_v);
+        return true;
+    }
+
+    let Some(rhs) = as_const_operand(ctx, rhs_v) else {
+        return false;
+    };
+    if as_const_operand(ctx, lhs_v).is_some() {
+        // Both constant: fold_int_binary's main path owns this (it bailed
+        // only for an op it cannot fold).
+        return false;
+    }
+    let c = rhs.masked();
+    let width = rhs.width;
+
+    // Identities and annihilators.
+    let identity = (c == 0
+        && (is_add
+            || *opid == SubOp::get_opid_static()
+            || *opid == OrOp::get_opid_static()
+            || *opid == XorOp::get_opid_static()
+            || *opid == ShlOp::get_opid_static()
+            || *opid == LShrOp::get_opid_static()
+            || *opid == AShrOp::get_opid_static()))
+        || (c == 1 && is_mul);
+    if identity {
+        replace_op_with_value(ctx, op, lhs_v);
+        return true;
+    }
+    if c == 0 && (is_mul || *opid == AndOp::get_opid_static()) {
+        replace_with_constant(ctx, op, rhs.ty, 0);
+        return true;
+    }
+
+    if !(is_add || is_mul) {
+        return false;
+    }
+
+    // Reassociate (a <op> c1) <op> c2 → a <op> (c1 <op> c2). The inner op
+    // stays for any other users; DCE erases it when this was the only one.
+    if let Some(inner_op) = lhs_v.defining_op().filter(|_| lhs_v.find_index(ctx) == 0)
+        && Operation::get_opid(inner_op, ctx) == *opid
+        && inner_op.deref(ctx).get_num_operands() == 2
+    {
+        let inner_lhs = inner_op.deref(ctx).get_operand(0);
+        let inner_rhs = inner_op.deref(ctx).get_operand(1);
+        if as_const_operand(ctx, inner_lhs).is_none()
+            && let Some(inner_c) = as_const_operand(ctx, inner_rhs)
+        {
+            let combined = if is_add {
+                inner_c.masked().wrapping_add(c)
+            } else {
+                inner_c.masked().wrapping_mul(c)
+            };
+            let combined = mask_to_width(combined, width);
+            let apint = APInt::from_u128(combined, NonZero::new(width as usize).unwrap());
+            let constant = ConstantOp::new(ctx, Box::new(IntegerAttr::new(rhs.ty, apint)));
+            constant.get_operation().insert_before(ctx, op);
+            let constant_v = constant.get_result(ctx);
+            // Fresh op with default (no) overflow flags: reassociation does
+            // not preserve nsw/nuw.
+            let combined_op = if is_add {
+                AddOp::new_with_overflow_flag(ctx, inner_lhs, constant_v, Default::default())
+                    .get_operation()
+            } else {
+                MulOp::new_with_overflow_flag(ctx, inner_lhs, constant_v, Default::default())
+                    .get_operation()
+            };
+            combined_op.insert_before(ctx, op);
+            let combined_value = combined_op.deref(ctx).get_result(0);
+            replace_op_with_value(ctx, op, combined_value);
+            return true;
+        }
+    }
+
+    // x * 2^k → x << k (after reassociation, so (a*4)*8 becomes one shift).
+    if is_mul && c.is_power_of_two() {
+        let k = c.trailing_zeros() as u128;
+        let apint = APInt::from_u128(k, NonZero::new(width as usize).unwrap());
+        let constant = ConstantOp::new(ctx, Box::new(IntegerAttr::new(rhs.ty, apint)));
+        constant.get_operation().insert_before(ctx, op);
+        let k_v = constant.get_result(ctx);
+        let shl = ShlOp::new_with_overflow_flag(ctx, lhs_v, k_v, Default::default());
+        shl.get_operation().insert_before(ctx, op);
+        let shl_value = shl.get_result(ctx);
+        replace_op_with_value(ctx, op, shl_value);
+        return true;
+    }
+
+    false
 }
 
 fn fold_int_cast(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
@@ -644,7 +803,7 @@ fn forward_single_entry_store(ctx: &mut Context, region: Ptr<Region>, alloca: Al
 // Dead code elimination
 // ============================================================================
 
-fn pure_op_ids() -> FxHashSet<OpId> {
+pub(crate) fn pure_op_ids() -> FxHashSet<OpId> {
     let mut ids = FxHashSet::default();
     ids.insert(ConstantOp::get_opid_static());
     ids.insert(UndefOp::get_opid_static());
@@ -658,6 +817,7 @@ fn pure_op_ids() -> FxHashSet<OpId> {
     ids.insert(XorOp::get_opid_static());
     ids.insert(ShlOp::get_opid_static());
     ids.insert(LShrOp::get_opid_static());
+    ids.insert(AShrOp::get_opid_static());
     ids.insert(UDivOp::get_opid_static());
     ids.insert(SDivOp::get_opid_static());
     ids.insert(URemOp::get_opid_static());
@@ -831,5 +991,155 @@ mod tests {
         assert!(!text.contains("llvm.load"), "{text}");
         assert!(!text.contains("llvm.store"), "{text}");
         assert!(!text.contains("llvm.alloca"), "{text}");
+    }
+
+    /// Build `fn(a: i64) -> i64 { <body>(a) }`, simplify, return the text.
+    fn run_unary_i64_case(
+        body: impl FnOnce(&mut Context, Ptr<crate::ir::basic_block::BasicBlock>, Value) -> Value,
+    ) -> String {
+        let mut ctx = test_context();
+        let i64_ty: TypeHandle = int_ty(&mut ctx, 64).into();
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i64_ty, vec![i64_ty], false);
+        let func = FuncOp::new(&mut ctx, "case".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
+        let arg = entry.deref(&ctx).get_argument(0);
+        let result = body(&mut ctx, entry, arg);
+        ReturnOp::new(&mut ctx, Some(result))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+        run_simplify(&mut ctx, func)
+    }
+
+    #[test]
+    fn folds_ashr_constants() {
+        let mut ctx = test_context();
+        let i64_ty: TypeHandle = int_ty(&mut ctx, 64).into();
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, i64_ty, vec![], false);
+        let func = FuncOp::new(&mut ctx, "ashr".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
+        // -8 >> 1 (arithmetic) == -4 == 0xFFFF...FFFC.
+        let neg8 = int_const(&mut ctx, 64, (-8i64) as u64);
+        neg8.get_operation().insert_at_back(entry, &ctx);
+        let one = int_const(&mut ctx, 64, 1);
+        one.get_operation().insert_at_back(entry, &ctx);
+        let neg8_v = neg8.get_result(&ctx);
+        let one_v = one.get_result(&ctx);
+        let shr = llvm::ops::AShrOp::new(&mut ctx, neg8_v, one_v);
+        shr.get_operation().insert_at_back(entry, &ctx);
+        let shifted = shr.get_result(&ctx);
+        ReturnOp::new(&mut ctx, Some(shifted))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+        let text = run_simplify(&mut ctx, func);
+        assert!(!text.contains("llvm.ashr"), "{text}");
+        assert!(text.contains(&format!("<{}: i64>", (-4i64) as u64)), "{text}");
+    }
+
+    #[test]
+    fn reassociates_add_and_mul_constants() {
+        // (a + 5) + 7 → a + 12, one llvm.add left.
+        let text = run_unary_i64_case(|ctx, entry, arg| {
+            let c5 = int_const(ctx, 64, 5);
+            c5.get_operation().insert_at_back(entry, ctx);
+            let c5_v = c5.get_result(ctx);
+            let inner = AddOp::new_with_overflow_flag(ctx, arg, c5_v, Default::default());
+            inner.get_operation().insert_at_back(entry, ctx);
+            let inner_v = inner.get_result(ctx);
+            let c7 = int_const(ctx, 64, 7);
+            c7.get_operation().insert_at_back(entry, ctx);
+            let c7_v = c7.get_result(ctx);
+            let outer = AddOp::new_with_overflow_flag(ctx, inner_v, c7_v, Default::default());
+            outer.get_operation().insert_at_back(entry, ctx);
+            outer.get_result(ctx)
+        });
+        assert_eq!(text.matches("llvm.add").count(), 1, "{text}");
+        assert!(text.contains("<12: i64>"), "{text}");
+
+        // (a * 3) * 5 → a * 15 (15 is not a power of two, stays a mul).
+        let text = run_unary_i64_case(|ctx, entry, arg| {
+            let c3 = int_const(ctx, 64, 3);
+            c3.get_operation().insert_at_back(entry, ctx);
+            let c3_v = c3.get_result(ctx);
+            let inner = MulOp::new_with_overflow_flag(ctx, arg, c3_v, Default::default());
+            inner.get_operation().insert_at_back(entry, ctx);
+            let inner_v = inner.get_result(ctx);
+            let c5 = int_const(ctx, 64, 5);
+            c5.get_operation().insert_at_back(entry, ctx);
+            let c5_v = c5.get_result(ctx);
+            let outer = MulOp::new_with_overflow_flag(ctx, inner_v, c5_v, Default::default());
+            outer.get_operation().insert_at_back(entry, ctx);
+            outer.get_result(ctx)
+        });
+        assert_eq!(text.matches("llvm.mul").count(), 1, "{text}");
+        assert!(text.contains("<15: i64>"), "{text}");
+    }
+
+    #[test]
+    fn mul_by_power_of_two_becomes_shl() {
+        // a * 8 → a << 3; constants on the left get canonicalized first.
+        for const_on_left in [false, true] {
+            let text = run_unary_i64_case(|ctx, entry, arg| {
+                let c8 = int_const(ctx, 64, 8);
+                c8.get_operation().insert_at_back(entry, ctx);
+                let c8_v = c8.get_result(ctx);
+                let (lhs, rhs) = if const_on_left { (c8_v, arg) } else { (arg, c8_v) };
+                let mul = MulOp::new_with_overflow_flag(ctx, lhs, rhs, Default::default());
+                mul.get_operation().insert_at_back(entry, ctx);
+                mul.get_result(ctx)
+            });
+            assert!(!text.contains("llvm.mul"), "const_on_left={const_on_left}: {text}");
+            assert!(text.contains("llvm.shl"), "const_on_left={const_on_left}: {text}");
+            assert!(text.contains("<3: i64>"), "const_on_left={const_on_left}: {text}");
+        }
+    }
+
+    #[test]
+    fn add_zero_and_mul_one_fold_to_identity() {
+        let text = run_unary_i64_case(|ctx, entry, arg| {
+            let zero = int_const(ctx, 64, 0);
+            zero.get_operation().insert_at_back(entry, ctx);
+            let zero_v = zero.get_result(ctx);
+            let add = AddOp::new_with_overflow_flag(ctx, arg, zero_v, Default::default());
+            add.get_operation().insert_at_back(entry, ctx);
+            let sum = add.get_result(ctx);
+            let one = int_const(ctx, 64, 1);
+            one.get_operation().insert_at_back(entry, ctx);
+            let one_v = one.get_result(ctx);
+            let mul = MulOp::new_with_overflow_flag(ctx, sum, one_v, Default::default());
+            mul.get_operation().insert_at_back(entry, ctx);
+            mul.get_result(ctx)
+        });
+        assert!(!text.contains("llvm.add"), "{text}");
+        assert!(!text.contains("llvm.mul"), "{text}");
+    }
+
+    #[test]
+    fn flattens_gep_of_gep_with_constant_indices() {
+        let mut ctx = test_context();
+        let i64_ty: TypeHandle = int_ty(&mut ctx, 64).into();
+        let ptr_ty: TypeHandle = PointerType::get(&mut ctx, 0).into();
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, ptr_ty, vec![ptr_ty], false);
+        let func = FuncOp::new(&mut ctx, "geps".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(&mut ctx);
+        let entry = func.get_entry_block(&ctx).unwrap();
+        let base = entry.deref(&ctx).get_argument(0);
+        let inner = GetElementPtrOp::new(&mut ctx, base, vec![GepIndex::Constant(2)], i64_ty);
+        inner.get_operation().insert_at_back(entry, &ctx);
+        let inner_v = inner.get_result(&ctx);
+        let outer = GetElementPtrOp::new(&mut ctx, inner_v, vec![GepIndex::Constant(3)], i64_ty);
+        outer.get_operation().insert_at_back(entry, &ctx);
+        let outer_v = outer.get_result(&ctx);
+        ReturnOp::new(&mut ctx, Some(outer_v))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        let text = run_simplify(&mut ctx, func);
+        assert_eq!(text.matches("llvm.gep").count(), 1, "{text}");
+        assert!(text.contains('5'), "{text}");
     }
 }

@@ -30,12 +30,7 @@ use rustc_session::config::{OutputFilenames, OutputType};
 
 
 use crate::{
-    conversion::pass::{AnalysisManager, Mem2RegPass, PMConfig, Pass, Passes},
-    passes::llvm::inline::LLVMInlinePass,
-    passes::llvm::pin_type_punned_slots::LLVMPinTypePunnedSlotsPass,
-    passes::llvm::simplify::LLVMSimplifyPass,
-    passes::llvm::simplify_cfg::LLVMSimplifyCfgPass,
-    passes::llvm::sroa::LLVMSroaPass,
+    conversion::pass::{AnalysisManager, PMConfig, Passes},
     printable::Printable,
     trace::{StairTraceFile, StairTraceMeta},
 };
@@ -129,11 +124,11 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String>
 
 /// The full MIR-to-machine-code pipeline for `target`, as pliron [Passes].
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
-/// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
+/// pliron's mem2reg promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
 fn pipeline(target: &TargetBackend) -> Result<Passes, String> {
     let mut passes = Passes::default();
-    add_midend_passes(&mut passes);
+    add_midend_passes(&mut passes, &pliron_ll::target_profile::TargetProfile::host_cpu());
     // The machine pipeline, with the register allocator swapped for the
     // engine chosen by CRABBIT_REGALLOC (see [regalloc_engine]).
     let engine = regalloc_engine::RegallocEngine::from_env()?;
@@ -153,35 +148,11 @@ fn pipeline(target: &TargetBackend) -> Result<Passes, String> {
 /// The target-independent mid-end: `mir` → LLVM dialect, then inlining,
 /// simplification, SROA and mem2reg (twice, see below). Shared by the host
 /// pipeline and the kernel pipeline.
-fn add_midend_passes(passes: &mut Passes) {
+fn add_midend_passes(passes: &mut Passes, profile: &pliron_ll::target_profile::TargetProfile) {
     passes.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
-    // Inline the module-internal call graph, then fold/clean and merge the
-    // inlined blocks. simplify runs again after the CFG cleanup because
-    // merging blocks turns cross-block load/store chains into block-local
-    // ones.
-    passes.add_pass(LLVMInlinePass::default());
-    passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LLVMSimplifyCfgPass);
-    // Split small struct allocas into scalars so mem2reg can promote the
-    // pieces, then promote and clean up.
-    passes.add_pass(LLVMSroaPass);
-    passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LLVMPinTypePunnedSlotsPass);
-    passes.add_pass(Mem2RegPass);
-    passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LLVMSimplifyCfgPass);
-    passes.add_pass(LLVMSimplifyPass);
-    // Second round: promoting pointer slots exposes direct accesses to
-    // aggregates that were previously reached through those pointers
-    // (e.g. a loop iterator updated via `&mut`), so split and promote
-    // once more.
-    passes.add_pass(LLVMSroaPass);
-    passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LLVMPinTypePunnedSlotsPass);
-    passes.add_pass(Mem2RegPass);
-    passes.add_pass(LLVMSimplifyPass);
-    passes.add_pass(LLVMSimplifyCfgPass);
-    passes.add_pass(LLVMSimplifyPass);
+    // The LLVM-dialect mid-end proper lives in pliron-ll so the pass list
+    // is shared with the kernel pipeline and cannot drift between the two.
+    pliron_ll::passes::llvm::add_llvm_midend_passes(passes, profile);
 }
 
 /// The kernel (`rust_kernels` module) pipeline: the mid-end only. PTX has
@@ -190,7 +161,7 @@ fn add_midend_passes(passes: &mut Passes) {
 /// pass pipeline, like the object writers.
 fn kernel_pipeline() -> Passes {
     let mut passes = Passes::default();
-    add_midend_passes(&mut passes);
+    add_midend_passes(&mut passes, &pliron_ll::target_profile::TargetProfile::gpu_kernel());
     passes
 }
 
