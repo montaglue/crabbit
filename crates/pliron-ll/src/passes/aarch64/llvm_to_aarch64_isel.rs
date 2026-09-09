@@ -280,7 +280,7 @@ fn outgoing_stack_bytes_for_call(ctx: &Context, args: &[Value]) -> u64 {
     let mut next_gpr = 0u8;
     let mut next_fpr = 0u8;
     let mut stack = 0u64;
-    let mut take_gpr = |next_gpr: &mut u8, stack: &mut u64| {
+    let take_gpr = |next_gpr: &mut u8, stack: &mut u64| {
         if *next_gpr < 8 {
             *next_gpr += 1;
         } else {
@@ -349,6 +349,14 @@ fn lower_function(
         abi,
         has_call,
     } = plan;
+
+    // Backward-attribution stamping is live iff the op-id pass ran on this
+    // function (docs/PROFILE-FEEDBACK-BACKWARD.md).
+    let stamping = llvm_func
+        .get_entry_block(ctx)
+        .and_then(|entry_block| entry_block.deref(ctx).get_head())
+        .is_some_and(|first| super::opmap::op_id(ctx, first).is_some());
+    let mut stamper = super::opmap::IselStamper::new(ctx, region, stamping);
 
     let mut values = HashMap::<Value, LoweredValue>::new();
     let mut next_vreg = 0usize;
@@ -448,6 +456,7 @@ fn lower_function(
     // each block's own machine block, so this does not change the machine
     // block layout. Unreachable blocks follow in layout order; they can only
     // use values from reachable defs or from each other in layout order.
+    stamper.preamble(ctx, entry);
     let mut ordered = entry_reverse_post_order(ctx, blocks[0]);
     let reachable: std::collections::HashSet<_> = ordered.iter().copied().collect();
     ordered.extend(
@@ -465,6 +474,10 @@ fn lower_function(
         let mut op = block.deref(ctx).get_head();
         while let Some(op_ptr) = op {
             op = op_ptr.deref(ctx).get_next();
+            // Close the previous source op's attribution bracket and open
+            // this one's: everything emitted until the next `begin` derives
+            // from this op.
+            stamper.begin(ctx, insert_block, super::opmap::op_id(ctx, op_ptr));
             let opid = Operation::get_opid(op_ptr, ctx);
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
             if let Some(alloca) = op_obj.downcast_ref::<AllocaOp>() {
@@ -896,7 +909,7 @@ fn lower_function(
                         }
                         continue;
                     }
-                    let mut push_gpr = |src: Register,
+                    let push_gpr = |src: Register,
                                         arg_moves: &mut Vec<(Register, CallArgDst)>,
                                         next_gpr: &mut u8,
                                         next_stack: &mut u64| {
@@ -1390,6 +1403,7 @@ fn lower_function(
             }
         }
     }
+    stamper.finish(ctx);
 
     func.set_stack_size(ctx, align_to_16(stack.next_offset));
     Ok(())

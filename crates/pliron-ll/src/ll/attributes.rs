@@ -242,6 +242,58 @@ impl Parsable for DataAttr {
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
 pub struct TlsAttr;
 
+/// A machine block's stable identity for the profile-feedback blockmap
+/// (docs/PROFILE-FEEDBACK-PLAN.md): its index in RA-time region order,
+/// attached to the [BasicBlock](pliron::basic_block::BasicBlock)'s own
+/// attribute dictionary at the register-allocation pipeline position.
+/// Blocks are reordered but never recreated after RA, so the attribute
+/// rides the block through placement, relaxation, and encoding down to
+/// final layout.
+#[pliron_attr(name = "ll.blockmap_id", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub struct BlockmapIdAttr(pub u32);
+
+/// An LLVM-dialect op's stable identity for backward profile attribution
+/// (docs/PROFILE-FEEDBACK-BACKWARD.md): its dense per-function index in
+/// program order at the LLVM→machine boundary, stamped immediately before
+/// instruction selection.
+#[pliron_attr(name = "ll.op_id", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub struct OpIdAttr(pub u32);
+
+/// Which op a machine op was lowered from, for backward profile
+/// attribution: a non-negative value is the [OpIdAttr] of the LLVM-dialect
+/// source op; a negative value is a synthetic per-pass root (see
+/// `passes::aarch64::opmap::roots`) for code created from nothing
+/// (prologue, ABI moves, layout branches), so that overhead is visible as
+/// the creating pass's own cost.
+#[pliron_attr(name = "ll.derived_from", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub struct DerivedFromAttr(pub i64);
+
+/// Multi-parent `derived_from` for backward profile attribution
+/// (docs/PROFILE-FEEDBACK-BACKWARD.md): the op is the merged survivor of
+/// several source ops (GVN CSE dedup), and measured cost lifts onto the
+/// parents as an equal split (weights are implicit: 1/n each — no current
+/// producer needs unequal weights; the ingest normalizes). Ids follow the
+/// [DerivedFromAttr] convention (non-negative = [OpIdAttr] of a source op,
+/// negative = synthetic root).
+#[pliron_attr(
+    name = "ll.derived_from_many",
+    format = "`[` vec($0, CharSpace(`,`)) `]`",
+    verifier = "succ"
+)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+pub struct DerivedFromManyAttr(pub Vec<i64>);
+
+/// The cross-function hop of backward attribution: this op was inlined
+/// into its function, and its cost belongs to the CALL SITE op whose id
+/// this attr carries (the callee-local [OpIdAttr] is preserved alongside
+/// for future cross-function lifting). Set by `llvm-inline`'s adjoint.
+#[pliron_attr(name = "ll.inlined_from", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub struct InlinedFromAttr(pub i64);
+
 /// Relative weights of a terminator's successors, one per successor.
 /// The probability of an edge is its weight divided by the sum of all weights.
 /// Same as LLVM's `!prof branch_weights` metadata and the `branch_weights`

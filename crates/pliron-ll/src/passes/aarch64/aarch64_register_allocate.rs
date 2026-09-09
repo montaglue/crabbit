@@ -9,7 +9,7 @@ use crate::{
             ops::{self as aarch64_ops, FuncOp},
             registers::{Register, RegisterClass, VirtualRegister},
         },
-        builtin::op_interfaces::OneRegionInterface,
+        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
@@ -84,6 +84,24 @@ impl Pass for Aarch64RegisterAllocatePass {
 
     fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let opts = CodegenOpts::from_env()?;
+        if opts.freq != BlockFreqModel::Uniform && opts.victim != SpillVictimPolicy::WeightedCost {
+            // The linear allocator only reads frequencies through the
+            // weighted victim policy; say so once instead of silently
+            // ignoring a configured profile/spectral source.
+            static NOTE: std::sync::Once = std::sync::Once::new();
+            NOTE.call_once(|| {
+                let source = match opts.freq {
+                    BlockFreqModel::Uniform => "uniform",
+                    BlockFreqModel::Spectral => "spectral",
+                    BlockFreqModel::Profile => "profile",
+                };
+                eprintln!(
+                    "crabbit: note: CRABBIT_BLOCK_FREQ={source} has no effect under the linear \
+                     allocator's default furthest-end policy; set CRABBIT_SPILL_POLICY=weighted \
+                     to consume block frequencies"
+                );
+            });
+        }
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -135,7 +153,9 @@ fn allocate_function(ctx: &mut Context, func: FuncOp, opts: &CodegenOpts) -> STA
     let live = collect_live_intervals(ctx, func);
     let call_crossing = values_live_across_calls(ctx, &live.insts, &live.intervals);
     let remat_imms = rematerializable_imms(ctx, &live, opts);
-    let weights = spill_weights(&live, &remat_imms, opts);
+    let symbol = func.get_symbol_name(ctx).to_string();
+    dump_spectral_freqs(&live, &symbol);
+    let weights = spill_weights(&live, &remat_imms, opts, &symbol);
     let allocation = linear_scan(&live.intervals, &live.classes, &call_crossing, weights.as_ref());
     let base_stack_size = func.stack_size(ctx);
     rewrite_allocated_registers(
@@ -150,6 +170,32 @@ fn allocate_function(ctx: &mut Context, func: FuncOp, opts: &CodegenOpts) -> STA
         align_to_16(base_stack_size + allocation.spill_slots * SPILL_SLOT_BYTES),
     );
     Ok(())
+}
+
+/// Experiment E4 support (docs/PROFILE-FEEDBACK-BACKWARD.md): when
+/// `CRABBIT_DUMP_FREQS=<path>` is set, append one JSON line per function
+/// with the analytic spectral frequency vector over the allocator's own
+/// fallthrough-aware machine CFG, in RA block order — the same order the
+/// blockmap ids and measured profiles use, so model and measurement join
+/// by index. Off by default; never affects allocation.
+fn dump_spectral_freqs(live: &FunctionLiveness, symbol: &str) {
+    let Ok(path) = std::env::var("CRABBIT_DUMP_FREQS") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let freqs = spectral_frequencies(&live.successors, 0);
+    let entries: Vec<String> = freqs.iter().map(|f| format!("{f}")).collect();
+    let line = format!(
+        "{{\"symbol\":\"{}\",\"spectral\":[{}]}}\n",
+        symbol,
+        entries.join(",")
+    );
+    use std::io::Write as _;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 /// Restore-cost units: a reload is priced like a memory access, a trivial
@@ -180,6 +226,22 @@ fn rematerializable_imms(
         .collect()
 }
 
+/// One frequency per block for the weighted-cost policy, per the selected
+/// [BlockFreqModel]. `profile` looks the function's `symbol` up in the
+/// `CRABBIT_PROFILE` JSON (RA-order indices — the very order
+/// `live.successors` is in) and falls back to uniform when the function is
+/// missing, the vector length disagrees with this build's CFG, or the
+/// values are unusable: a stale profile must never error.
+fn block_frequencies(live: &FunctionLiveness, opts: &CodegenOpts, symbol: &str) -> Vec<f64> {
+    let blocks = live.successors.len();
+    match opts.freq {
+        BlockFreqModel::Uniform => vec![1.0; blocks],
+        BlockFreqModel::Spectral => spectral_frequencies(&live.successors, 0),
+        BlockFreqModel::Profile => crate::passes::profile_freq::frequencies_for(symbol, blocks)
+            .unwrap_or_else(|| vec![1.0; blocks]),
+    }
+}
+
 /// Spill weights for the weighted-cost victim policy:
 /// `restore_estimate × Σ freq(use block)`. Lower weight → cheaper to
 /// spill. `None` selects the baseline furthest-end policy.
@@ -187,14 +249,12 @@ fn spill_weights(
     live: &FunctionLiveness,
     remat_imms: &HashMap<VirtualRegister, u64>,
     opts: &CodegenOpts,
+    symbol: &str,
 ) -> Option<HashMap<VirtualRegister, f64>> {
     if opts.victim != SpillVictimPolicy::WeightedCost {
         return None;
     }
-    let freqs = match opts.freq {
-        BlockFreqModel::Uniform => vec![1.0; live.successors.len()],
-        BlockFreqModel::Spectral => spectral_frequencies(&live.successors, 0),
-    };
+    let freqs = block_frequencies(live, opts, symbol);
     let weights = live
         .intervals
         .iter()
@@ -598,8 +658,11 @@ fn rewrite_allocated_registers(
                     // the def rewrite below), but a use of a trivially
                     // rematerializable value re-executes its constant def
                     // instead of reloading.
-                    if let Some(imm) = remat_imms.get(&vreg) {
-                        aarch64_ops::mov_imm(ctx, scratch, *imm).insert_before(ctx, *op);
+                    // Backward attribution: the restore executes at (and
+                    // for) this use — it inherits the use op's source id
+                    // (docs/PROFILE-FEEDBACK-BACKWARD.md).
+                    let restore = if let Some(imm) = remat_imms.get(&vreg) {
+                        aarch64_ops::mov_imm(ctx, scratch, *imm)
                     } else {
                         let (_, reload) = spill_opcodes(class);
                         aarch64_ops::ldr_sp_offset_sized(
@@ -608,8 +671,14 @@ fn rewrite_allocated_registers(
                             scratch,
                             spill_base_offset + slot * SPILL_SLOT_BYTES,
                         )
-                        .insert_before(ctx, *op);
-                    }
+                    };
+                    restore.insert_before(ctx, *op);
+                    super::opmap::inherit_derived_from(
+                        ctx,
+                        *op,
+                        restore,
+                        super::opmap::roots::REGALLOC,
+                    );
                     aarch64_ops::rewrite_register_operand(ctx, *op, key, scratch);
                     spilled_use_scratch.insert((key, vreg), scratch);
                 }
@@ -635,13 +704,20 @@ fn rewrite_allocated_registers(
                     };
                     aarch64_ops::rewrite_register_operand(ctx, *op, key, scratch);
                     let (store, _) = spill_opcodes(class);
-                    aarch64_ops::str_sp_offset_sized(
+                    let spill_store = aarch64_ops::str_sp_offset_sized(
                         ctx,
                         store,
                         scratch,
                         spill_base_offset + slot * SPILL_SLOT_BYTES,
-                    )
-                    .insert_after(ctx, *op);
+                    );
+                    spill_store.insert_after(ctx, *op);
+                    // The slot store belongs to the spilled value's def.
+                    super::opmap::inherit_derived_from(
+                        ctx,
+                        *op,
+                        spill_store,
+                        super::opmap::roots::REGALLOC,
+                    );
                 }
                 None => {}
             }
@@ -948,6 +1024,35 @@ mod tests {
                 .insert_at_back(entry, ctx);
         }
         (func, entry)
+    }
+
+    /// `CRABBIT_BLOCK_FREQ=profile` without a usable profile (or with a
+    /// profile that lacks this function) must behave exactly like uniform
+    /// — never error (docs/PROFILE-FEEDBACK-PLAN.md). The test function's
+    /// symbol (`test`) appears in no profile fixture, so this holds even
+    /// if another test set `CRABBIT_PROFILE` concurrently.
+    #[test]
+    fn profile_freq_without_profile_falls_back_to_uniform() {
+        let mut ctx = context();
+        let (func, entry) = build_pressure_with_hot_value(&mut ctx);
+        let opts = CodegenOpts {
+            victim: SpillVictimPolicy::WeightedCost,
+            freq: BlockFreqModel::Profile,
+            ..CodegenOpts::default()
+        };
+        allocate_function(&mut ctx, func, &opts).unwrap();
+        let profile_reloads = count_opcode(&ctx, entry, aarch64_ops::LdrSpOffsetOp::OPCODE);
+
+        let mut ctx = context();
+        let (func, entry) = build_pressure_with_hot_value(&mut ctx);
+        let opts = CodegenOpts {
+            victim: SpillVictimPolicy::WeightedCost,
+            ..CodegenOpts::default()
+        };
+        allocate_function(&mut ctx, func, &opts).unwrap();
+        let uniform_reloads = count_opcode(&ctx, entry, aarch64_ops::LdrSpOffsetOp::OPCODE);
+
+        assert_eq!(profile_reloads, uniform_reloads);
     }
 
     #[test]

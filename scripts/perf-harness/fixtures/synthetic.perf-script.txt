@@ -1,0 +1,19 @@
+# synthetic `perf script -F ip,sym,symoff` output for test_profile_ingest.py
+# hot_loop layout (function base 0): [id 0: 0..16] [id 2: 16..40] [id 1: 40..56] [id -1: 56..64]
+	aaaac2f107d4 hot_loop+0x0
+	aaaac2f107d8 hot_loop+0x8
+	aaaac2f107e4 hot_loop+0x10
+	aaaac2f107e8 hot_loop+0x14
+	aaaac2f107ec hot_loop+0x18
+	aaaac2f107f0 hot_loop+0x1c
+	aaaac2f107f4 hot_loop+0x20
+	aaaac2f107f8 hot_loop+0x24
+	aaaac2f107fc hot_loop+0x26
+	aaaac2f10800 hot_loop+0x27
+	aaaac2f10804 hot_loop+0x28
+	aaaac2f10820 hot_loop+0x38
+	aaaac2f10900 hot_loop+0x100
+	aaaac2f10a00 _helper+0x4
+	aaaac2f10a04 _helper+0x10
+	ffffc2f10000 some_other_fn+0x1c
+	ffffc2f10004 [unknown]+0x8

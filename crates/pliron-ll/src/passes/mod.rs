@@ -3,6 +3,7 @@ pub mod aarch64_darwin;
 pub mod aarch64_linux;
 pub mod dominance_frontier;
 pub mod hot_path;
+pub mod profile_freq;
 pub mod spectral_freq;
 pub mod llvm;
 pub mod verify;

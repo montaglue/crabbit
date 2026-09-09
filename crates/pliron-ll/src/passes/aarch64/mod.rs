@@ -6,10 +6,12 @@ pub mod aarch64_frame_lower;
 pub mod aarch64_legalize;
 pub mod aarch64_machine_cfg_cleanup;
 pub mod aarch64_object_lower;
+pub mod opmap;
 pub mod aarch64_post_ra_opts;
 pub mod aarch64_register_allocate;
 pub mod aarch64_target_opts_pre_ra;
 mod attrs;
+pub mod blockmap;
 mod elf;
 mod error;
 mod frontend;
@@ -23,7 +25,6 @@ pub mod target;
 mod util;
 pub mod verify_llvm_for_aarch64;
 
-use crate::dialects::builtin::ops::ConstantOp;
 use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
@@ -67,10 +68,18 @@ pub fn pipeline_with_allocator(os: TargetOs, allocator: impl Pass + 'static) -> 
     let mut passes = Passes::default();
     passes.add_pass(VerifyLlvmForAarch64Pass::new(os));
     passes.add_pass(LlvmAarch64AbiPass::new(os));
+    // Stamp LLVM-level op ids at the LLVM→machine boundary so isel can
+    // record what each machine op was lowered from (backward profile
+    // attribution). No-op unless the blockmap/profile-map gate is set.
+    passes.add_pass(opmap::Aarch64OpIdPass);
     passes.add_pass(LlvmToAarch64IselPass);
     passes.add_pass(Aarch64LegalizePass);
     passes.add_pass(Aarch64MachineCfgCleanupPass);
     passes.add_pass(Aarch64TargetOptsPreRaPass);
+    // Stamp stable block ids at the RA position (the CFG the frequency
+    // models describe) so the blockmap sidecar can map final .text ranges
+    // back to RA-order blocks. No-op unless CRABBIT_BLOCKMAP is set.
+    passes.add_pass(blockmap::Aarch64BlockmapIdPass);
     passes.add_pass(allocator);
     passes.add_pass(Aarch64FrameLowerPass);
     passes.add_pass(Aarch64PostRaOptsPass);
@@ -111,6 +120,7 @@ pub fn write_elf_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAI
 
 #[cfg(test)]
 mod tests {
+    use crate::dialects::builtin::ops::ConstantOp;
     #[allow(unused_imports)]
     use pliron::builtin::op_interfaces::{
         AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
@@ -183,6 +193,10 @@ mod tests {
         assert_eq!(
             Aarch64TargetOptsPreRaPass.name(),
             "aarch64-target-opts-pre-ra"
+        );
+        assert_eq!(
+            blockmap::Aarch64BlockmapIdPass.name(),
+            "aarch64-blockmap-ids"
         );
         assert_eq!(
             Aarch64RegisterAllocatePass.name(),

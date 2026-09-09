@@ -369,6 +369,22 @@ fn emit_object(
             object.display()
         )
     })?;
+    // CRABBIT_BLOCKMAP=1: the profile-feedback sidecar mapping final .text
+    // byte ranges back to RA-position block ids, next to the object
+    // (docs/PROFILE-FEEDBACK-PLAN.md). The ids were stamped by the
+    // aarch64-blockmap-ids pass; a module without them writes nothing.
+    if pliron_ll::passes::aarch64::blockmap::blockmap_enabled()
+        && let Some(json) =
+            pliron_ll::passes::aarch64::blockmap::blockmap_json_from_ir(&imported.ctx, imported.module)
+    {
+        let sidecar = object.with_extension("blockmap.json");
+        std::fs::write(&sidecar, json).map_err(|error| {
+            format!(
+                "failed to write blockmap sidecar `{}`: {error}",
+                sidecar.display()
+            )
+        })?;
+    }
     if imported.kernel_count > 0 {
         emit_kernels(imported, &object, tracing)?;
     }

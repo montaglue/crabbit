@@ -11,7 +11,8 @@
 //! |---|---|---|
 //! | `CRABBIT_SPILL_POLICY` | `furthest`, `weighted` | `furthest` |
 //! | `CRABBIT_RESTORE_ESTIMATE` | `reload`, `remat`, `egraph` | `reload` |
-//! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral` | `uniform` |
+//! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile` | `uniform` |
+//! | `CRABBIT_PROFILE` | path to a `profile.json` | unset |
 //!
 //! `furthest` is the classic Poletto–Sarkar victim choice and the exact
 //! pre-options behavior. `weighted` scores candidates by
@@ -25,7 +26,16 @@
 //! computes analytical block frequencies via Perron–Frobenius power
 //! iteration ([crate::passes::spectral_freq], from
 //! combinatorial-matrix-theory Experiment A); `uniform` weights every
-//! block equally.
+//! block equally. `profile` reads *measured* frequencies from the
+//! `CRABBIT_PROFILE` JSON (produced by
+//! `scripts/perf-harness/profile_ingest.py` from `perf` samples and the
+//! `CRABBIT_BLOCKMAP=1` sidecars, normalized to entry = 1.0 like
+//! spectral; see docs/PROFILE-FEEDBACK-PLAN.md and
+//! [crate::passes::profile_freq]); functions or blocks missing from the
+//! profile fall back to uniform — a stale profile never errors. Note that
+//! the linear allocator only consumes frequencies through the `weighted`
+//! spill policy: `profile` (or `spectral`) with the default `furthest`
+//! policy changes nothing, and the allocator prints a one-time note.
 
 use thiserror::Error;
 
@@ -75,6 +85,10 @@ pub enum BlockFreqModel {
     Uniform,
     /// Perron–Frobenius stationary frequencies of the CFG random walk.
     Spectral,
+    /// Measured frequencies from the `CRABBIT_PROFILE` JSON (per function
+    /// symbol, one value per RA-order block; uniform fallback per
+    /// function when absent). See [crate::passes::profile_freq].
+    Profile,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -117,11 +131,12 @@ impl CodegenOpts {
         let freq = match env("CRABBIT_BLOCK_FREQ").as_deref() {
             None | Some("uniform") => BlockFreqModel::Uniform,
             Some("spectral") => BlockFreqModel::Spectral,
+            Some("profile") => BlockFreqModel::Profile,
             Some(other) => {
                 return Err(input_error_noloc!(CodegenOptsErr::UnknownValue {
                     var: "CRABBIT_BLOCK_FREQ",
                     value: other.to_string(),
-                    expected: "uniform, spectral",
+                    expected: "uniform, spectral, profile",
                 }));
             }
         };

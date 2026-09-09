@@ -17,6 +17,9 @@ combine.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
 log.workspace = true
+# Profile-feedback sidecars (docs/PROFILE-FEEDBACK-PLAN.md): the blockmap
+# writer and the CRABBIT_PROFILE reader exchange plain JSON.
+serde_json.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

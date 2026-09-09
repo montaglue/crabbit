@@ -7,7 +7,9 @@ pub mod attributes;
 pub mod op_interfaces;
 pub mod ops;
 
-pub use attributes::{BranchWeightsAttr, BytesAttr, DataAttr, DataReloc, LinkageAttr, TlsAttr};
+pub use attributes::{
+    BlockmapIdAttr, BranchWeightsAttr, DerivedFromAttr, DerivedFromManyAttr, InlinedFromAttr, OpIdAttr, BytesAttr, DataAttr, DataReloc, LinkageAttr, TlsAttr,
+};
 
 use pliron::{
     context::Context,

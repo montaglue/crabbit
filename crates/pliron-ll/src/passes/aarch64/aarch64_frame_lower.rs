@@ -89,7 +89,9 @@ fn rewrite_stack_arg_loads(ctx: &mut Context, func: FuncOp, frame_bytes: u64) {
             let rd = aarch64_ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref())
                 .expect("ldr_stack_arg must define a destination register");
             let offset = aarch64_ops::imm(ctx, op).unwrap_or(0);
-            aarch64_ops::ldr_sp_offset(ctx, rd, offset + frame_bytes).insert_before(ctx, op);
+            let rebased = aarch64_ops::ldr_sp_offset(ctx, rd, offset + frame_bytes);
+            rebased.insert_before(ctx, op);
+            super::opmap::inherit_derived_from(ctx, op, rebased, super::opmap::roots::FRAME);
             Operation::erase(op, ctx);
         }
     }
@@ -121,9 +123,11 @@ fn legalize_large_sp_address_offsets(ctx: &mut Context, func: FuncOp) {
                 let rd = aarch64_ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref())
                     .expect("add_sp_offset must define a destination register");
                 aarch64_ops::set_imm(ctx, op, 0);
-                let mark = materialize_offset_in_x16(ctx, op, imm);
-                aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, rd, rd, X16)
-                    .insert_after(ctx, mark);
+                let source = super::opmap::derived_from(ctx, op);
+                let mark = materialize_offset_in_x16(ctx, op, imm, source);
+                let fixup = aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, rd, rd, X16);
+                fixup.insert_after(ctx, mark);
+                super::opmap::inherit_derived_from(ctx, op, fixup, super::opmap::roots::FRAME);
                 continue;
             }
             let Some((reg_offset_opcode, scale)) = sp_mem_reg_offset_form(opcode) else {
@@ -140,14 +144,18 @@ fn legalize_large_sp_address_offsets(ctx: &mut Context, func: FuncOp) {
             // off the register base.
             let rt = aarch64_ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref())
                 .expect("sp-offset memory op must carry a data register");
+            let source = super::opmap::derived_from(ctx, op);
             let base = aarch64_ops::add_sp_offset(ctx, X17, 0);
             base.insert_before(ctx, op);
-            let mark = materialize_offset_in_x16(ctx, base, imm);
-            aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, X17, X17, X16)
-                .insert_after(ctx, mark);
+            super::opmap::inherit_derived_from(ctx, op, base, super::opmap::roots::FRAME);
+            let mark = materialize_offset_in_x16(ctx, base, imm, source);
+            let fixup = aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, X17, X17, X16);
+            fixup.insert_after(ctx, mark);
+            super::opmap::inherit_derived_from(ctx, op, fixup, super::opmap::roots::FRAME);
             let access =
                 aarch64_ops::ldr_reg_offset_sized(ctx, reg_offset_opcode, rt, X17, 0);
             access.insert_before(ctx, op);
+            super::opmap::inherit_derived_from(ctx, op, access, super::opmap::roots::FRAME);
             Operation::erase(op, ctx);
         }
     }
@@ -159,16 +167,24 @@ fn materialize_offset_in_x16(
     ctx: &mut Context,
     mark: Ptr<Operation>,
     imm: u64,
+    source: Option<i64>,
 ) -> Ptr<Operation> {
+    let stamp = |ctx: &Context, op: Ptr<Operation>| {
+        if let Some(from) = source {
+            super::opmap::set_derived_from(ctx, op, from);
+        }
+    };
     let mut mark = mark;
     let movz = aarch64_ops::movz(ctx, X16, imm & 0xffff, 0);
     movz.insert_after(ctx, mark);
+    stamp(ctx, movz);
     mark = movz;
     for half in 1..4u64 {
         let bits = (imm >> (16 * half)) & 0xffff;
         if bits != 0 {
             let movk = aarch64_ops::movk(ctx, X16, bits, 16 * half);
             movk.insert_after(ctx, mark);
+            stamp(ctx, movk);
             mark = movk;
         }
     }
@@ -223,6 +239,9 @@ fn insert_prologue(ctx: &mut Context, entry: Ptr<BasicBlock>, stack_size: u64) {
         } else {
             op.insert_at_front(entry, ctx);
         }
+        if super::blockmap::blockmap_enabled() {
+            super::opmap::set_derived_from(ctx, op, super::opmap::roots::FRAME);
+        }
         after = Some(op);
     }
 }
@@ -263,7 +282,11 @@ fn insert_block_epilogues(ctx: &mut Context, block: Ptr<BasicBlock>, stack_size:
 
     for mark in marks {
         for bytes in stack_chunks(stack_size).into_iter().rev() {
-            aarch64_ops::add_sp_imm(ctx, bytes).insert_before(ctx, mark);
+            let op = aarch64_ops::add_sp_imm(ctx, bytes);
+            op.insert_before(ctx, mark);
+            if super::blockmap::blockmap_enabled() {
+                super::opmap::set_derived_from(ctx, op, super::opmap::roots::FRAME);
+            }
         }
     }
 }

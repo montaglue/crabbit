@@ -148,7 +148,15 @@ fn materialize_fallthrough_branches(ctx: &mut Context, blocks: &[Ptr<BasicBlock>
         let (block, next) = (pair[0], pair[1]);
         let (_, end) = block_control_flow(ctx, block);
         if end.is_none() {
-            aarch64_ops::b(ctx, next).insert_at_back(block, ctx);
+            let branch = aarch64_ops::b(ctx, next);
+            branch.insert_at_back(block, ctx);
+            if super::blockmap::blockmap_enabled() {
+                super::opmap::set_derived_from(
+                    ctx,
+                    branch,
+                    super::opmap::roots::PLACEMENT,
+                );
+            }
         }
     }
 }
