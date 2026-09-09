@@ -80,3 +80,51 @@ merging.
 - Per-pass unit tests with hand-built IR including the negative cases
   (may-alias store kills forwarding; data-dependent divisor untouched;
   no hoisting past a store that may alias).
+
+## Backward dataflow passes (added 2026-08-31, user direction)
+
+The existing mid-end is forward-only except block-local DSE/DCE in
+simplify.rs. Backward-analysis passes to add, on top of M1's analysis.rs
+(shared CFG utilities; generic backward bitset worklist over the region
+CFG, differential-tested against cmt-boolean-dataflow, whose boolean-matrix
+formulation is exactly the A^T of the forward problems — the CMT tie-in):
+
+6. **global-dse** — backward memory liveness: delete a store when every
+   path to exit hits another store to the same (syntactic-model) address
+   first, or the address is a non-escaping alloca that is never loaded
+   after it. Value for the experiments: dead stores inflate str_sp counts
+   the RA sweep attributes to spilling.
+7. **sink** — liveness-driven code sinking: move a pure op into the block
+   of its uses (or the nearest common post-dominated block) when that
+   shortens live ranges. NOTE: this changes register pressure — the RA
+   experiments' independent variable — so unlike the rest of the mid-end
+   it lands as an EXPLICIT axis (`CRABBIT_MIDEND_DISABLE=sink`, default ON
+   but every sweep must record it), and "policy ranking with vs without
+   sinking" is itself an experiment worth running.
+8. **adce** — aggressive DCE: mark control-flow/side-effect roots, walk
+   uses backward, delete everything unmarked, rewrite branches whose
+   targets became empty. Subsumes the local DCE for cross-block junk.
+9. **pre/lcm** (later, biggest) — lazy code motion: backward
+   anticipability + forward availability, subsumes most of LICM and
+   cross-diamond CSE. Only after 6–8 prove out; it reorders computation
+   enough to need its own verification round.
+
+Post-dominators: analysis.rs grows them next to dominators (same CHK on
+the reversed CFG; exit-block handling for multiple returns — synthetic
+exit). Sequencing: M3 starts when M1's analysis.rs + gvn land (same files;
+no concurrent edits).
+
+## Sink cross-target finding (2026-08-31, measured)
+
+gemm_tiled, sink on vs off, SAME 128 registers: GPU 1.492→1.643 ms
+(+10.1%); CPU kfn_ldr_sp −5.8%, runtime −2.0%. Root cause (PTX diff = two
+`add.s32` moved): sinking placed the adds under divergent tile-bound
+guards inside the k-loop. On SIMT the warp executes both sides of a
+divergent guard, so the "skipped" work isn't skipped, and the sunk chain
+(add→setp→bra→guarded global ld→st.shared→bar.sync) lengthens the
+barrier-critical path every iteration, unhidden at 33% occupancy. On CPU
+the same move genuinely skips work and shortens live ranges.
+Follow-up: target-aware sink policy — kernel pipeline forbids sinking
+that adds control dependence (or requires warp-uniform guards); host
+pipeline keeps the aggressive form. Until then the recorded axis
+(CRABBIT_MIDEND_DISABLE=sink) is the control.
