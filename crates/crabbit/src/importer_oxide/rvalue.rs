@@ -200,8 +200,8 @@ pub(super) fn import_rvalue<'tcx>(
                     ));
                 }
                 let mut operands = operands.iter();
-                let data_operand = operands.next().unwrap();
-                let metadata_operand = operands.next().unwrap();
+                let data_operand = operands.next().expect("operand count checked above");
+                let metadata_operand = operands.next().expect("operand count checked above");
                 let data = import_operand(tcx, ctx, state, insert_block, body, data_operand)?;
                 let metadata =
                     import_operand(tcx, ctx, state, insert_block, body, metadata_operand)?;

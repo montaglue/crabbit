@@ -85,7 +85,7 @@ pub(super) fn import_statement<'tcx>(
             let elem_size = layout_size_of_ty(tcx, pointee_ty(src_ty)?)?;
             let byte_count = scale_index(ctx, insert_block, count, elem_size)?;
 
-            let memcpy: crate::identifier::Identifier = "memcpy".try_into().unwrap();
+            let memcpy: crate::identifier::Identifier = "memcpy".try_into().expect("static identifier literal");
             let ptr_ty = llvm_ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
@@ -177,7 +177,7 @@ pub(super) fn import_terminator<'tcx>(
                 } else {
                     let block = BasicBlock::new(
                         ctx,
-                        Some(format!("switch{}", idx + 1).try_into().unwrap()),
+                        Some(format!("switch{}", idx + 1).try_into().expect("digits are legal identifier characters")),
                         vec![],
                     );
                     let region = insert_block

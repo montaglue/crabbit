@@ -312,9 +312,9 @@ pub(super) fn llvm_decl_type(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
         });
         return match name {
             Some(name) => {
-                let name = format!("{name}__llvm").try_into().unwrap();
+                let name = format!("{name}__llvm").try_into().expect("suffixing an existing legal identifier keeps it legal");
                 llvm::types::StructType::get_named(ctx, name, fields)
-                    .unwrap()
+                    .expect("the __llvm mirror name maps 1:1 to this field set")
                     .into()
             }
             None => llvm::types::StructType::get_unnamed(ctx, fields.unwrap_or_default()).into(),
@@ -353,7 +353,7 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         ("realloc", realloc_ty),
         ("calloc", calloc_ty),
     ] {
-        let decl = new_llvm_func_decl(ctx, name.try_into().unwrap(), ty, LinkageAttr::ExternalLinkage);
+        let decl = new_llvm_func_decl(ctx, name.try_into().expect("static identifier literal"), ty, LinkageAttr::ExternalLinkage);
         decl.get_operation().insert_at_back(module_body, ctx);
     }
 
@@ -361,7 +361,7 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         ctx,
         module_body,
         allocator_symbol(tcx, "__rust_alloc"),
-        "malloc".try_into().unwrap(),
+        "malloc".try_into().expect("static identifier literal"),
         rust_alloc_ty,
         |args, _one| vec![args[0]],
         Some(ptr_ty),
@@ -370,7 +370,7 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         ctx,
         module_body,
         allocator_symbol(tcx, "__rust_dealloc"),
-        "free".try_into().unwrap(),
+        "free".try_into().expect("static identifier literal"),
         rust_dealloc_ty,
         |args, _one| vec![args[0]],
         None,
@@ -379,7 +379,7 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         ctx,
         module_body,
         allocator_symbol(tcx, "__rust_realloc"),
-        "realloc".try_into().unwrap(),
+        "realloc".try_into().expect("static identifier literal"),
         rust_realloc_ty,
         |args, _one| vec![args[0], args[3]],
         Some(ptr_ty),
@@ -388,7 +388,7 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         ctx,
         module_body,
         allocator_symbol(tcx, "__rust_alloc_zeroed"),
-        "calloc".try_into().unwrap(),
+        "calloc".try_into().expect("static identifier literal"),
         rust_alloc_ty,
         |args, one| vec![one, args[0]],
         Some(ptr_ty),
@@ -458,5 +458,5 @@ pub(super) fn allocator_symbol<'tcx>(tcx: TyCtxt<'tcx>, name: &str) -> crate::id
     rustc_symbol_mangling::mangle_internal_symbol(tcx, name)
         .as_str()
         .try_into()
-        .unwrap()
+        .expect("mangled symbols are legal identifiers")
 }

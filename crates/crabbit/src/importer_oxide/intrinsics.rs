@@ -133,7 +133,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                 ));
             }
             let helper: crate::identifier::Identifier =
-                format!("__aarch64_swp{size}_acq_rel").try_into().unwrap();
+                format!("__aarch64_swp{size}_acq_rel").try_into().expect("size digits are legal identifier characters");
             let ptr_ty = llvm_ptr_ty(ctx);
             declare_external_function(
                 ctx,
@@ -172,7 +172,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let val_ty: TypeHandle = IntegerType::get(ctx, 32, Signedness::Signed).into();
             let val = cast_value_to_type(ctx, insert_block, val, val_ty);
 
-            let memset: crate::identifier::Identifier = "memset".try_into().unwrap();
+            let memset: crate::identifier::Identifier = "memset".try_into().expect("static identifier literal");
             let ptr_ty = llvm_ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
@@ -529,9 +529,9 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let elem_size = layout_size_of_ty(tcx, mono_ty(tcx, state, elem))?;
             let byte_count = scale_index(ctx, insert_block, count, elem_size)?;
             let helper: crate::identifier::Identifier = if name == "copy" {
-                "memmove".try_into().unwrap()
+                "memmove".try_into().expect("static identifier literal")
             } else {
-                "memcpy".try_into().unwrap()
+                "memcpy".try_into().expect("static identifier literal")
             };
             let ptr_ty = llvm_ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
@@ -571,7 +571,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let temp = mir_dialect::ops::AllocaOp::new(ctx, temp_ty);
             temp.get_operation().insert_at_back(insert_block, ctx);
             let temp_ptr = temp.get_result(ctx);
-            let memcpy: crate::identifier::Identifier = "memcpy".try_into().unwrap();
+            let memcpy: crate::identifier::Identifier = "memcpy".try_into().expect("static identifier literal");
             let ptr_ty = llvm_ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
@@ -1150,7 +1150,7 @@ pub(super) fn lower_float_math_intrinsic<'tcx>(
         } => (if is_f32 { f32_symbol } else { f64_symbol }).to_string(),
     }
     .try_into()
-    .unwrap();
+    .expect("libm symbol names are legal identifiers");
     let arg_tys: Vec<TypeHandle> = values.iter().map(|value| value.get_type(ctx)).collect();
     declare_external_function(ctx, state.module_body, callee.clone(), arg_tys, Some(float_ty));
     let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, values, Some(float_ty));

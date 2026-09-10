@@ -719,7 +719,7 @@ pub(super) fn import_str_constant<'tcx>(
         ctx,
         IntegerAttr::new(
             usize_ty,
-            APInt::from_u64(value.len() as u64, NonZero::new(64).unwrap()),
+            APInt::from_u64(value.len() as u64, NonZero::new(64).expect("64 is nonzero")),
         ),
     );
     len.get_operation().insert_at_back(insert_block, ctx);
@@ -819,13 +819,13 @@ pub(super) fn integer_constant(
         .downcast_ref::<IntegerType>()
         .ok_or_else(|| "MIR integer constant has non-integer type".to_string())?;
     let width = int_ty.width();
-    let int_ty: TypedHandle<IntegerType> = TypedHandle::from_handle(ty, ctx).unwrap();
+    let int_ty: TypedHandle<IntegerType> = TypedHandle::from_handle(ty, ctx).expect("integer_constant is only called with integer types");
     drop(ty_ref);
     Ok(mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(
             int_ty,
-            APInt::from_u128(bits, NonZero::new(width as usize).unwrap()),
+            APInt::from_u128(bits, NonZero::new(width as usize).expect("integer types have nonzero width")),
         ),
     ))
 }

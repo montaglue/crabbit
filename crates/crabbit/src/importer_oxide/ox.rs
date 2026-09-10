@@ -37,7 +37,7 @@ use crate::op::Op;
 use crate::region::Region;
 
 pub fn func_linkage_key() -> Identifier {
-    "mir_func_linkage".try_into().unwrap()
+    "mir_func_linkage".try_into().expect("static identifier literal")
 }
 
 pub mod types {
@@ -181,7 +181,7 @@ pub mod ops {
             let arg_types = ty.deref(ctx).arg_types();
             let region = op.deref(ctx).get_region(0);
             let entry =
-                BasicBlock::new(ctx, Some("entry".try_into().unwrap()), arg_types);
+                BasicBlock::new(ctx, Some("entry".try_into().expect("static identifier literal")), arg_types);
             entry.insert_at_front(region, ctx);
             FuncOp { op }
         }

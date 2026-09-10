@@ -30,7 +30,7 @@ pub(super) fn lower_i128_divrem(
         _ => return Err(format!("lower_i128_divrem on non-div/rem binop {op:?}")),
     }
     .try_into()
-    .unwrap();
+    .expect("compiler-rt symbol names are legal identifiers");
     let int_ty = lhs.get_type(ctx);
     declare_external_function(
         ctx,
@@ -66,7 +66,7 @@ pub(super) fn lower_i128_to_float(
         (false, false) => "__floatuntidf",
     }
     .try_into()
-    .unwrap();
+    .expect("compiler-rt symbol names are legal identifiers");
     let int_ty = input.get_type(ctx);
     declare_external_function(ctx, module_body, callee.clone(), vec![int_ty], Some(float_ty));
     let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, vec![input], Some(float_ty));
@@ -102,7 +102,7 @@ pub(super) fn lower_float_to_i128_sat(
         (false, false) => "__fixunsdfti",
     }
     .try_into()
-    .unwrap();
+    .expect("compiler-rt symbol names are legal identifiers");
     declare_external_function(
         ctx,
         module_body,
@@ -1055,8 +1055,8 @@ pub(super) fn lower_arguments_from_str_call<'tcx>(
     let one = mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(
-            TypedHandle::from_handle(usize_ty, ctx).unwrap(),
-            APInt::from_u64(1, NonZero::new(64).unwrap()),
+            TypedHandle::from_handle(usize_ty, ctx).expect("usize_ty constructs an IntegerType"),
+            APInt::from_u64(1, NonZero::new(64).expect("64 is nonzero")),
         ),
     );
     one.get_operation().insert_at_back(insert_block, ctx);
