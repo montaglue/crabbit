@@ -10,7 +10,7 @@ use crate::{
     ir::location::Located,
     parsable::{Parsable, ParseResult, StateStream},
     printable::{self, Printable},
-    result::STAIRResult,
+    result::CrabbitResult,
     verify_err_noloc,
 };
 
@@ -217,7 +217,7 @@ pub struct FunctionAbiAttr(pub FunctionAbi);
 pub struct FunctionAbiArgErr;
 
 impl Verify for FunctionAbiAttr {
-    fn verify(&self, _ctx: &Context) -> STAIRResult<()> {
+    fn verify(&self, _ctx: &Context) -> CrabbitResult<()> {
         if self
             .0
             .args

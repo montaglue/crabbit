@@ -5,7 +5,7 @@ use crate::{
         llvm::attributes::ICmpPredicateAttr,
     },
     input_error_noloc,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{
@@ -27,7 +27,7 @@ pub(super) fn lower_binary_128(
     rhs: LoweredValue,
     result_ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if let (LoweredValue::Imm(lhs), LoweredValue::Imm(rhs)) = (&lhs, &rhs)
         && let Some(imm) = fold_binary(ctx, kind, *lhs, *rhs, result_ty)
     {
@@ -199,7 +199,7 @@ pub(super) fn lower_compare_value(
     entry: Ptr<crate::ir::basic_block::BasicBlock>,
     compare: CompareValue,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     if is_128_bit_integer(ctx, compare.lhs_ty) {
         return lower_compare_128(ctx, entry, compare, next_vreg);
     }
@@ -233,7 +233,7 @@ fn lower_compare_128(
     entry: Ptr<crate::ir::basic_block::BasicBlock>,
     compare: CompareValue,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     let (lhs_lo, lhs_hi) = materialize_pair(
         ctx,
         entry,
@@ -351,7 +351,7 @@ fn emit_logic_bit(
     lhs: Register,
     rhs: Register,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     let dst = fresh_vreg(next_vreg);
     x86_64_ops::binary(ctx, opcode, dst, lhs, rhs).insert_at_back(entry, ctx);
     Ok(dst)
@@ -364,7 +364,7 @@ fn lower_shift_right_128(
     hi: Register,
     shift: u32,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if shift == 0 {
         return Ok(LoweredValue::RegPair(lo, hi));
     }
@@ -441,7 +441,7 @@ fn lower_shift_left_128(
     hi: Register,
     shift: u32,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if shift == 0 {
         return Ok(LoweredValue::RegPair(lo, hi));
     }
@@ -513,7 +513,7 @@ fn fresh_shift(
     entry: Ptr<crate::ir::basic_block::BasicBlock>,
     shift: u32,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     let reg = fresh_vreg(next_vreg);
     materialize_u64_immediate(ctx, entry, reg, shift as u64);
     Ok(reg)

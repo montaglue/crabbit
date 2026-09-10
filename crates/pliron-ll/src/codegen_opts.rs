@@ -39,7 +39,7 @@
 
 use thiserror::Error;
 
-use crate::{input_error_noloc, result::STAIRResult};
+use crate::{input_error_noloc, result::CrabbitResult};
 
 #[derive(Debug, Error)]
 pub enum CodegenOptsErr {
@@ -100,7 +100,7 @@ pub struct CodegenOpts {
 
 impl CodegenOpts {
     /// Parse the option environment variables; unset means default.
-    pub fn from_env() -> STAIRResult<Self> {
+    pub fn from_env() -> CrabbitResult<Self> {
         let victim = match env("CRABBIT_SPILL_POLICY").as_deref() {
             None | Some("furthest") => SpillVictimPolicy::FurthestEnd,
             Some("weighted") => SpillVictimPolicy::WeightedCost,

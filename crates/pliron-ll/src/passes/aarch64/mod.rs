@@ -29,7 +29,7 @@ use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
     conversion::pass::{AnalysisManager, Pass, Passes},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use self::{
@@ -91,29 +91,29 @@ pub fn pipeline_with_allocator(os: TargetOs, allocator: impl Pass + 'static) -> 
 }
 
 /// Runs [pipeline] on `root` (a `builtin.module`) in place.
-pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>, os: TargetOs) -> STAIRResult<()> {
+pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>, os: TargetOs) -> CrabbitResult<()> {
     pipeline(os).run(root, ctx, &mut AnalysisManager::default())?;
     Ok(())
 }
 
-pub fn emit_macho_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+pub fn emit_macho_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
     lower_module(ctx, root, TargetOs::Darwin)?;
     write_macho_object_from_ir(ctx, root)
 }
 
-pub fn emit_elf_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+pub fn emit_elf_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
     lower_module(ctx, root, TargetOs::Linux)?;
     write_elf_object_from_ir(ctx, root)
 }
 
 /// Translates a module lowered by [pipeline] into Mach-O object bytes.
-pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
     let object = aarch64_macho_lower(ctx, root)?;
     Ok(macho::write_macho_object(ctx, object))
 }
 
 /// Translates a module lowered by [pipeline] into ELF object bytes.
-pub fn write_elf_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+pub fn write_elf_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
     let parts = collect_object_parts(ctx, root, TargetOs::Linux)?;
     Ok(elf::write_elf_object(&parts))
 }

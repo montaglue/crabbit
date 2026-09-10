@@ -1,4 +1,4 @@
-//! Rust MIR dialect for STAIR.
+//! Rust MIR dialect for crabbit.
 //!
 //! This dialect models a small, SSA-friendly subset of rustc MIR that is useful
 //! as a frontend boundary before lowering to the existing LLVM dialect.

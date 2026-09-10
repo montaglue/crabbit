@@ -50,7 +50,7 @@ use crate::{
     linked_list::ContainsLinkedList,
     printable::Printable,
     r#type::TypeHandle,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 #[derive(Debug, Error)]
@@ -91,7 +91,7 @@ pub fn write_ptx_from_ir(
     ctx: &Context,
     root: Ptr<Operation>,
     target: &PtxTarget,
-) -> STAIRResult<String> {
+) -> CrabbitResult<String> {
     Ok(write_ptx_and_linemap_from_ir(ctx, root, target)?.0)
 }
 
@@ -116,7 +116,7 @@ pub fn write_ptx_and_linemap_from_ir(
     ctx: &Context,
     root: Ptr<Operation>,
     target: &PtxTarget,
-) -> STAIRResult<(String, Option<String>)> {
+) -> CrabbitResult<(String, Option<String>)> {
     write_ptx_linemap_inner(ctx, root, target, linemap_enabled())
 }
 
@@ -127,7 +127,7 @@ pub fn write_ptx_with_forced_linemap(
     ctx: &Context,
     root: Ptr<Operation>,
     target: &PtxTarget,
-) -> STAIRResult<(String, String)> {
+) -> CrabbitResult<(String, String)> {
     let (ptx, map) = write_ptx_linemap_inner(ctx, root, target, true)?;
     Ok((ptx, map.expect("linemap forced on")))
 }
@@ -137,7 +137,7 @@ fn write_ptx_linemap_inner(
     root: Ptr<Operation>,
     target: &PtxTarget,
     want_linemap: bool,
-) -> STAIRResult<(String, Option<String>)> {
+) -> CrabbitResult<(String, Option<String>)> {
     let root_op = Operation::get_op_dyn(root, ctx);
     let module = root_op
         .downcast_ref::<ModuleOp>()
@@ -242,7 +242,7 @@ enum GlobalSpace {
 }
 
 /// A module global as a PTX variable declaration.
-fn emit_global(ctx: &Context, global: &GlobalOp) -> STAIRResult<(String, GlobalSpace, String)> {
+fn emit_global(ctx: &Context, global: &GlobalOp) -> CrabbitResult<(String, GlobalSpace, String)> {
     let name = global.get_symbol_name(ctx).to_string();
     let Some(data) = crate::ll::global_data(ctx, global) else {
         return Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
@@ -378,7 +378,7 @@ impl std::fmt::Display for Reg {
 
 /// The register class holding a value of `ty`, or an error for types PTX
 /// emission does not model yet.
-fn classify(ctx: &Context, ty: TypeHandle) -> STAIRResult<RegClass> {
+fn classify(ctx: &Context, ty: TypeHandle) -> CrabbitResult<RegClass> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         return match int_ty.width() {
@@ -405,7 +405,7 @@ fn classify(ctx: &Context, ty: TypeHandle) -> STAIRResult<RegClass> {
 }
 
 /// The bit width of `ty`; pointers count as 64.
-fn width_of(ctx: &Context, ty: TypeHandle) -> STAIRResult<u32> {
+fn width_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u32> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         return Ok(int_ty.width());
@@ -425,7 +425,7 @@ fn width_of(ctx: &Context, ty: TypeHandle) -> STAIRResult<u32> {
 }
 
 /// Byte size of `ty` when indexed through or loaded/stored: the GEP stride.
-fn size_of_ty(ctx: &Context, ty: TypeHandle) -> STAIRResult<u64> {
+fn size_of_ty(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         return Ok((int_ty.width() as u64).div_ceil(8).max(1));
@@ -524,7 +524,7 @@ fn emit_kernel(
     ctx: &Context,
     func: &LlvmFuncOp,
     globals: &HashMap<String, GlobalSpace>,
-) -> STAIRResult<(String, Vec<LineTag>)> {
+) -> CrabbitResult<(String, Vec<LineTag>)> {
     let name = func.get_symbol_name(ctx).to_string();
     let region = func
         .get_region(ctx)
@@ -668,7 +668,7 @@ impl<'c> FuncEmitter<'c> {
         self.tags.push(self.current.clone());
     }
 
-    fn lookup(&self, value: Value) -> STAIRResult<Reg> {
+    fn lookup(&self, value: Value) -> CrabbitResult<Reg> {
         self.values.get(&value).copied().ok_or_else(|| {
             input_error_noloc!(NvptxErr::UndefinedValue(format!("{value:?}")))
         })
@@ -730,7 +730,7 @@ impl<'c> FuncEmitter<'c> {
 
     // Block and op emission --------------------------------------------
 
-    fn emit_block(&mut self, block: Ptr<BasicBlock>) -> STAIRResult<()> {
+    fn emit_block(&mut self, block: Ptr<BasicBlock>) -> CrabbitResult<()> {
         let ops: Vec<Ptr<Operation>> = block.deref(self.ctx).iter(self.ctx).collect();
         for op_ptr in ops {
             self.emit_op(op_ptr)?;
@@ -738,7 +738,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_op(&mut self, op_ptr: Ptr<Operation>) -> STAIRResult<()> {
+    fn emit_op(&mut self, op_ptr: Ptr<Operation>) -> CrabbitResult<()> {
         let ctx = self.ctx;
         // Attribution bracket: every line emitted while lowering this op —
         // including edge-block copies materialized for its branches —
@@ -880,7 +880,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryIntKind) -> STAIRResult<()> {
+    fn emit_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryIntKind) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let (lhs, rhs, result) = {
             let op_deref = op_ptr.deref(ctx);
@@ -959,7 +959,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_icmp(&mut self, icmp: &ICmpOp) -> STAIRResult<()> {
+    fn emit_icmp(&mut self, icmp: &ICmpOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let lhs = icmp.get_operation().deref(ctx).get_operand(0);
         let rhs = icmp.get_operation().deref(ctx).get_operand(1);
@@ -1003,7 +1003,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_zext(&mut self, zext: &ZExtOp) -> STAIRResult<()> {
+    fn emit_zext(&mut self, zext: &ZExtOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src_val = zext.get_operand(ctx);
         let result = zext.get_result(ctx);
@@ -1038,7 +1038,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_sext(&mut self, sext: &SExtOp) -> STAIRResult<()> {
+    fn emit_sext(&mut self, sext: &SExtOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src_val = sext.get_operand(ctx);
         let result = sext.get_result(ctx);
@@ -1066,7 +1066,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_trunc(&mut self, trunc: &TruncOp) -> STAIRResult<()> {
+    fn emit_trunc(&mut self, trunc: &TruncOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src_val = trunc.get_operand(ctx);
         let result = trunc.get_result(ctx);
@@ -1109,7 +1109,7 @@ impl<'c> FuncEmitter<'c> {
 
     /// Casts that only reinterpret a register (bitcast, inttoptr, ptrtoint)
     /// alias the operand's register.
-    fn emit_reg_alias(&mut self, src_val: Value, result: Value) -> STAIRResult<()> {
+    fn emit_reg_alias(&mut self, src_val: Value, result: Value) -> CrabbitResult<()> {
         let src = self.lookup(src_val)?;
         let dst_class = classify(self.ctx, result.get_type(self.ctx))?;
         if src.class != dst_class {
@@ -1122,7 +1122,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_gep(&mut self, gep: &GetElementPtrOp) -> STAIRResult<()> {
+    fn emit_gep(&mut self, gep: &GetElementPtrOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let base = self.lookup(gep.get_operand_src_ptr(ctx))?;
         let indices = gep.indices(ctx);
@@ -1187,7 +1187,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_load(&mut self, load: &LoadOp) -> STAIRResult<()> {
+    fn emit_load(&mut self, load: &LoadOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let result = load.get_result(ctx);
         let addr = self.lookup(load.get_operand_address(ctx))?;
@@ -1210,7 +1210,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_store(&mut self, store: &StoreOp) -> STAIRResult<()> {
+    fn emit_store(&mut self, store: &StoreOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let value = store.get_operand_value(ctx);
         let addr = self.lookup(store.get_operand_address(ctx))?;
@@ -1229,7 +1229,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_call(&mut self, call: &CallOp) -> STAIRResult<()> {
+    fn emit_call(&mut self, call: &CallOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let callee = match call.callee(ctx) {
             CallOpCallable::Direct(name) => name.to_string(),
@@ -1360,7 +1360,7 @@ impl<'c> FuncEmitter<'c> {
         ))))
     }
 
-    fn emit_float_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryFloatKind) -> STAIRResult<()> {
+    fn emit_float_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryFloatKind) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let (lhs, rhs, result) = {
             let op_deref = op_ptr.deref(ctx);
@@ -1396,7 +1396,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_fcmp(&mut self, fcmp: &FCmpOp) -> STAIRResult<()> {
+    fn emit_fcmp(&mut self, fcmp: &FCmpOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let lhs = fcmp.get_operation().deref(ctx).get_operand(0);
         let rhs = fcmp.get_operation().deref(ctx).get_operand(1);
@@ -1440,7 +1440,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_select(&mut self, select: &SelectOp) -> STAIRResult<()> {
+    fn emit_select(&mut self, select: &SelectOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let op = select.get_operation();
         let (cond, on_true, on_false) = {
@@ -1474,7 +1474,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_int_to_float(&mut self, src_val: Value, result: Value, signed: bool) -> STAIRResult<()> {
+    fn emit_int_to_float(&mut self, src_val: Value, result: Value, signed: bool) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src = self.lookup(src_val)?;
         let src_width = width_of(ctx, src_val.get_type(ctx))?;
@@ -1505,7 +1505,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_float_to_int(&mut self, src_val: Value, result: Value, signed: bool) -> STAIRResult<()> {
+    fn emit_float_to_int(&mut self, src_val: Value, result: Value, signed: bool) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src = self.lookup(src_val)?;
         let dst_width = width_of(ctx, result.get_type(ctx))?;
@@ -1533,7 +1533,7 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_cond_br(&mut self, cond_br: &CondBrOp) -> STAIRResult<()> {
+    fn emit_cond_br(&mut self, cond_br: &CondBrOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let condition = self.lookup(cond_br.get_operand_condition(ctx))?;
         let true_dest = cond_br.get_operation().deref(ctx).get_successor(0);
@@ -1555,7 +1555,7 @@ impl<'c> FuncEmitter<'c> {
         &mut self,
         dest: Ptr<BasicBlock>,
         args: &[Value],
-    ) -> STAIRResult<String> {
+    ) -> CrabbitResult<String> {
         let dest_label = self.block_labels[&dest].clone();
         if args.is_empty() {
             return Ok(dest_label);
@@ -1586,7 +1586,7 @@ impl<'c> FuncEmitter<'c> {
         &mut self,
         dest: Ptr<BasicBlock>,
         args: &[Value],
-    ) -> STAIRResult<()> {
+    ) -> CrabbitResult<()> {
         let dest_args: Vec<Value> = dest.deref(self.ctx).arguments().collect();
         if dest_args.len() != args.len() {
             return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(

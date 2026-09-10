@@ -25,7 +25,7 @@ use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
     conversion::pass::{AnalysisManager, Passes},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use self::{
@@ -64,18 +64,18 @@ pub fn pipeline() -> Passes {
 }
 
 /// Runs [pipeline] on `root` (a `builtin.module`) in place.
-pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<()> {
+pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<()> {
     pipeline().run(root, ctx, &mut AnalysisManager::default())?;
     Ok(())
 }
 
-pub fn emit_macho_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+pub fn emit_macho_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
     lower_module(ctx, root)?;
     write_macho_object_from_ir(ctx, root)
 }
 
 /// Translates a module lowered by [pipeline] into Mach-O object bytes.
-pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<Vec<u8>> {
+pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
     let object = x86_64_macho_lower(ctx, root)?;
     Ok(macho::write_macho_object(ctx, object))
 }

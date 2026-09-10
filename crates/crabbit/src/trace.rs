@@ -6,14 +6,14 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub const TRACE_EXTENSION: &str = "stx";
-pub const DEFAULT_TRACE_DIR: &str = "/tmp/stair-events";
+pub const TRACE_EXTENSION: &str = "crt";
+pub const DEFAULT_TRACE_DIR: &str = "/tmp/crabbit-events";
 
-const PART_MARKER_PREFIX: &str = "--- STAIR";
+const PART_MARKER_PREFIX: &str = "--- crabbit";
 const PART_MARKER_SUFFIX: &str = "---";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StairTraceMeta {
+pub struct CrabbitTraceMeta {
     pub name: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,20 +31,20 @@ pub struct StairTraceMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StairTraceFile {
-    pub meta: StairTraceMeta,
-    pub ir_dumps: Vec<StairTraceDump>,
+pub struct CrabbitTraceFile {
+    pub meta: CrabbitTraceMeta,
+    pub ir_dumps: Vec<CrabbitTraceDump>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StairTraceDump {
+pub struct CrabbitTraceDump {
     pub label: String,
     pub ir: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StairTraceFileInfo {
+pub struct CrabbitTraceFileInfo {
     pub filename: String,
     pub filepath: String,
     /// File modification time in milliseconds since the Unix epoch.
@@ -54,18 +54,18 @@ pub struct StairTraceFileInfo {
 }
 
 /// A project groups every trace produced by compiling the same crate:
-/// one subdirectory of the trace directory per project, one `.stx` file
+/// one subdirectory of the trace directory per project, one `.crt` file
 /// per compilation (a "version") inside it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StairTraceProjectInfo {
+pub struct CrabbitTraceProjectInfo {
     pub name: String,
     /// Versions ordered newest first.
-    pub versions: Vec<StairTraceFileInfo>,
+    pub versions: Vec<CrabbitTraceFileInfo>,
 }
 
-impl StairTraceFile {
-    pub fn new(meta: StairTraceMeta) -> Self {
+impl CrabbitTraceFile {
+    pub fn new(meta: CrabbitTraceMeta) -> Self {
         Self {
             meta,
             ir_dumps: Vec::new(),
@@ -73,7 +73,7 @@ impl StairTraceFile {
     }
 
     pub fn push_dump(&mut self, label: impl Into<String>, ir: impl Into<String>) {
-        self.ir_dumps.push(StairTraceDump {
+        self.ir_dumps.push(CrabbitTraceDump {
             label: label.into(),
             ir: ir.into(),
         });
@@ -83,7 +83,7 @@ impl StairTraceFile {
         let mut out = serde_json::to_string_pretty(&self.meta)?;
         out.push_str("\n\n");
         for dump in &self.ir_dumps {
-            out.push_str(&format!("--- STAIR {} ---\n", dump.label));
+            out.push_str(&format!("--- crabbit {} ---\n", dump.label));
             out.push_str(dump.ir.trim_matches('\n'));
             out.push('\n');
             out.push('\n');
@@ -112,7 +112,7 @@ impl StairTraceFile {
     }
 }
 
-pub fn discover_trace_files(dir: &Path) -> Result<Vec<StairTraceFileInfo>> {
+pub fn discover_trace_files(dir: &Path) -> Result<Vec<CrabbitTraceFileInfo>> {
     let mut files = Vec::new();
     if !dir.exists() {
         return Ok(files);
@@ -137,11 +137,11 @@ pub fn discover_trace_files(dir: &Path) -> Result<Vec<StairTraceFileInfo>> {
 }
 
 /// Discovers traces grouped by project. Each subdirectory of `dir` is a
-/// project whose `.stx` files are its versions. Loose `.stx` files in `dir`
+/// project whose `.crt` files are its versions. Loose `.crt` files in `dir`
 /// itself (the pre-folder layout) are grouped under a project name derived
 /// from their filename.
-pub fn discover_trace_projects(dir: &Path) -> Result<Vec<StairTraceProjectInfo>> {
-    let mut projects: BTreeMap<String, Vec<StairTraceFileInfo>> = BTreeMap::new();
+pub fn discover_trace_projects(dir: &Path) -> Result<Vec<CrabbitTraceProjectInfo>> {
+    let mut projects: BTreeMap<String, Vec<CrabbitTraceFileInfo>> = BTreeMap::new();
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -178,12 +178,12 @@ pub fn discover_trace_projects(dir: &Path) -> Result<Vec<StairTraceProjectInfo>>
         .into_iter()
         .map(|(name, mut versions)| {
             sort_versions_newest_first(&mut versions);
-            StairTraceProjectInfo { name, versions }
+            CrabbitTraceProjectInfo { name, versions }
         })
         .collect())
 }
 
-pub fn sort_versions_newest_first(versions: &mut [StairTraceFileInfo]) {
+pub fn sort_versions_newest_first(versions: &mut [CrabbitTraceFileInfo]) {
     versions.sort_by(|a, b| {
         b.modified_ms
             .cmp(&a.modified_ms)
@@ -217,8 +217,8 @@ pub fn project_trace_path(project: &str, version: &str) -> PathBuf {
         .join(format!("{version}.{TRACE_EXTENSION}"))
 }
 
-fn trace_file_info(path: &Path) -> StairTraceFileInfo {
-    StairTraceFileInfo {
+fn trace_file_info(path: &Path) -> CrabbitTraceFileInfo {
+    CrabbitTraceFileInfo {
         filename: path
             .file_name()
             .unwrap_or_default()
@@ -235,7 +235,7 @@ fn trace_file_info(path: &Path) -> StairTraceFileInfo {
     }
 }
 
-fn parse_trace(contents: &str) -> Result<StairTraceFile> {
+fn parse_trace(contents: &str) -> Result<CrabbitTraceFile> {
     let start = contents
         .find(|c: char| !c.is_whitespace())
         .ok_or_else(|| anyhow::anyhow!("empty trace file"))?;
@@ -243,10 +243,10 @@ fn parse_trace(contents: &str) -> Result<StairTraceFile> {
         .map(|offset| start + offset)
         .ok_or_else(|| anyhow::anyhow!("trace file must start with a JSON metadata value"))?;
     let meta_src = &contents[start..meta_end];
-    let meta: StairTraceMeta = serde_json::from_str(meta_src)?;
+    let meta: CrabbitTraceMeta = serde_json::from_str(meta_src)?;
     let body = contents[meta_end..].trim_start();
     let ir_dumps = parse_parts(body);
-    Ok(StairTraceFile { meta, ir_dumps })
+    Ok(CrabbitTraceFile { meta, ir_dumps })
 }
 
 fn find_json_end(src: &str) -> Option<usize> {
@@ -289,7 +289,7 @@ fn find_json_end(src: &str) -> Option<usize> {
     None
 }
 
-fn parse_parts(body: &str) -> Vec<StairTraceDump> {
+fn parse_parts(body: &str) -> Vec<CrabbitTraceDump> {
     let mut parts = Vec::new();
     let mut current_label: Option<String> = None;
     let mut current = String::new();
@@ -297,7 +297,7 @@ fn parse_parts(body: &str) -> Vec<StairTraceDump> {
     for line in body.lines() {
         if let Some(label) = parse_part_marker(line) {
             if let Some(previous_label) = current_label.replace(label) {
-                parts.push(StairTraceDump {
+                parts.push(CrabbitTraceDump {
                     label: previous_label,
                     ir: current.trim_matches('\n').to_string(),
                 });
@@ -314,7 +314,7 @@ fn parse_parts(body: &str) -> Vec<StairTraceDump> {
     }
 
     if let Some(label) = current_label {
-        parts.push(StairTraceDump {
+        parts.push(CrabbitTraceDump {
             label,
             ir: current.trim_matches('\n').to_string(),
         });
@@ -333,7 +333,7 @@ fn parse_part_marker(line: &str) -> Option<String> {
         .trim_end_matches(PART_MARKER_SUFFIX)
         .trim();
     Some(if label.is_empty() {
-        "stair".to_string()
+        "crabbit".to_string()
     } else {
         label.to_string()
     })
@@ -345,12 +345,12 @@ mod tests {
 
     #[test]
     fn parses_metadata_and_named_parts() {
-        let trace = StairTraceFile::from_stx_str(
+        let trace = CrabbitTraceFile::from_stx_str(
             r#"{"name":"demo","kind":"compiler-run","pipeline":["a","b"]}
---- STAIR input ---
+--- crabbit input ---
 builtin.module {
 }
---- STAIR after a ---
+--- crabbit after a ---
 arith.constant 1
 "#,
         )
@@ -378,7 +378,7 @@ arith.constant 1
     #[test]
     fn discovers_projects_from_folders_and_legacy_files() {
         let dir = std::env::temp_dir().join(format!(
-            "stair-trace-test-{}-{}",
+            "crabbit-trace-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -386,14 +386,14 @@ arith.constant 1
                 .as_nanos()
         ));
         std::fs::create_dir_all(dir.join("demo")).unwrap();
-        std::fs::write(dir.join("demo").join("1-1.stx"), "{\"name\":\"demo\",\"kind\":\"k\"}").unwrap();
-        std::fs::write(dir.join("demo").join("2-1.stx"), "{\"name\":\"demo\",\"kind\":\"k\"}").unwrap();
+        std::fs::write(dir.join("demo").join("1-1.crt"), "{\"name\":\"demo\",\"kind\":\"k\"}").unwrap();
+        std::fs::write(dir.join("demo").join("2-1.crt"), "{\"name\":\"demo\",\"kind\":\"k\"}").unwrap();
         std::fs::write(
-            dir.join("demo-99-100.stx"),
+            dir.join("demo-99-100.crt"),
             "{\"name\":\"demo-99-100\",\"kind\":\"k\"}",
         )
         .unwrap();
-        std::fs::write(dir.join("other-1-2.stx"), "{\"name\":\"other-1-2\",\"kind\":\"k\"}").unwrap();
+        std::fs::write(dir.join("other-1-2.crt"), "{\"name\":\"other-1-2\",\"kind\":\"k\"}").unwrap();
 
         let projects = discover_trace_projects(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -406,7 +406,7 @@ arith.constant 1
 
     #[test]
     fn round_trips_trace_file() {
-        let meta = StairTraceMeta {
+        let meta = CrabbitTraceMeta {
             name: "demo".to_string(),
             kind: "compiler-run".to_string(),
             entry: Some("main".to_string()),
@@ -416,12 +416,12 @@ arith.constant 1
             note: None,
             extra: BTreeMap::new(),
         };
-        let mut trace = StairTraceFile::new(meta);
+        let mut trace = CrabbitTraceFile::new(meta);
         trace.push_dump("initial", "mir.module {}");
         trace.push_dump("convert", "llvm.module {}");
 
         let encoded = trace.to_stx_string().unwrap();
-        let decoded = StairTraceFile::from_stx_str(&encoded).unwrap();
+        let decoded = CrabbitTraceFile::from_stx_str(&encoded).unwrap();
         assert_eq!(decoded.meta.name, "demo");
         assert_eq!(decoded.ir_dumps.len(), 2);
         assert_eq!(decoded.ir_dumps[1].label, "convert");

@@ -112,7 +112,7 @@ FIXTURES = [
     Fixture("sudoku-aarch64", runs=[RunCase(expected_stdout=(
         "534678912\n672195348\n198342567\n859761423\n426853791\n"
         "713924856\n961537284\n287419635\n345286179\n"))]),
-    Fixture("sudoku-solver", bin_name="stair-sudoku-solver", runs=[
+    Fixture("sudoku-solver", bin_name="crabbit-sudoku-solver", runs=[
         RunCase(args=[SUDOKU_PUZZLE], expected_stdout=SUDOKU_SOLUTION,
                 label="argv"),
         RunCase(stdin=f"  {SUDOKU_PUZZLE}\n", expected_stdout=SUDOKU_SOLUTION,

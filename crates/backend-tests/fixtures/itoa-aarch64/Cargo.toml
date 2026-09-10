@@ -1,5 +1,5 @@
 [package]
-name = "stair-itoa-aarch64-fixture"
+name = "crabbit-itoa-aarch64-fixture"
 version = "0.0.0"
 edition = "2021"
 publish = false

@@ -27,7 +27,7 @@ per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
 (red), SSA values taking their place (green)](docs/images/inspect-ir-diff.png)
 
 The same dialect stack emits **native NVPTX**: `#[no_mangle]
-__stair_kernel_*` Rust functions become PTX — no LLVM, no NVVM — measured at
+__crabbit_kernel_*` Rust functions become PTX — no LLVM, no NVVM — measured at
 geomean **1.13× nvcc** across a 14-kernel corpus, 10/14 within 3%.
 
 And underneath sits the research it was built to carry — **backward PGO**:
@@ -226,7 +226,7 @@ effect, regressions included). The sibling `kernel-corpus` repository holds
 the 14-kernel CPU/GPU corpus, the three-arm comparison pipeline, and all
 result CSVs.
 
-The project was previously developed under the name **STAIR**; a few
+The project was previously developed under the name **crabbit**; a few
 internal symbols and trace strings still carry that name.
 
 ## Testing

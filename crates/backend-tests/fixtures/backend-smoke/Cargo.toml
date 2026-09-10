@@ -1,5 +1,5 @@
 [package]
-name = "stair-backend-smoke"
+name = "crabbit-backend-smoke"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -8,14 +8,14 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-stair-device = { path = "../../../crates/stair-device" }
-stair-kernel = { path = "../../../crates/stair-kernel" }
+crabbit-device = { path = "../../../crates/crabbit-device" }
+crabbit-kernel = { path = "../../../crates/crabbit-kernel" }
 
 [[bin]]
-name = "stair-backend-smoke"
+name = "crabbit-backend-smoke"
 path = "src/main.rs"
 
 # Keep this fixture out of the parent workspace. It is compiled explicitly by
-# the stair-rust backend smoke test/script with RUSTFLAGS pointing at the
+# the crabbit-rust backend smoke test/script with RUSTFLAGS pointing at the
 # backend dylib.
 [workspace]

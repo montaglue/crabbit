@@ -266,7 +266,7 @@ fn itoa_aarch64_crate_compiles_objects_and_runs_with_codegen_dylib() {
         .join("Cargo.toml");
     for profile in FixtureProfile::ALL {
         let target_dir = root.join("target").join(format!(
-            "stair-backend-tests-itoa-aarch64-{}",
+            "crabbit-backend-tests-itoa-aarch64-{}",
             profile.name()
         ));
         if target_dir.exists() {

@@ -56,7 +56,7 @@ use crate::{
         r#type::TypedHandle,
         value::Value,
     },
-    result::STAIRResult,
+    result::CrabbitResult,
     utils::apint::APInt,
 };
 
@@ -133,7 +133,7 @@ fn div_kind(ctx: &Context, op: Ptr<Operation>) -> Option<DivKind> {
     }
 }
 
-fn rewrite_div(ctx: &mut Context, op: Ptr<Operation>) -> STAIRResult<bool> {
+fn rewrite_div(ctx: &mut Context, op: Ptr<Operation>) -> CrabbitResult<bool> {
     let Some(kind) = div_kind(ctx, op) else {
         return Ok(false);
     };

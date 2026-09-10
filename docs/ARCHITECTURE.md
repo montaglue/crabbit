@@ -22,7 +22,7 @@ flowchart TD
 and builds a `mir`-dialect module (`crates/mir`). Constants (including
 pointer-carrying allocations), TLS, virtual calls, i128, and overflow
 intrinsics are resolved here. Functions whose symbol starts with
-`__stair_kernel_` go to a separate `rust_kernels` module
+`__crabbit_kernel_` go to a separate `rust_kernels` module
 (`docs/KERNEL-ABI.md`).
 
 ## 2. Shared mid-end (`crates/pliron-ll/src/passes/llvm/`)

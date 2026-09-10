@@ -33,7 +33,7 @@ use rustc_session::config::{OutputFilenames, OutputType};
 use crate::{
     conversion::pass::{AnalysisManager, PMConfig, Passes},
     printable::Printable,
-    trace::{StairTraceFile, StairTraceMeta},
+    trace::{CrabbitTraceFile, CrabbitTraceMeta},
 };
 use pliron_ll::{
     targets::{self, TargetBackend},
@@ -45,9 +45,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-struct StairBackend;
+struct CrabbitBackend;
 
-impl CodegenBackend for StairBackend {
+impl CodegenBackend for CrabbitBackend {
     fn name(&self) -> &'static str {
         "crabbit"
     }
@@ -119,7 +119,7 @@ impl CodegenBackend for StairBackend {
         });
 
         let module = CompiledModule {
-            name: "stair_rust".to_string(),
+            name: "crabbit_rust".to_string(),
             kind: rustc_codegen_ssa::ModuleKind::Regular,
             object: Some(object),
             dwarf_object: None,
@@ -257,7 +257,7 @@ fn emit_kernels(
     let mut pipeline = kernel_pipeline(emit_dir.is_some());
     let mut dump_dir = None;
     if tracing {
-        let dir = std::env::temp_dir().join(format!("stair-kernel-pass-dumps-{}", trace_version()));
+        let dir = std::env::temp_dir().join(format!("crabbit-kernel-pass-dumps-{}", trace_version()));
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("failed to create kernel pass dump directory: {error}"))?;
         pipeline.set_config(PMConfig {
@@ -381,7 +381,7 @@ fn emit_object(
             &mut imported.ctx,
             imported.module,
             dir,
-            &format!("{}-stair_rust", trace_project(sess)),
+            &format!("{}-crabbit_rust", trace_project(sess)),
         )?;
         if tracing {
             // Record the stage the emit path ran outside the pipeline, so
@@ -397,7 +397,7 @@ fn emit_object(
         // Per-pass IR dumps come from pliron's own PMConfig printing hooks;
         // the trace file is assembled from the dumped files after the run,
         // so a failed pipeline still leaves a trace up to the failing pass.
-        let dir = std::env::temp_dir().join(format!("stair-pass-dumps-{version}"));
+        let dir = std::env::temp_dir().join(format!("crabbit-pass-dumps-{version}"));
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("failed to create pass dump directory: {error}"))?;
         pipeline.set_config(PMConfig {
@@ -416,7 +416,7 @@ fn emit_object(
         let dumps = collect_pass_dumps(&dump_dir);
         let _ = std::fs::remove_dir_all(&dump_dir);
 
-        let mut trace = StairTraceFile::new(StairTraceMeta {
+        let mut trace = CrabbitTraceFile::new(CrabbitTraceMeta {
             name: project.clone(),
             kind: "compiler-run".to_string(),
             entry: None,
@@ -452,7 +452,7 @@ fn emit_object(
 
     // No invocation-temp component: the object must outlive the rustc
     // invocation (backend-tests inspect it after the build).
-    let object = outputs.temp_path_for_cgu(OutputType::Object, "stair_rust", None);
+    let object = outputs.temp_path_for_cgu(OutputType::Object, "crabbit_rust", None);
     if let Some(parent) = object.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create object output directory: {error}"))?;
@@ -483,7 +483,7 @@ fn emit_object(
         })?;
     }
     if imported.kernel_count > 0 {
-        emit_kernels(imported, &object, tracing, &format!("{}-stair_rust", trace_project(sess)))?;
+        emit_kernels(imported, &object, tracing, &format!("{}-crabbit_rust", trace_project(sess)))?;
     }
     Ok(object)
 }
@@ -528,7 +528,7 @@ fn sanitize_trace_name(name: &str) -> String {
 /// research composition dylib (crates/crabbit-research) can register its
 /// engines first and then delegate here.
 pub fn create_backend() -> Box<dyn CodegenBackend> {
-    Box::new(StairBackend)
+    Box::new(CrabbitBackend)
 }
 
 // The #[no_mangle] __rustc_codegen_backend entry lives in the thin dylib
@@ -565,8 +565,8 @@ pub use pliron::{
 };
 pub mod result {
     pub use pliron::result::*;
-    /// Old stair name for [Result].
-    pub type STAIRResult<T> = pliron::result::Result<T>;
+    /// Old crabbit name for [Result].
+    pub type CrabbitResult<T> = pliron::result::Result<T>;
 }
 pub mod ir {
     pub use pliron::{

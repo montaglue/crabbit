@@ -15,7 +15,7 @@ use crate::{
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::spectral_freq::spectral_frequencies,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{error::Aarch64Err, frontend::module_op, util::cast_operation};
@@ -151,7 +151,7 @@ struct FunctionLiveness {
     successors: Vec<Vec<usize>>,
 }
 
-fn allocate_function(ctx: &mut Context, func: FuncOp, opts: &CodegenOpts) -> STAIRResult<()> {
+fn allocate_function(ctx: &mut Context, func: FuncOp, opts: &CodegenOpts) -> CrabbitResult<()> {
     let live = collect_live_intervals(ctx, func);
     let call_crossing = values_live_across_calls(ctx, &live.insts, &live.intervals);
     let remat_imms = rematerializable_imms(ctx, &live, opts);
@@ -632,7 +632,7 @@ fn rewrite_allocated_registers(
     assignments: &HashMap<VirtualRegister, Allocation>,
     spill_base_offset: u64,
     remat_imms: &HashMap<VirtualRegister, u64>,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     for op in insts {
         if !aarch64_ops::is_instruction(ctx, *op) {
             continue;
@@ -782,7 +782,7 @@ fn virtual_operands_with_kind(
 fn next_spill_scratch(
     scratch_index: &mut [usize; 2],
     class: RegisterClass,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     let bank = bank_of(class).expect("spill scratch requested for unallocatable class");
     let index = match bank {
         Bank::Gpr => &mut scratch_index[0],

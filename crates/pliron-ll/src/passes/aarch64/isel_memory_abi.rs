@@ -8,7 +8,7 @@ use crate::{
     },
     input_error_noloc,
     ir::{r#type::Typed, value::Value},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{error::Aarch64Err, llvm_to_aarch64_isel::*};
@@ -23,7 +23,7 @@ pub(super) fn lower_gep(
     indices: &[GepIndex],
     source_elem_type: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     let base = lookup_value(ctx, values, base)?;
     let base = materialize_pointer(ctx, entry, base, next_vreg, "gep base")?;
     let mut current_ty = source_elem_type;
@@ -92,7 +92,7 @@ pub(super) fn load_memory(
     addr: LoweredValue,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(LoweredValue::Undef);
     }
@@ -121,7 +121,7 @@ pub(super) enum ResultLocation {
 pub(super) fn result_location_for_type(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<ResultLocation> {
+) -> CrabbitResult<ResultLocation> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(ResultLocation::Void);
     }
@@ -151,7 +151,7 @@ pub(super) fn load_gpr_aggregate_result(
     ty: TypeHandle,
     count: usize,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     let mut next_reg = 0usize;
     let value = load_direct_aggregate_from_gprs(ctx, entry, ty, count, &mut next_reg, next_vreg)?;
     Ok(value)
@@ -165,7 +165,7 @@ pub(super) fn emit_return_value(
     result: AbiLocation,
     sret_result_slot: Option<StackSlot>,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     match result {
         AbiLocation::Void => Ok(()),
         // A scalar FP result: materialize in the FP file and move into v0.
@@ -248,7 +248,7 @@ fn emit_direct_aggregate_return(
     value: LoweredValue,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let mut next_reg = 0usize;
     emit_direct_aggregate_to_gprs(ctx, entry, value, ty, &mut next_reg, next_vreg)?;
     Ok(())
@@ -261,7 +261,7 @@ fn load_direct_aggregate_from_gprs(
     count: usize,
     next_reg: &mut usize,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if !is_aggregate_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if *next_reg + 1 >= count {
@@ -325,7 +325,7 @@ fn unpack_aggregate_from_reg_pair(
     hi: Register,
     byte_offset: u64,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if is_stack_scalar_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if byte_offset != 0 {
@@ -371,7 +371,7 @@ fn emit_direct_aggregate_to_gprs(
     ty: TypeHandle,
     next_reg: &mut usize,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     if !is_aggregate_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             if *next_reg + 1 >= 2 {
@@ -464,7 +464,7 @@ fn pack_aggregate_to_reg_pair(
     byte_offset: u64,
     acc: &mut (Option<Register>, Option<Register>),
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     if stack_size_of(ctx, ty)? == 0 || matches!(value, LoweredValue::Undef) {
         return Ok(());
     }
@@ -550,7 +550,7 @@ fn unpack_aggregate_from_reg(
     base: Register,
     byte_offset: u64,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if is_stack_scalar_ty(ctx, ty) {
         let size = scalar_size_of(ctx, ty)?;
         if size == 8 && byte_offset == 0 {
@@ -604,7 +604,7 @@ fn pack_aggregate_to_reg(
     ty: TypeHandle,
     byte_offset: u64,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     if is_stack_scalar_ty(ctx, ty) {
         if matches!(value, LoweredValue::Undef) {
             let zero = fresh_vreg(next_vreg);
@@ -689,7 +689,7 @@ pub(super) fn adapt_value_to_type(
     ctx: &Context,
     value: LoweredValue,
     ty: TypeHandle,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if matches!(value, LoweredValue::Undef) {
         return Ok(LoweredValue::Undef);
     }
@@ -752,7 +752,7 @@ pub(super) fn load_stack_value(
     offset: u64,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(LoweredValue::Undef);
     }
@@ -802,7 +802,7 @@ pub(super) fn store_memory(
     value: LoweredValue,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(());
     }
@@ -828,7 +828,7 @@ fn store_stack_value(
     value: LoweredValue,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(());
     }
@@ -898,7 +898,7 @@ fn materialize_address(
     addr: LoweredValue,
     next_vreg: &mut usize,
     context: &str,
-) -> STAIRResult<(Register, u64)> {
+) -> CrabbitResult<(Register, u64)> {
     match addr {
         LoweredValue::Reg(reg) => Ok((reg, 0)),
         LoweredValue::Address { base, offset } => Ok((base, offset)),
@@ -916,7 +916,7 @@ fn load_register_address_value(
     offset: u64,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(LoweredValue::Undef);
     }
@@ -988,7 +988,7 @@ fn store_register_address_value(
     value: LoweredValue,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     if stack_size_of(ctx, ty)? == 0 {
         return Ok(());
     }
@@ -1081,7 +1081,7 @@ fn load_aggregate_copy_source(
     value: LoweredValue,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     match value {
         LoweredValue::Aggregate(_) | LoweredValue::Undef => Ok(value),
         LoweredValue::StackAddr(slot) => load_stack_value(ctx, entry, slot.offset, ty, next_vreg),
@@ -1102,7 +1102,7 @@ fn store_flattened_aggregate_chunks(
     offset: u64,
     value: LoweredValue,
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let chunks = flatten_aggregate_value(value)?;
     let word_ty = word_ty(ctx);
     for (index, chunk) in chunks.into_iter().enumerate() {
@@ -1135,7 +1135,7 @@ pub(super) fn word_ty(ctx: &mut Context) -> TypeHandle {
     .into()
 }
 
-fn flatten_aggregate_value(value: LoweredValue) -> STAIRResult<Vec<LoweredValue>> {
+fn flatten_aggregate_value(value: LoweredValue) -> CrabbitResult<Vec<LoweredValue>> {
     match value {
         LoweredValue::Aggregate(fields) => {
             let mut flattened = Vec::new();
@@ -1155,7 +1155,7 @@ fn flatten_aggregate_value(value: LoweredValue) -> STAIRResult<Vec<LoweredValue>
 pub(super) fn stack_size_of(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<u64> {
+) -> CrabbitResult<u64> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(0);
     }
@@ -1195,7 +1195,7 @@ pub(super) fn stack_size_of(
 pub(super) fn stack_align_of(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<u64> {
+) -> CrabbitResult<u64> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(1);
     }
@@ -1227,7 +1227,7 @@ pub(super) fn align_to(value: u64, align: u64) -> u64 {
 pub(super) fn aggregate_field_layout(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<Vec<(u64, TypeHandle)>> {
+) -> CrabbitResult<Vec<(u64, TypeHandle)>> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(Vec::new());
     }
@@ -1276,7 +1276,7 @@ pub(super) fn aggregate_field_layout(
 pub(super) fn scalar_size_of(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<u64> {
+) -> CrabbitResult<u64> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<crate::dialects::builtin::types::IntegerType>() {
         let size = (int_ty.width() as u64).div_ceil(8).max(1);

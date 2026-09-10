@@ -56,7 +56,7 @@ use crate::{
     },
     linked_list::{ContainsLinkedList, LinkedList},
     passes::hot_path::{BranchProbability, HotPathInfo},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::isel_control_flow::{branch_edge_target, emit_block_arg_copies, machine_block};
@@ -163,7 +163,7 @@ impl MachineFunctionPlan {
         ctx: &mut Context,
         llvm_func: &LlvmFuncOp,
         module_body: Ptr<BasicBlock>,
-    ) -> STAIRResult<Self> {
+    ) -> CrabbitResult<Self> {
         let name = llvm_func.get_symbol_name(ctx);
         let abi = function_abi(ctx, llvm_func)?;
         let linkage = validate_linkage(name.as_ref(), llvm_func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
@@ -205,7 +205,7 @@ impl MachineFunctionPlan {
 /// The Darwin ABI locations the abi pass recorded on `llvm_func`. Running
 /// instruction selection on a function the abi pass has not seen is a
 /// pipeline error.
-fn function_abi(ctx: &Context, llvm_func: &LlvmFuncOp) -> STAIRResult<FunctionAbi> {
+fn function_abi(ctx: &Context, llvm_func: &LlvmFuncOp) -> CrabbitResult<FunctionAbi> {
     llvm_func
         .get_operation()
         .deref(ctx)
@@ -332,7 +332,7 @@ fn lower_function(
     globals: &HashMap<crate::identifier::Identifier, Vec<u8>>,
     data_globals: &std::collections::HashSet<crate::identifier::Identifier>,
     tls_globals: &std::collections::HashSet<crate::identifier::Identifier>,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     // Branch probabilities on the LLVM-level CFG (explicit branch weights
     // plus static loop heuristics). They are transferred onto the machine
     // conditional branches below, the way LLVM's instruction selection copies
@@ -507,7 +507,7 @@ fn lower_function(
                 values.insert(constant.get_result(ctx), LoweredValue::Imm(imm));
             } else if let Some(cstr) = op_obj.downcast_ref::<CStrOp>() {
                 let label = format!(
-                    "L_stair_cstr_{}_{}",
+                    "L_crabbit_cstr_{}_{}",
                     llvm_func.get_symbol_name(ctx),
                     next_literal
                 );
@@ -1467,7 +1467,7 @@ pub(super) fn emit_move(
     block: Ptr<crate::ir::basic_block::BasicBlock>,
     dst: Register,
     src: Register,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     use RegisterClass::{Fpr32, Fpr64, Gpr64};
     let op = match (dst.class(), src.class()) {
         (Gpr64, Gpr64) => aarch64_ops::mov(ctx, dst, src),
@@ -1531,12 +1531,12 @@ fn materialize_fp_constant(
     // label is content-addressed, so repeated constants share one entry.
     let (label, bytes, load_opcode) = match kind {
         FpKind::F64 => (
-            format!("L_stair_fp64_{bits:016x}"),
+            format!("L_crabbit_fp64_{bits:016x}"),
             bits.to_le_bytes().to_vec(),
             aarch64_ops::LdrdRegOffsetOp::OPCODE,
         ),
         FpKind::F32 => (
-            format!("L_stair_fp32_{:08x}", bits as u32),
+            format!("L_crabbit_fp32_{:08x}", bits as u32),
             (bits as u32).to_le_bytes().to_vec(),
             aarch64_ops::LdrsRegOffsetOp::OPCODE,
         ),
@@ -1558,7 +1558,7 @@ pub(super) fn materialize_fp(
     kind: FpKind,
     next_vreg: &mut usize,
     context: &str,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     match value {
         LoweredValue::Reg(reg) if reg.class() == kind.class() => Ok(reg),
         LoweredValue::Reg(reg) if reg.is_fpr() => Err(input_error_noloc!(
@@ -1650,7 +1650,7 @@ impl StackAllocator {
         &mut self,
         ctx: &Context,
         ty: TypeHandle,
-    ) -> STAIRResult<StackSlot> {
+    ) -> CrabbitResult<StackSlot> {
         let size = stack_size_of(ctx, ty)?;
         let align = stack_align_of(ctx, ty)?;
         self.next_offset = align_to(self.next_offset, align);
@@ -1666,7 +1666,7 @@ pub(super) fn lookup_value(
     ctx: &Context,
     values: &HashMap<Value, LoweredValue>,
     value: Value,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     values.get(&value).cloned().ok_or_else(|| {
         input_error_noloc!(Aarch64Err::UndefinedValue(
             value.unique_name(ctx).to_string()
@@ -1678,7 +1678,7 @@ fn insert_aggregate_value(
     aggregate: LoweredValue,
     indices: &[u32],
     value: LoweredValue,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     let Some((index, rest)) = indices.split_first() else {
         return Ok(value);
     };
@@ -1700,7 +1700,7 @@ fn insert_aggregate_value(
     Ok(LoweredValue::Aggregate(fields))
 }
 
-fn extract_aggregate_value(aggregate: LoweredValue, indices: &[u32]) -> STAIRResult<LoweredValue> {
+fn extract_aggregate_value(aggregate: LoweredValue, indices: &[u32]) -> CrabbitResult<LoweredValue> {
     let Some((index, rest)) = indices.split_first() else {
         return Ok(aggregate);
     };
@@ -1728,7 +1728,7 @@ pub(super) fn lookup_reg(
     values: &HashMap<Value, LoweredValue>,
     value: Value,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     let ty = value.get_type(ctx);
     let lowered = lookup_value(ctx, values, value)?;
     materialize_typed(ctx, entry, lowered, ty, next_vreg, "SSA value")
@@ -1741,7 +1741,7 @@ pub(super) fn materialize_typed(
     ty: TypeHandle,
     next_vreg: &mut usize,
     context: &str,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     // Reconcile packed-scalar and field-wise aggregate representations of
     // the value with the type the use site expects.
     let value = adapt_value_to_type(ctx, value, ty)?;
@@ -1774,7 +1774,7 @@ pub(super) fn materialize_pair(
     ty: TypeHandle,
     next_vreg: &mut usize,
     context: &str,
-) -> STAIRResult<(Register, Register)> {
+) -> CrabbitResult<(Register, Register)> {
     match value {
         LoweredValue::RegPair(lo, hi) => Ok((lo, hi)),
         LoweredValue::Aggregate(fields) if fields.len() == 2 => {
@@ -1859,7 +1859,7 @@ pub(super) fn materialize(
     value: LoweredValue,
     next_vreg: &mut usize,
     context: &str,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     match value {
         // A value living in the FP file used as an integer (bitcast, packed
         // aggregate field): move its bit pattern across the register files.
@@ -1942,7 +1942,7 @@ pub(super) fn materialize_pointer(
     value: LoweredValue,
     next_vreg: &mut usize,
     context: &str,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     match value {
         LoweredValue::Aggregate(fields) => {
             let data = fields
@@ -2008,7 +2008,7 @@ pub(super) fn normalize_integer_reg(
     reg: Register,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<Register> {
+) -> CrabbitResult<Register> {
     let Some((width, signed)) = integer_width_and_signedness(ctx, ty) else {
         return Ok(reg);
     };
@@ -2074,7 +2074,7 @@ pub(super) fn is_128_bit_integer(ctx: &Context, ty: TypeHandle) -> bool {
 pub(super) fn load_sp_opcode(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<Aarch64Opcode> {
+) -> CrabbitResult<Aarch64Opcode> {
     Ok(match scalar_size_of(ctx, ty)? {
         1 => aarch64_ops::LdrbSpOffsetOp::OPCODE,
         2 => aarch64_ops::LdrhSpOffsetOp::OPCODE,
@@ -2091,7 +2091,7 @@ pub(super) fn load_sp_opcode(
 pub(super) fn store_sp_opcode(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<Aarch64Opcode> {
+) -> CrabbitResult<Aarch64Opcode> {
     Ok(match scalar_size_of(ctx, ty)? {
         1 => aarch64_ops::StrbSpOffsetOp::OPCODE,
         2 => aarch64_ops::StrhSpOffsetOp::OPCODE,
@@ -2108,7 +2108,7 @@ pub(super) fn store_sp_opcode(
 pub(super) fn load_reg_opcode(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<Aarch64Opcode> {
+) -> CrabbitResult<Aarch64Opcode> {
     Ok(match scalar_size_of(ctx, ty)? {
         1 => aarch64_ops::LdrbRegOffsetOp::OPCODE,
         2 => aarch64_ops::LdrhRegOffsetOp::OPCODE,
@@ -2125,7 +2125,7 @@ pub(super) fn load_reg_opcode(
 pub(super) fn store_reg_opcode(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<Aarch64Opcode> {
+) -> CrabbitResult<Aarch64Opcode> {
     Ok(match scalar_size_of(ctx, ty)? {
         1 => aarch64_ops::StrbRegOffsetOp::OPCODE,
         2 => aarch64_ops::StrhRegOffsetOp::OPCODE,
@@ -2148,7 +2148,7 @@ pub(super) fn block_arg_value(
     ctx: &Context,
     ty: TypeHandle,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(LoweredValue::Undef);
     }
@@ -2229,7 +2229,7 @@ pub(super) fn is_aggregate_ty(ctx: &Context, ty: TypeHandle) -> bool {
 pub(super) fn indexed_element(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<(TypeHandle, u64)> {
+) -> CrabbitResult<(TypeHandle, u64)> {
     let ty_ref = ty.deref(ctx);
     if let Some(array_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::ArrayType>() {
         let elem_ty = array_ty.elem_type();
@@ -2248,7 +2248,7 @@ pub(super) fn struct_field_offset(
     ctx: &Context,
     ty: TypeHandle,
     index: Option<u64>,
-) -> STAIRResult<Option<(u64, TypeHandle)>> {
+) -> CrabbitResult<Option<(u64, TypeHandle)>> {
     let Some(index) = index else {
         return Ok(None);
     };
@@ -2271,7 +2271,7 @@ pub(super) fn struct_field_offset(
 pub(super) fn struct_fields(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<Vec<TypeHandle>> {
+) -> CrabbitResult<Vec<TypeHandle>> {
     let ty_ref = ty.deref(ctx);
     if ty_ref
         .downcast_ref::<crate::dialects::builtin::types::UnitType>()
@@ -2507,7 +2507,7 @@ fn lower_fcmp(
     lhs: Value,
     rhs: Value,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     if matches!(predicate, FCmpPredicateAttr::False) {
         return Ok(LoweredValue::Imm(0));
     }
@@ -2562,7 +2562,7 @@ fn int_to_fp(
     result: Value,
     signed: bool,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     let src_ty = value.get_type(ctx);
     if is_128_bit_integer(ctx, src_ty) {
         // Unreachable from the crabbit importer, which lowers 128-bit
@@ -2612,7 +2612,7 @@ fn fp_to_int(
     result_ty: TypeHandle,
     signed: bool,
     next_vreg: &mut usize,
-) -> STAIRResult<LoweredValue> {
+) -> CrabbitResult<LoweredValue> {
     let fp = fp_kind(ctx, src_ty).ok_or_else(|| {
         input_error_noloc!(Aarch64Err::UnsupportedType(
             "float-to-int conversion from a non-scalar-float type".to_string()

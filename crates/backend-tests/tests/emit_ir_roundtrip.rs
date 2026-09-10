@@ -250,7 +250,7 @@ fn emitted_ir_round_trips_for_every_fixture() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let backend = build_backend(&root, &cargo);
     let fixtures_dir = root.join("crates/backend-tests/fixtures");
-    let scratch = root.join("target/stair-emit-ir-roundtrip");
+    let scratch = root.join("target/crabbit-emit-ir-roundtrip");
 
     let mut all_failures = Vec::new();
     for entry in fs::read_dir(&fixtures_dir).expect("fixtures dir") {

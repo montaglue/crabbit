@@ -6,13 +6,13 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 case "$(uname -s)" in
   Darwin)
-    BACKEND="${ROOT_DIR}/target/debug/libstair_rust.dylib"
+    BACKEND="${ROOT_DIR}/target/debug/libcrabbit_rust.dylib"
     ;;
   Linux)
-    BACKEND="${ROOT_DIR}/target/debug/libstair_rust.so"
+    BACKEND="${ROOT_DIR}/target/debug/libcrabbit_rust.so"
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    BACKEND="${ROOT_DIR}/target/debug/stair_rust.dll"
+    BACKEND="${ROOT_DIR}/target/debug/crabbit_rust.dll"
     ;;
   *)
     echo "unsupported host OS: $(uname -s)" >&2
@@ -20,9 +20,9 @@ case "$(uname -s)" in
     ;;
 esac
 
-cargo build --manifest-path "${ROOT_DIR}/Cargo.toml" -p stair-rust
+cargo build --manifest-path "${ROOT_DIR}/Cargo.toml" -p crabbit-rust
 
-TARGET_DIR="${ROOT_DIR}/target/stair-backend-tests-pure-rust-aarch64"
+TARGET_DIR="${ROOT_DIR}/target/crabbit-backend-tests-pure-rust-aarch64"
 rm -rf "${TARGET_DIR}"
 
 RUSTFLAGS="-Zcodegen-backend=${BACKEND} -Coverflow-checks=off" \

@@ -8,7 +8,7 @@ use crate::{
     },
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{
@@ -24,7 +24,7 @@ const MACHO_X86_64_RELOC_BRANCH: u8 = 2;
 /// operation. This is a translation out of the pass pipeline (the way
 /// `mlir-translate` sits outside `mlir-opt`), not a [pliron::pass::Pass]:
 /// it produces a new operation instead of transforming the module.
-pub fn x86_64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<ObjectOp> {
+pub fn x86_64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<ObjectOp> {
     let module = module_op(ctx, root)?;
     let body = module_body(ctx, module);
     let mut text = Vec::new();

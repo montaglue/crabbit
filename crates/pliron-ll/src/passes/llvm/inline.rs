@@ -38,7 +38,7 @@ use crate::{
     },
     linked_list::{ContainsLinkedList, LinkedList},
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 pub struct LLVMInlinePass {
@@ -104,7 +104,7 @@ impl LLVMInlinePass {
         ctx: &mut Context,
         func: FuncOp,
         by_symbol: &FxHashMap<Identifier, FuncOp>,
-    ) -> STAIRResult<()> {
+    ) -> CrabbitResult<()> {
         if func.is_declaration(ctx) {
             return Ok(());
         }
@@ -190,7 +190,7 @@ fn inline_call(
     call: CallOp,
     callee: FuncOp,
     tag: usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let call_op = call.get_operation();
     let Some(call_block) = call_op.deref(ctx).get_parent_block() else {
         return arg_err!(Location::Unknown, "llvm-inline: call has no parent block");
@@ -312,7 +312,7 @@ fn inlined_block_name(
     _caller_symbol: &Identifier,
     tag: usize,
     old_block: Ptr<BasicBlock>,
-) -> STAIRResult<Identifier> {
+) -> CrabbitResult<Identifier> {
     let base = old_block
         .deref(ctx)
         .given_name(ctx)
@@ -362,7 +362,7 @@ fn map_values(
     ctx: &Context,
     value_map: &FxHashMap<Value, Value>,
     values: &[Value],
-) -> STAIRResult<Vec<Value>> {
+) -> CrabbitResult<Vec<Value>> {
     values
         .iter()
         .map(|value| {
@@ -383,7 +383,7 @@ fn clone_operation(
     old_op: Ptr<Operation>,
     value_map: &FxHashMap<Value, Value>,
     block_map: &FxHashMap<Ptr<BasicBlock>, Ptr<BasicBlock>>,
-) -> STAIRResult<Ptr<Operation>> {
+) -> CrabbitResult<Ptr<Operation>> {
     let (operands, successors) = {
         let op_ref = old_op.deref(ctx);
         (

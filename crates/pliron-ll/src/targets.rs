@@ -9,7 +9,7 @@ use pliron::{context::Context, context::Ptr, operation::Operation};
 use crate::{
     conversion::pass::{DynPass, Pass, Passes},
     passes::{aarch64, x86_64_darwin},
-    result::STAIRResult,
+    result::CrabbitResult,
     triple::{Arch, Triple},
 };
 
@@ -23,7 +23,7 @@ pub struct TargetBackend {
     /// The same pipeline with the register allocator replaced; `None` for
     /// backends whose allocator slot is not parameterized (yet).
     pipeline_with_allocator: Option<fn(DynPass) -> Passes>,
-    write_object: fn(&mut Context, Ptr<Operation>) -> STAIRResult<Vec<u8>>,
+    write_object: fn(&mut Context, Ptr<Operation>) -> CrabbitResult<Vec<u8>>,
 }
 
 impl TargetBackend {
@@ -48,7 +48,7 @@ impl TargetBackend {
         &self,
         ctx: &mut Context,
         root: Ptr<Operation>,
-    ) -> STAIRResult<Vec<u8>> {
+    ) -> CrabbitResult<Vec<u8>> {
         (self.write_object)(ctx, root)
     }
 }

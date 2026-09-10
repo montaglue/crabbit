@@ -15,10 +15,10 @@ declarations.
 ```rust
 #![no_std]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __stair_kernel_vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) { … }
+pub unsafe extern "C" fn __crabbit_kernel_vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) { … }
 ```
 
-- Symbol prefix `__stair_kernel_` (`KERNEL_EXPORT_PREFIX` in
+- Symbol prefix `__crabbit_kernel_` (`KERNEL_EXPORT_PREFIX` in
   `crates/crabbit/src/importer_oxide.rs`) marks a kernel: the importer puts
   its body into the `rust_kernels` module instead of the host module. The
   PTX `.entry` name is the symbol with the prefix STRIPPED (`vector_add`),
@@ -35,9 +35,9 @@ pub unsafe extern "C" fn __stair_kernel_vector_add(a: *const i32, b: *const i32,
   (`overflow-checks = false` in the profile) and `panic = "abort"`.
 - Host code must not call a kernel directly (crabbit errors on that).
 
-## Intrinsics: the `stair-device` shim crate
+## Intrinsics: the `crabbit-device` shim crate
 
-`kernel-corpus/crates/stair-device` declares the NVVM intrinsics as foreign
+`kernel-corpus/crates/crabbit-device` declares the NVVM intrinsics as foreign
 functions under their real LLVM names:
 
 ```rust

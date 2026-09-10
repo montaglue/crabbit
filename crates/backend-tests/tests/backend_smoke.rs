@@ -88,7 +88,7 @@ fn object_files(root: &Path) -> Vec<PathBuf> {
     objects
 }
 
-fn stair_files(root: &Path) -> Vec<PathBuf> {
+fn crabbit_files(root: &Path) -> Vec<PathBuf> {
     let mut dumps = Vec::new();
     let Ok(entries) = fs::read_dir(root) else {
         return dumps;
@@ -97,10 +97,10 @@ fn stair_files(root: &Path) -> Vec<PathBuf> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            dumps.extend(stair_files(&path));
+            dumps.extend(crabbit_files(&path));
         } else if path
             .extension()
-            .is_some_and(|extension| extension == "stair")
+            .is_some_and(|extension| extension == "crabbit")
             && path.metadata().is_ok_and(|metadata| metadata.len() > 0)
         {
             dumps.push(path);
@@ -129,7 +129,7 @@ fn build_backend(root: &Path, cargo: &str) -> PathBuf {
 
 fn fixture_target_dir(root: &Path, fixture: &str, profile: FixtureProfile) -> PathBuf {
     root.join("target")
-        .join(format!("stair-backend-tests-{fixture}-{}", profile.name()))
+        .join(format!("crabbit-backend-tests-{fixture}-{}", profile.name()))
 }
 
 fn clear_target_dir(target_dir: &Path, context: &str) {
@@ -605,7 +605,7 @@ fn sudoku_solver_crate_solves_puzzles_from_arguments_with_codegen_dylib() {
         let fixture_status = compile_fixture(
             &cargo,
             &fixture,
-            "stair-sudoku-solver",
+            "crabbit-sudoku-solver",
             &backend,
             &target_dir,
             profile,
@@ -617,7 +617,7 @@ fn sudoku_solver_crate_solves_puzzles_from_arguments_with_codegen_dylib() {
             profile.name()
         );
 
-        let executable = executable_path(&target_dir, profile, "stair-sudoku-solver");
+        let executable = executable_path(&target_dir, profile, "crabbit-sudoku-solver");
         let output = Command::new(&executable)
             .arg(PUZZLE)
             .output()
@@ -684,7 +684,7 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
     );
 
     let fixture = fixture_manifest(&root, "backend-smoke");
-    let target_dir = root.join("target").join("stair-backend-tests-smoke");
+    let target_dir = root.join("target").join("crabbit-backend-tests-smoke");
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir).expect("failed to clear backend smoke target directory");
     }
@@ -694,7 +694,7 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
         .arg("--manifest-path")
         .arg(fixture)
         .arg("--bin")
-        .arg("stair-backend-smoke")
+        .arg("crabbit-backend-smoke")
         .arg("--")
         .arg("--emit=obj")
         .arg(format!("-Zcodegen-backend={}", backend.display()))
@@ -716,7 +716,7 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
     );
 
     let executable = target_dir.join("debug").join(format!(
-        "stair-backend-smoke{}",
+        "crabbit-backend-smoke{}",
         std::env::consts::EXE_SUFFIX
     ));
     assert!(
@@ -724,28 +724,28 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
         "backend smoke fixture did not produce executable {}",
         executable.display()
     );
-    let stair_dump = executable.with_extension("stair");
+    let crabbit_dump = executable.with_extension("crabbit");
     assert!(
-        stair_dump.exists(),
+        crabbit_dump.exists(),
         "backend smoke fixture did not produce kernel dump {}",
-        stair_dump.display()
+        crabbit_dump.display()
     );
-    let stair_text = fs::read_to_string(&stair_dump).expect("failed to read kernel dump");
+    let crabbit_text = fs::read_to_string(&crabbit_dump).expect("failed to read kernel dump");
     assert!(
-        stair_text.contains("amdgpu.kernel"),
-        "expected amdgpu.kernel in kernel dump, got:\n{stair_text}"
-    );
-    assert!(
-        stair_text.contains("gfx906"),
-        "expected MI50 gfx906 metadata in kernel dump, got:\n{stair_text}"
+        crabbit_text.contains("amdgpu.kernel"),
+        "expected amdgpu.kernel in kernel dump, got:\n{crabbit_text}"
     );
     assert!(
-        stair_text.contains("add_kernel"),
-        "expected kernel symbol in kernel dump, got:\n{stair_text}"
+        crabbit_text.contains("gfx906"),
+        "expected MI50 gfx906 metadata in kernel dump, got:\n{crabbit_text}"
     );
     assert!(
-        stair_text.contains("slice_kernel"),
-        "expected safe slice kernel symbol in kernel dump, got:\n{stair_text}"
+        crabbit_text.contains("add_kernel"),
+        "expected kernel symbol in kernel dump, got:\n{crabbit_text}"
+    );
+    assert!(
+        crabbit_text.contains("slice_kernel"),
+        "expected safe slice kernel symbol in kernel dump, got:\n{crabbit_text}"
     );
 
     let run_output = Command::new(&executable)
@@ -757,7 +757,7 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
     );
     let stdout = String::from_utf8_lossy(&run_output.stdout);
     assert!(
-        stdout.contains("hello from stair"),
+        stdout.contains("hello from crabbit"),
         "expected println output from backend smoke executable, got:\n{stdout}"
     );
 
@@ -800,7 +800,7 @@ fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
     let fixture = fixture_manifest(&root, "llama-rms-norm");
     let target_dir = root
         .join("target")
-        .join("stair-backend-tests-llama-rms-norm");
+        .join("crabbit-backend-tests-llama-rms-norm");
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir).expect("failed to clear RMSNorm target directory");
     }
@@ -810,7 +810,7 @@ fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
         .arg("--manifest-path")
         .arg(fixture)
         .arg("--bin")
-        .arg("stair-llama-rms-norm")
+        .arg("crabbit-llama-rms-norm")
         .arg("--")
         .arg("--emit=obj")
         .arg(format!("-Zcodegen-backend={}", backend.display()))
@@ -832,7 +832,7 @@ fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
     );
 
     let executable = target_dir.join("debug").join(format!(
-        "stair-llama-rms-norm{}",
+        "crabbit-llama-rms-norm{}",
         std::env::consts::EXE_SUFFIX
     ));
     assert!(
@@ -841,19 +841,19 @@ fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
         executable.display()
     );
 
-    let dumps = stair_files(&target_dir);
+    let dumps = crabbit_files(&target_dir);
     assert!(
         !dumps.is_empty(),
-        "RMSNorm fixture did not produce a .stair kernel dump under {}",
+        "RMSNorm fixture did not produce a .crabbit kernel dump under {}",
         target_dir.display()
     );
-    let stable_dump = executable.with_extension("stair");
+    let stable_dump = executable.with_extension("crabbit");
     assert!(
         stable_dump.exists(),
         "RMSNorm fixture did not produce stable kernel dump {}",
         stable_dump.display()
     );
-    let stair_text = dumps
+    let crabbit_text = dumps
         .iter()
         .map(|dump| fs::read_to_string(dump).expect("failed to read RMSNorm kernel dump"))
         .collect::<Vec<_>>()
@@ -872,8 +872,8 @@ fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
         "amdgpu.store",
     ] {
         assert!(
-            stair_text.contains(expected),
-            "expected `{expected}` in RMSNorm kernel dump, got:\n{stair_text}"
+            crabbit_text.contains(expected),
+            "expected `{expected}` in RMSNorm kernel dump, got:\n{crabbit_text}"
         );
     }
 
@@ -886,7 +886,7 @@ fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
     );
     let stdout = String::from_utf8_lossy(&run_output.stdout);
     assert!(
-        stdout.contains("hello from stair"),
+        stdout.contains("hello from crabbit"),
         "expected println output from RMSNorm executable, got:\n{stdout}"
     );
 

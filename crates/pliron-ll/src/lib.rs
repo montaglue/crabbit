@@ -31,8 +31,8 @@ pub use pliron::{
 };
 pub mod result {
     pub use pliron::result::*;
-    /// Old stair name for [Result].
-    pub type STAIRResult<T> = pliron::result::Result<T>;
+    /// Old crabbit name for [Result].
+    pub type CrabbitResult<T> = pliron::result::Result<T>;
 }
 pub mod ir {
     pub use pliron::{

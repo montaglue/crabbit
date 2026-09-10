@@ -15,7 +15,7 @@ use crate::{
     common_traits::Named,
     context::{Context, Ptr},
     ir::operation::Operation,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{
@@ -64,7 +64,7 @@ pub(super) fn encode_inst(
     mnemonic: &'static str,
     pc: u64,
     refs: Option<&BinarySerializationContext<'_>>,
-) -> STAIRResult<BinaryEncoding> {
+) -> CrabbitResult<BinaryEncoding> {
     let mut out = Vec::with_capacity(16);
     let mut fixups = Vec::new();
     encode_into(ctx, op, opcode, mnemonic, pc, refs, &mut out, &mut fixups)?;
@@ -81,7 +81,7 @@ fn encode_into(
     refs: Option<&BinarySerializationContext<'_>>,
     out: &mut Vec<u8>,
     fixups: &mut Vec<BinaryFixup>,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let rd = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), mnemonic);
     let rn = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RN.as_ref(), mnemonic);
     let rm = || parse_gpr(ctx, op, ATTR_KEY_X86_64_RM.as_ref(), mnemonic);
@@ -303,7 +303,7 @@ fn parse_gpr(
     op: Ptr<Operation>,
     key: &str,
     mnemonic: &'static str,
-) -> STAIRResult<u8> {
+) -> CrabbitResult<u8> {
     let register = ops::reg(ctx, op, key).ok_or_else(|| {
         crate::input_error_noloc!("x86-64 `{mnemonic}` is missing register operand `{key}`")
     })?;
@@ -339,7 +339,7 @@ fn emit_alu_three(
     rn: u8,
     rm: u8,
     commutative: bool,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let alu = |out: &mut Vec<u8>, dst: u8, src: u8| {
         out.push(rex(true, src >= 8, false, dst >= 8));
         out.extend_from_slice(&[alu_opcode, modrm(0b11, src & 7, dst & 7)]);
@@ -364,7 +364,7 @@ fn check_expansion_operands(
     mnemonic: &'static str,
     operands: &[u8],
     reserved: &[u8],
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     for operand in operands {
         if reserved.contains(operand) {
             return Err(crate::input_error_noloc!(
@@ -444,7 +444,7 @@ fn emit_lea_rip(
     target: u64,
     pc: u64,
     mnemonic: &'static str,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     out.push(rex(true, rd >= 8, false, false));
     out.push(0x8d);
     out.push(modrm(0b00, rd & 7, 0b101));
@@ -453,12 +453,12 @@ fn emit_lea_rip(
     Ok(())
 }
 
-fn disp32(value: u64, mnemonic: &'static str) -> STAIRResult<i32> {
+fn disp32(value: u64, mnemonic: &'static str) -> CrabbitResult<i32> {
     i32::try_from(value)
         .map_err(|_| crate::input_error_noloc!("x86-64 `{mnemonic}` displacement out of range"))
 }
 
-fn rel32(target: u64, pc: u64, inst_len: u64, mnemonic: &'static str) -> STAIRResult<i32> {
+fn rel32(target: u64, pc: u64, inst_len: u64, mnemonic: &'static str) -> CrabbitResult<i32> {
     let delta = (target as i64) - (pc as i64) - (inst_len as i64);
     i32::try_from(delta)
         .map_err(|_| crate::input_error_noloc!("x86-64 `{mnemonic}` branch target out of range"))
@@ -468,7 +468,7 @@ fn resolve(
     offsets: Option<&HashMap<String, u64>>,
     key: &str,
     what: &str,
-) -> STAIRResult<u64> {
+) -> CrabbitResult<u64> {
     match offsets {
         None => Ok(0),
         Some(offsets) => offsets
@@ -482,7 +482,7 @@ fn branch_target(
     ctx: &Context,
     op: Ptr<Operation>,
     refs: Option<&BinarySerializationContext<'_>>,
-) -> STAIRResult<u64> {
+) -> CrabbitResult<u64> {
     // Sizing mode (`refs == None`): branch targets read as offset 0; the
     // rel32 forms keep lengths independent of resolution anyway.
     let Some(refs) = refs else {

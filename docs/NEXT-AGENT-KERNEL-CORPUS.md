@@ -79,11 +79,11 @@ intrinsic map normalizes callee names (dots→underscores, strips llvm_/int_
 prefixes) and covers the sreg family + barrier0 — extend it as corpus kernels
 demand (shared memory, more barriers, math intrinsics), erroring precisely on
 what's unsupported. How `#[kernel]` functions reach the importer: kernels are
-detected by symbol prefix `__stair_kernel_` (see KERNEL_EXPORT_PREFIX in
+detected by symbol prefix `__crabbit_kernel_` (see KERNEL_EXPORT_PREFIX in
 importer_oxide.rs) — check how cuda-oxide's `#[kernel]` macro + cuda-device
 intrinsics surface in MIR and make the corpus kernels use whatever attribute/
 prefix actually round-trips; if cuda-oxide's macros don't fit crabbit's current
-importer, a minimal `#[no_mangle] pub extern "C" fn __stair_kernel_*` convention
+importer, a minimal `#[no_mangle] pub extern "C" fn __crabbit_kernel_*` convention
 with a tiny device-intrinsics shim crate is acceptable for the corpus — document
 the choice. Acceptance: at least one Rust kernel compiled BY CRABBIT from a
 .rs file (not hand-built IR) into PTX, loaded via the CUDA driver API, runs

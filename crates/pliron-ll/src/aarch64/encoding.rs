@@ -4,7 +4,7 @@ use crate::{
     common_traits::Named,
     context::{Context, Ptr},
     ir::{basic_block::BasicBlock, operation::Operation},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{
@@ -32,7 +32,7 @@ pub(super) fn encode_inst(
     mnemonic: &'static str,
     pc: u64,
     refs: &BinarySerializationContext<'_>,
-) -> STAIRResult<BinaryEncoding> {
+) -> CrabbitResult<BinaryEncoding> {
     let word = match opcode {
         ops::CallOp::OPCODE => match encode_call(ctx, refs.function_offsets, op, pc)? {
             EncodedCall::Local(word) => {
@@ -795,7 +795,7 @@ fn encode_call(
     offsets: &HashMap<String, u64>,
     op: Ptr<Operation>,
     pc: u64,
-) -> STAIRResult<EncodedCall> {
+) -> CrabbitResult<EncodedCall> {
     let callee = ops::callee(ctx, op).unwrap();
     let Some(target) = offsets.get(&callee) else {
         return Ok(EncodedCall::External(callee));
@@ -827,7 +827,7 @@ pub(super) fn byte_len_for(opcode: Aarch64Opcode) -> u64 {
 /// add-or-subtract immediates. The fixed three-word form reaches +/-16MiB —
 /// far beyond ADR's +/-1MiB — and needs no relocations or page alignment,
 /// so it works identically in ELF and Mach-O text sections.
-fn encode_pc_relative_address(rd: u32, delta: i64, what: &str) -> STAIRResult<BinaryEncoding> {
+fn encode_pc_relative_address(rd: u32, delta: i64, what: &str) -> CrabbitResult<BinaryEncoding> {
     if !(-(1 << 24)..(1 << 24)).contains(&delta) {
         return Err(crate::input_error_noloc!(
             "{what} is out of the 16MiB pc-relative addressing range"
@@ -855,7 +855,7 @@ fn encode_adr_literal(
     literal_offsets: &HashMap<String, u64>,
     op: Ptr<Operation>,
     pc: u64,
-) -> STAIRResult<BinaryEncoding> {
+) -> CrabbitResult<BinaryEncoding> {
     let label = ops::literal_label(ctx, op).unwrap();
     let target = literal_offsets
         .get(&label)
@@ -870,7 +870,7 @@ fn encode_adr_function(
     function_offsets: &HashMap<String, u64>,
     op: Ptr<Operation>,
     pc: u64,
-) -> STAIRResult<BinaryEncoding> {
+) -> CrabbitResult<BinaryEncoding> {
     let symbol = ops::callee(ctx, op).unwrap();
     let target = function_offsets.get(&symbol).ok_or_else(|| {
         crate::input_error_noloc!("adr_function target `{symbol}` is not defined in this module")
@@ -885,7 +885,7 @@ fn encode_b(
     block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
     op: Ptr<Operation>,
     pc: u64,
-) -> STAIRResult<u32> {
+) -> CrabbitResult<u32> {
     let target = branch_target(ctx, block_offsets, op)?;
     let delta_words = ((target as i64) - (pc as i64)) / 4;
     if !(-(1 << 25)..(1 << 25)).contains(&delta_words) {
@@ -899,7 +899,7 @@ fn encode_cbnz(
     block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
     op: Ptr<Operation>,
     pc: u64,
-) -> STAIRResult<u32> {
+) -> CrabbitResult<u32> {
     let target = branch_target(ctx, block_offsets, op)?;
     let delta_words = ((target as i64) - (pc as i64)) / 4;
     if !(-(1 << 18)..(1 << 18)).contains(&delta_words) {
@@ -916,7 +916,7 @@ fn encode_b_cond(
     block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
     op: Ptr<Operation>,
     pc: u64,
-) -> STAIRResult<u32> {
+) -> CrabbitResult<u32> {
     let target = branch_target(ctx, block_offsets, op)?;
     let delta_words = ((target as i64) - (pc as i64)) / 4;
     if !(-(1 << 18)..(1 << 18)).contains(&delta_words) {
@@ -934,7 +934,7 @@ fn branch_target(
     ctx: &Context,
     block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
     op: Ptr<Operation>,
-) -> STAIRResult<u64> {
+) -> CrabbitResult<u64> {
     let target = ops::target(ctx, op)
         .ok_or_else(|| crate::input_error_noloc!("branch has no target block"))?;
     block_offsets.get(&target).copied().ok_or_else(|| {

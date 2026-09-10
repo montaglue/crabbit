@@ -8,7 +8,7 @@ use crate::{
     ir::{op::Op, operation::Operation},
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{
@@ -59,7 +59,7 @@ impl Pass for LlvmAarch64AbiPass {
     }
 }
 
-fn assign_function_abi(ctx: &mut Context, os: TargetOs, func: FuncOp) -> STAIRResult<()> {
+fn assign_function_abi(ctx: &mut Context, os: TargetOs, func: FuncOp) -> CrabbitResult<()> {
     let name = func.get_symbol_name(ctx).to_string();
     let (args, result) = function_abi_classes(ctx, func.get_type(ctx).into())?;
     let abi = assign_abi(os, &name, &args, result)?;

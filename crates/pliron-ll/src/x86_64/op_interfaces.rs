@@ -5,7 +5,7 @@ use pliron::derive::op_interface;
 use crate::{
     context::{Context, Ptr},
     ir::{basic_block::BasicBlock, op::Op},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::registers::Register;
@@ -18,7 +18,7 @@ pub trait X86_64InstructionOpInterface {
 
     fn mnemonic(&self) -> &'static str;
 
-    fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
+    fn verify(_op: &dyn Op, _ctx: &Context) -> CrabbitResult<()>
     where
         Self: Sized,
     {
@@ -45,7 +45,7 @@ pub trait RegisterOperandsOpInterface {
 
     fn rewrite_register_operand(&self, ctx: &mut Context, key: &str, reg: Register);
 
-    fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
+    fn verify(_op: &dyn Op, _ctx: &Context) -> CrabbitResult<()>
     where
         Self: Sized,
     {
@@ -98,9 +98,9 @@ pub trait BinarySerializableOpInterface {
         ctx: &Context,
         pc: u64,
         refs: &BinarySerializationContext<'_>,
-    ) -> STAIRResult<BinaryEncoding>;
+    ) -> CrabbitResult<BinaryEncoding>;
 
-    fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
+    fn verify(_op: &dyn Op, _ctx: &Context) -> CrabbitResult<()>
     where
         Self: Sized,
     {

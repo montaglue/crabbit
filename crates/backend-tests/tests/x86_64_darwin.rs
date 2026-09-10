@@ -77,7 +77,7 @@ fn build_backend(root: &Path, cargo: &str) -> PathBuf {
 
 fn fixture_target_dir(root: &Path, fixture: &str, profile: FixtureProfile) -> PathBuf {
     root.join("target").join(format!(
-        "stair-backend-tests-x86-64-{fixture}-{}",
+        "crabbit-backend-tests-x86-64-{fixture}-{}",
         profile.name()
     ))
 }
@@ -282,7 +282,7 @@ fn sudoku_solver_solves_puzzles_for_x86_64() {
                             9 6 1 5 3 7 2 8 4\n2 8 7 4 1 9 6 3 5\n3 4 5 2 8 6 1 7 9\n";
 
     for profile in FixtureProfile::ALL {
-        let executable = compile("sudoku-solver", "stair-sudoku-solver", profile);
+        let executable = compile("sudoku-solver", "crabbit-sudoku-solver", profile);
 
         let output = Command::new(&executable)
             .arg(PUZZLE)

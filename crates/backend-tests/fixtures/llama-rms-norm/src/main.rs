@@ -1,12 +1,12 @@
 //! Binary backend fixture based on the shape of llama.cpp CUDA RMSNorm.
 //!
 //! This crate mirrors the backend-smoke fixture: Cargo drives it as a binary,
-//! while `#[kernel]` functions are captured by the STAIR backend instead of
+//! while `#[kernel]` functions are captured by the crabbit backend instead of
 //! being emitted into the host object.
 
 #![allow(dead_code)]
 
-use stair_device::{DeviceSlice, DisjointSlice, block, kernel, math, thread};
+use crabbit_device::{DeviceSlice, DisjointSlice, block, kernel, math, thread};
 
 /// One block normalizes one row.
 ///
@@ -59,5 +59,5 @@ pub unsafe fn llama_rms_norm_f32(
 }
 
 fn main() {
-    println!("hello from stair");
+    println!("hello from crabbit");
 }

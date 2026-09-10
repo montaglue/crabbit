@@ -1,5 +1,5 @@
 //! End-to-end kernel path (docs/KERNEL-ABI.md): a `#![no_std]` device crate
-//! with `__stair_kernel_*` functions is compiled by the crabbit dylib, the
+//! with `__crabbit_kernel_*` functions is compiled by the crabbit dylib, the
 //! PTX sidecar is assembled by `ptxas` (skipped without a CUDA toolkit), and
 //! — when a CUDA driver + GPU are present — executed through the driver API
 //! by a small C harness that checks the results exactly.
@@ -54,7 +54,7 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
     let backend = build_backend(&root, &cargo);
     let fixture_dir = root
         .join("crates/backend-tests/fixtures/kernel-vector-add");
-    let target_dir = root.join("target/stair-backend-tests-kernel-vector-add");
+    let target_dir = root.join("target/crabbit-backend-tests-kernel-vector-add");
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir).expect("clear kernel fixture target dir");
     }

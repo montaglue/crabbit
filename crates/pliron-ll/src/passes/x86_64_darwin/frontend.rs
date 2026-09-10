@@ -36,7 +36,7 @@ use crate::{
         value::Value,
     },
     linked_list::{ContainsLinkedList, LinkedList},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use crate::ll::ops::CStrOp;
@@ -82,7 +82,7 @@ pub(super) enum BinaryKind {
 
 #[op_interface]
 pub(super) trait X86_64DarwinValidOpInterface {
-    fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
+    fn verify(_op: &dyn Op, _ctx: &Context) -> CrabbitResult<()>
     where
         Self: Sized,
     {
@@ -94,7 +94,7 @@ pub(super) trait X86_64DarwinValidOpInterface {
 pub(super) trait X86_64DarwinBinaryOpInterface {
     fn binary_kind(&self) -> BinaryKind;
 
-    fn verify(_op: &dyn Op, _ctx: &Context) -> STAIRResult<()>
+    fn verify(_op: &dyn Op, _ctx: &Context) -> CrabbitResult<()>
     where
         Self: Sized,
     {
@@ -102,14 +102,14 @@ pub(super) trait X86_64DarwinBinaryOpInterface {
     }
 }
 
-pub(super) fn module_op(ctx: &Context, root: Ptr<Operation>) -> STAIRResult<ModuleOp> {
+pub(super) fn module_op(ctx: &Context, root: Ptr<Operation>) -> CrabbitResult<ModuleOp> {
     cast_operation::<ModuleOp>(ctx, root)
         .ok_or_else(|| input_error_noloc!(X86_64DarwinErr::NotModule))
 }
 
 /// Map an LLVM linkage to its machine-level linkage, rejecting the ones the
 /// Darwin backend does not support.
-pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> STAIRResult<LinkageAttr> {
+pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> CrabbitResult<LinkageAttr> {
     match linkage {
         LlvmLinkageAttr::ExternalLinkage => Ok(LinkageAttr::External),
         LlvmLinkageAttr::InternalLinkage => Ok(LinkageAttr::Internal),
@@ -125,13 +125,13 @@ pub(super) fn validate_function_type(
     ctx: &Context,
     name: &str,
     ty: TypeHandle,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let (args, result) = function_abi_classes(ctx, ty)?;
     assign_darwin_abi(name, &args, result)?;
     Ok(())
 }
 
-pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> STAIRResult<()> {
+pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> CrabbitResult<()> {
     for block in func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
         let mut op = block.deref(ctx).get_head();
         while let Some(op_ptr) = op {
@@ -220,7 +220,7 @@ impl_binary_op!(
 pub(super) fn function_abi_classes(
     ctx: &Context,
     ty: TypeHandle,
-) -> STAIRResult<(Vec<AbiClass>, AbiClass)> {
+) -> CrabbitResult<(Vec<AbiClass>, AbiClass)> {
     let ty_ref = ty.deref(ctx);
     let func_ty = ty_ref
         .downcast_ref::<FuncType>()
@@ -236,7 +236,7 @@ pub(super) fn function_abi_classes(
     Ok((classes, abi_class(ctx, result)?))
 }
 
-pub(super) fn abi_class(ctx: &Context, ty: TypeHandle) -> STAIRResult<AbiClass> {
+pub(super) fn abi_class(ctx: &Context, ty: TypeHandle) -> CrabbitResult<AbiClass> {
     let ty_ref = ty.deref(ctx);
     if ty_ref.downcast_ref::<VoidType>().is_some() || ty_ref.downcast_ref::<UnitType>().is_some() {
         return Ok(AbiClass::Void);
@@ -273,7 +273,7 @@ pub(super) fn assign_darwin_abi(
     name: &str,
     args: &[AbiClass],
     result: AbiClass,
-) -> STAIRResult<FunctionAbi> {
+) -> CrabbitResult<FunctionAbi> {
     let result = match result {
         AbiClass::Int { size, .. } if size <= 8 => AbiLocation::Gpr(RESULT_GPRS[0]),
         AbiClass::Int { size, .. } if size <= 16 => {
@@ -347,7 +347,7 @@ pub(super) fn assign_darwin_abi(
     })
 }
 
-fn abi_type_layout(ctx: &Context, ty: TypeHandle) -> STAIRResult<(u64, u64)> {
+fn abi_type_layout(ctx: &Context, ty: TypeHandle) -> CrabbitResult<(u64, u64)> {
     let ty_ref = ty.deref(ctx);
     if ty_ref.downcast_ref::<UnitType>().is_some() {
         return Ok((0, 1));
@@ -401,7 +401,7 @@ fn align_to(value: u64, align: u64) -> u64 {
     }
 }
 
-pub(super) fn collect_entry_arguments(ctx: &Context, func: &FuncOp) -> STAIRResult<Vec<Value>> {
+pub(super) fn collect_entry_arguments(ctx: &Context, func: &FuncOp) -> CrabbitResult<Vec<Value>> {
     let entry = func
         .get_entry_block(ctx)
         .expect("llvm.func definition must have a body");

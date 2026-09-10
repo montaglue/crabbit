@@ -64,7 +64,7 @@ fn compile_fixture(
     config: &BTreeMap<String, String>,
     tag: &str,
 ) -> (String, Vec<u8>) {
-    let scratch = root.join("target/stair-server-gates").join(fixture).join(tag);
+    let scratch = root.join("target/crabbit-server-gates").join(fixture).join(tag);
     let _ = fs::remove_dir_all(&scratch);
     let emit_dir = scratch.join("ir");
     fs::create_dir_all(&emit_dir).unwrap();
@@ -100,14 +100,14 @@ fn compile_fixture(
         .filter(|p| {
             p.extension().is_some_and(|e| e == "o")
                 && p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().contains("stair_rust"))
+                    .is_some_and(|n| n.to_string_lossy().contains("crabbit_rust"))
         })
         .collect();
     objects.sort();
     assert_eq!(
         objects.len(),
         1,
-        "expected exactly one stair_rust object for {fixture}, got {objects:?}"
+        "expected exactly one crabbit_rust object for {fixture}, got {objects:?}"
     );
     (text, fs::read(&objects[0]).unwrap())
 }

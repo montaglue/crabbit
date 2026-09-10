@@ -13,7 +13,7 @@ use crate::{
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{error::X86_64DarwinErr, frontend::module_op};
@@ -46,7 +46,7 @@ impl Pass for X86_64LegalizePass {
 /// The current instruction set only has GPR encodings. Reject a manually
 /// constructed FP/SIMD register operand before RA/encoding instead of letting
 /// it collide with a virtual register name or panic in `parse_xreg`.
-fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
+fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> CrabbitResult<()> {
     let mnemonic = x86_64_ops::mnemonic(ctx, op).unwrap_or("<unknown>");
     for key in [
         ATTR_KEY_X86_64_RD.as_ref(),

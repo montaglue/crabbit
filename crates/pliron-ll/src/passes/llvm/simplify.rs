@@ -41,7 +41,7 @@ use crate::{
     },
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
     utils::apint::APInt,
 };
 
@@ -184,7 +184,7 @@ pub(crate) fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value
 fn fold_ops(
     ctx: &mut Context,
     region: Ptr<Region>,
-) -> STAIRResult<bool> {
+) -> CrabbitResult<bool> {
     let mut changed = false;
     for op in function_ops(ctx, region) {
         changed |= fold_op(ctx, op)?;
@@ -192,7 +192,7 @@ fn fold_ops(
     Ok(changed)
 }
 
-fn fold_op(ctx: &mut Context, op: Ptr<Operation>) -> STAIRResult<bool> {
+fn fold_op(ctx: &mut Context, op: Ptr<Operation>) -> CrabbitResult<bool> {
     let opid = Operation::get_opid(op, ctx);
 
     if opid == ICmpOp::get_opid_static() {

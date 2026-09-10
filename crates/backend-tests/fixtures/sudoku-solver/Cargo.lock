@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "stair-sudoku-solver"
+name = "crabbit-sudoku-solver"
 version = "0.0.0"

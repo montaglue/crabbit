@@ -21,7 +21,7 @@ use crate::{
     ir::{op::Op, operation::Operation, r#type::Typed},
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::inline::collect_functions;
@@ -47,7 +47,7 @@ impl Pass for LLVMPinTypePunnedSlotsPass {
     }
 }
 
-fn pin_function_slots(ctx: &mut Context, func: FuncOp) -> STAIRResult<bool> {
+fn pin_function_slots(ctx: &mut Context, func: FuncOp) -> CrabbitResult<bool> {
     let Some(region) = func.get_region(ctx) else {
         return Ok(false);
     };
@@ -69,7 +69,7 @@ fn pin_function_slots(ctx: &mut Context, func: FuncOp) -> STAIRResult<bool> {
 
 /// Reroute `slot`'s type-punned loads/stores through a fresh pointer bitcast,
 /// if it has any.
-fn pin_slot_if_punned(ctx: &mut Context, alloca: AllocaOp) -> STAIRResult<bool> {
+fn pin_slot_if_punned(ctx: &mut Context, alloca: AllocaOp) -> CrabbitResult<bool> {
     let slot = alloca.get_result(ctx);
     let slot_ty = alloca.result_pointee_type(ctx);
 

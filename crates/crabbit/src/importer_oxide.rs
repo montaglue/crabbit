@@ -44,7 +44,7 @@ use crate::{
 
 // The emission shims stand in for the old cmir op paths; the body below is
 // line-compatible with `importer.rs` modulo this alias.
-use self::ox as stair_mir;
+use self::ox as mir_dialect;
 
 /// A single unsupported MIR body or construct discovered during import.
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub struct ImportError {
     pub reason: String,
 }
 
-/// Result of importing a rustc crate into STAIR MIR.
+/// Result of importing a rustc crate into crabbit MIR.
 pub struct ImportedCrate {
     pub ctx: Context,
     pub module: Ptr<Operation>,
@@ -62,7 +62,7 @@ pub struct ImportedCrate {
     pub unsupported: Vec<ImportError>,
 }
 
-pub const KERNEL_EXPORT_PREFIX: &str = "__stair_kernel_";
+pub const KERNEL_EXPORT_PREFIX: &str = "__crabbit_kernel_";
 
 /// The zero-sized "unit" representation: an llvm-native `[0 x u8]`.
 /// dialect-mir's type converter recurses into aggregate fields and only
@@ -86,7 +86,7 @@ fn is_unit_converted_ty(ctx: &Context, ty: TypeHandle) -> bool {
         .is_some_and(|array| array.size() == 0)
 }
 
-/// Create a STAIR context with all dialects needed by the Rust MIR path.
+/// Create a crabbit context with all dialects needed by the Rust MIR path.
 pub fn create_context() -> Context {
     let mut ctx = Context::new();
     aarch64::register(&mut ctx);
@@ -204,7 +204,7 @@ fn is_kernel_def_id<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -
 }
 
 /// The exported (unmangled) symbol of `def_id` when it names a kernel:
-/// an `#[export_name = "__stair_kernel_…"]` or a `#[no_mangle]` item whose
+/// an `#[export_name = "__crabbit_kernel_…"]` or a `#[no_mangle]` item whose
 /// name carries [KERNEL_EXPORT_PREFIX] (docs/KERNEL-ABI.md).
 fn kernel_export_symbol<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -256,19 +256,19 @@ fn import_entry_wrapper(
 ) -> Result<(), String> {
     let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
     let fn_ty = FunctionType::get(ctx, vec![], vec![i32_ty.into()]);
-    let func = stair_mir::ops::FuncOp::new(ctx, "main".try_into().unwrap(), fn_ty);
+    let func = mir_dialect::ops::FuncOp::new(ctx, "main".try_into().unwrap(), fn_ty);
     let entry = func.get_entry_block(ctx);
 
-    let call = stair_mir::ops::CallOp::new_direct(ctx, rust_main, vec![], None);
+    let call = mir_dialect::ops::CallOp::new_direct(ctx, rust_main, vec![], None);
     call.get_operation().insert_at_back(entry, ctx);
 
-    let zero = stair_mir::ops::ConstantOp::new_integer(
+    let zero = mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(i32_ty, APInt::from_u32(0, NonZero::new(32).unwrap())),
     );
     zero.get_operation().insert_at_back(entry, ctx);
 
-    let ret = stair_mir::ops::ReturnOp::new(ctx, Some(zero.get_result(ctx)));
+    let ret = mir_dialect::ops::ReturnOp::new(ctx, Some(zero.get_result(ctx)));
     ret.get_operation().insert_at_back(entry, ctx);
 
     func.get_operation().insert_at_back(module_body, ctx);
@@ -364,7 +364,7 @@ fn import_function<'tcx>(
     );
     let results = convert_return_ty(tcx, ctx, return_ty)?;
     let fn_ty = FunctionType::get(ctx, inputs, results);
-    let func = stair_mir::ops::FuncOp::new(ctx, symbol, fn_ty);
+    let func = mir_dialect::ops::FuncOp::new(ctx, symbol, fn_ty);
     func.get_operation().insert_at_back(module_body, ctx);
     let entry = func.get_entry_block(ctx);
 
@@ -395,7 +395,7 @@ fn import_function<'tcx>(
         let Some(ty) = convert_storage_ty(tcx, ctx, mono_ty(tcx, &state, decl.ty))? else {
             continue;
         };
-        let alloca = stair_mir::ops::AllocaOp::new(ctx, ty);
+        let alloca = mir_dialect::ops::AllocaOp::new(ctx, ty);
         alloca.get_operation().insert_at_back(insert_block, ctx);
         state.local_slots[local.index()] = Some((alloca.get_result(ctx), ty));
     }
@@ -416,7 +416,7 @@ fn import_function<'tcx>(
             ),
             ParamAbi::Spread(elements) => {
                 let tuple_rust_ty = mono_ty(tcx, &state, body.local_decls[local].ty);
-                let undef = stair_mir::ops::UndefOp::new(ctx, aggregate_ty);
+                let undef = mir_dialect::ops::UndefOp::new(ctx, aggregate_ty);
                 undef.get_operation().insert_at_back(insert_block, ctx);
                 let mut current = undef.get_result(ctx);
                 for (idx, (elem_ty, abi)) in elements.into_iter().enumerate() {
@@ -431,7 +431,7 @@ fn import_function<'tcx>(
                     let element = cast_value_to_type(ctx, insert_block, element, elem_ty);
                     let index = converted_field_index(tcx, tuple_rust_ty, idx)?;
                     let insert =
-                        stair_mir::ops::InsertValueOp::new(ctx, element, current, vec![index]);
+                        mir_dialect::ops::InsertValueOp::new(ctx, element, current, vec![index]);
                     insert.get_operation().insert_at_back(insert_block, ctx);
                     current = insert.get_result(ctx);
                 }
@@ -446,7 +446,7 @@ fn import_function<'tcx>(
             body.local_decls[local].ty,
             arg,
         )?;
-        let store = stair_mir::ops::StoreOp::new(ctx, arg, slot);
+        let store = mir_dialect::ops::StoreOp::new(ctx, arg, slot);
         store.get_operation().insert_at_back(insert_block, ctx);
     }
 
@@ -796,7 +796,7 @@ fn declare_anonymous_byte_global(
         hex_suffix(bytes)
     };
     let mut legaliser = Legaliser::default();
-    let symbol = legaliser.legalise(&format!("L_stair_bytes_{suffix}"));
+    let symbol = legaliser.legalise(&format!("L_crabbit_bytes_{suffix}"));
     if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return symbol;
     }
@@ -1265,7 +1265,7 @@ fn import_statement<'tcx>(
                 vec![ptr_ty, ptr_ty, usize_ty],
                 Some(ptr_ty),
             );
-            let call = stair_mir::ops::CallOp::new_direct(
+            let call = mir_dialect::ops::CallOp::new_direct(
                 ctx,
                 memcpy,
                 vec![dst, src, byte_count],
@@ -1306,25 +1306,25 @@ fn import_terminator<'tcx>(
                     rustc_mir::RETURN_PLACE.into(),
                 )?)
             };
-            let ret = stair_mir::ops::ReturnOp::new(ctx, retval);
+            let ret = mir_dialect::ops::ReturnOp::new(ctx, retval);
             ret.get_operation().insert_at_back(insert_block, ctx);
             Ok(())
         }
         TerminatorKind::Goto { target } => {
             let dest = block_for(state, *target)?;
-            let goto = stair_mir::ops::GotoOp::new(ctx, dest, vec![]);
+            let goto = mir_dialect::ops::GotoOp::new(ctx, dest, vec![]);
             goto.get_operation().insert_at_back(insert_block, ctx);
             Ok(())
         }
         TerminatorKind::Unreachable => {
-            let unreachable = stair_mir::ops::UnreachableOp::new(ctx);
+            let unreachable = mir_dialect::ops::UnreachableOp::new(ctx);
             unreachable
                 .get_operation()
                 .insert_at_back(insert_block, ctx);
             Ok(())
         }
         TerminatorKind::UnwindResume => {
-            let unreachable = stair_mir::ops::UnreachableOp::new(ctx);
+            let unreachable = mir_dialect::ops::UnreachableOp::new(ctx);
             unreachable
                 .get_operation()
                 .insert_at_back(insert_block, ctx);
@@ -1335,7 +1335,7 @@ fn import_terminator<'tcx>(
             let otherwise = targets.otherwise();
             let cases = targets.iter().collect::<Vec<_>>();
             if cases.is_empty() {
-                let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, otherwise)?, vec![]);
+                let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, otherwise)?, vec![]);
                 goto.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(());
             }
@@ -1359,9 +1359,9 @@ fn import_terminator<'tcx>(
                 };
                 let expected = integer_constant(ctx, discr.get_type(ctx), expected)?;
                 expected.get_operation().insert_at_back(compare_block, ctx);
-                let cmp = stair_mir::ops::EqOp::new(ctx, discr, expected.get_result(ctx));
+                let cmp = mir_dialect::ops::EqOp::new(ctx, discr, expected.get_result(ctx));
                 cmp.get_operation().insert_at_back(compare_block, ctx);
-                let branch = stair_mir::ops::CondBrOp::new(
+                let branch = mir_dialect::ops::CondBrOp::new(
                     ctx,
                     cmp.get_result(ctx),
                     block_for(state, target)?,
@@ -1394,13 +1394,13 @@ fn import_terminator<'tcx>(
                     args,
                     destination,
                 )?;
-                let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+                let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
                 goto.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(());
             }
 
             if is_unreachable_unchecked_call(tcx, state, body, func) {
-                stair_mir::ops::UnreachableOp::new(ctx)
+                mir_dialect::ops::UnreachableOp::new(ctx)
                     .get_operation()
                     .insert_at_back(insert_block, ctx);
                 return Ok(());
@@ -1412,7 +1412,7 @@ fn import_terminator<'tcx>(
                         "unsupported MIR no-op intrinsic call without return target".to_string()
                     );
                 };
-                let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+                let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
                 goto.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(());
             }
@@ -1428,12 +1428,12 @@ fn import_terminator<'tcx>(
                 destination,
             )? {
                 let Some(target) = target else {
-                    stair_mir::ops::UnreachableOp::new(ctx)
+                    mir_dialect::ops::UnreachableOp::new(ctx)
                         .get_operation()
                         .insert_at_back(insert_block, ctx);
                     return Ok(());
                 };
-                let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+                let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
                 goto.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(());
             }
@@ -1491,7 +1491,7 @@ fn import_terminator<'tcx>(
                         let index = converted_field_index(tcx, tuple_ty, elem_idx)?;
                         let elem_conv = convert_ty(tcx, ctx, elem_ty)?;
                         let element =
-                            stair_mir::ops::ExtractValueOp::new(ctx, value, vec![index], elem_conv);
+                            mir_dialect::ops::ExtractValueOp::new(ctx, value, vec![index], elem_conv);
                         element.get_operation().insert_at_back(insert_block, ctx);
                         lower_abi_call_arg(
                             ctx,
@@ -1536,19 +1536,19 @@ fn import_terminator<'tcx>(
                 let offset = integer_constant(ctx, usize_ty, (slot * ptr_size) as u128)?;
                 offset.get_operation().insert_at_back(insert_block, ctx);
                 let fn_slot =
-                    stair_mir::ops::PtrOffsetOp::new(ctx, vtable, offset.get_result(ctx));
+                    mir_dialect::ops::PtrOffsetOp::new(ctx, vtable, offset.get_result(ctx));
                 fn_slot.get_operation().insert_at_back(insert_block, ctx);
                 let ptr_ty = llvm_ptr_ty(ctx);
-                let fn_ptr = stair_mir::ops::LoadOp::new(ctx, fn_slot.get_result(ctx), ptr_ty);
+                let fn_ptr = mir_dialect::ops::LoadOp::new(ctx, fn_slot.get_result(ctx), ptr_ty);
                 fn_ptr.get_operation().insert_at_back(insert_block, ctx);
-                stair_mir::ops::CallOp::new_indirect(
+                mir_dialect::ops::CallOp::new_indirect(
                     ctx,
                     fn_ptr.get_result(ctx),
                     call_args,
                     result_type,
                 )
             } else if let Some(callee_value) = callee_value {
-                stair_mir::ops::CallOp::new_indirect(ctx, callee_value, call_args, result_type)
+                mir_dialect::ops::CallOp::new_indirect(ctx, callee_value, call_args, result_type)
             } else {
                 let callee = call_callee(tcx, state, body, func)?;
                 let external_call = is_upstream_call(tcx, state, body, func);
@@ -1601,15 +1601,15 @@ fn import_terminator<'tcx>(
                         result_type,
                     );
                 }
-                stair_mir::ops::CallOp::new_direct(ctx, callee, call_args, result_type)
+                mir_dialect::ops::CallOp::new_direct(ctx, callee, call_args, result_type)
             };
             call.get_operation().insert_at_back(insert_block, ctx);
 
             if let Some((rust_ret_ty, blob_ty)) = external_enum_result {
                 let blob = call.get_operation().deref(ctx).get_result(0);
-                let blob_slot = stair_mir::ops::AllocaOp::new(ctx, blob_ty);
+                let blob_slot = mir_dialect::ops::AllocaOp::new(ctx, blob_ty);
                 blob_slot.get_operation().insert_at_back(insert_block, ctx);
-                let store = stair_mir::ops::StoreOp::new(ctx, blob, blob_slot.get_result(ctx));
+                let store = mir_dialect::ops::StoreOp::new(ctx, blob, blob_slot.get_result(ctx));
                 store.get_operation().insert_at_back(insert_block, ctx);
                 let value = load_value_from_real_layout(
                     tcx,
@@ -1631,23 +1631,23 @@ fn import_terminator<'tcx>(
                     body.local_decls[destination.local].ty,
                     result,
                 )?;
-                stair_mir::ops::StoreOp::new(ctx, result, slot)
+                mir_dialect::ops::StoreOp::new(ctx, result, slot)
                     .get_operation()
                     .insert_at_back(insert_block, ctx);
             }
 
             let Some(target) = target else {
-                stair_mir::ops::UnreachableOp::new(ctx)
+                mir_dialect::ops::UnreachableOp::new(ctx)
                     .get_operation()
                     .insert_at_back(insert_block, ctx);
                 return Ok(());
             };
-            let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+            let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
             goto.get_operation().insert_at_back(insert_block, ctx);
             Ok(())
         }
         TerminatorKind::Assert { target, .. } => {
-            let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+            let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
             goto.get_operation().insert_at_back(insert_block, ctx);
             Ok(())
         }
@@ -1666,10 +1666,10 @@ fn import_terminator<'tcx>(
                 let addr = place_addr(tcx, ctx, state, insert_block, body, place)?;
                 let mut call_args = Vec::new();
                 lower_abi_call_arg(ctx, insert_block, addr, &mut call_args)?;
-                let call = stair_mir::ops::CallOp::new_direct(ctx, symbol, call_args, None);
+                let call = mir_dialect::ops::CallOp::new_direct(ctx, symbol, call_args, None);
                 call.get_operation().insert_at_back(insert_block, ctx);
             }
-            let goto = stair_mir::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+            let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
             goto.get_operation().insert_at_back(insert_block, ctx);
             Ok(())
         }
@@ -1759,12 +1759,12 @@ fn simd_value_bits(
     if value.get_type(ctx).deref(ctx).is::<IntegerType>() {
         return Ok(cast_value_to_type(ctx, insert_block, value, u64_ty));
     }
-    let slot = stair_mir::ops::AllocaOp::new(ctx, u64_ty);
+    let slot = mir_dialect::ops::AllocaOp::new(ctx, u64_ty);
     slot.get_operation().insert_at_back(insert_block, ctx);
     let slot = slot.get_result(ctx);
-    let store = stair_mir::ops::StoreOp::new(ctx, value, slot);
+    let store = mir_dialect::ops::StoreOp::new(ctx, value, slot);
     store.get_operation().insert_at_back(insert_block, ctx);
-    let load = stair_mir::ops::LoadOp::new(ctx, slot, u64_ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, slot, u64_ty);
     load.get_operation().insert_at_back(insert_block, ctx);
     Ok(load.get_result(ctx))
 }
@@ -1783,10 +1783,10 @@ fn store_simd_bits<'tcx>(
 ) -> Result<(), String> {
     let dest_rust_ty = mono_ty(tcx, state, destination.ty(body, tcx).ty);
     let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
-    let slot = stair_mir::ops::AllocaOp::new(ctx, u64_ty);
+    let slot = mir_dialect::ops::AllocaOp::new(ctx, u64_ty);
     slot.get_operation().insert_at_back(insert_block, ctx);
     let slot = slot.get_result(ctx);
-    let store = stair_mir::ops::StoreOp::new(ctx, bits, slot);
+    let store = mir_dialect::ops::StoreOp::new(ctx, bits, slot);
     store.get_operation().insert_at_back(insert_block, ctx);
     let value = load_value_from_real_layout(tcx, ctx, insert_block, dest_rust_ty, slot)?;
     store_place(tcx, ctx, state, insert_block, body, destination, value)
@@ -1820,13 +1820,13 @@ fn split_dyn_receiver(
         match num_fields {
             2 => {
                 let data = emit_op(
-                    stair_mir::ops::ExtractValueOp::new(ctx, receiver, vec![0], field_tys[0])
+                    mir_dialect::ops::ExtractValueOp::new(ctx, receiver, vec![0], field_tys[0])
                         .get_operation(),
                     ctx,
                     insert_block,
                 );
                 let vtable = emit_op(
-                    stair_mir::ops::ExtractValueOp::new(ctx, receiver, vec![1], field_tys[1])
+                    mir_dialect::ops::ExtractValueOp::new(ctx, receiver, vec![1], field_tys[1])
                         .get_operation(),
                     ctx,
                     insert_block,
@@ -1835,7 +1835,7 @@ fn split_dyn_receiver(
             }
             1 => {
                 receiver = emit_op(
-                    stair_mir::ops::ExtractValueOp::new(ctx, receiver, vec![0], field_tys[0])
+                    mir_dialect::ops::ExtractValueOp::new(ctx, receiver, vec![0], field_tys[0])
                         .get_operation(),
                     ctx,
                     insert_block,
@@ -1969,7 +1969,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let Some(load_ty) = convert_storage_ty(tcx, ctx, value_ty)? else {
                 return Ok(true);
             };
-            let load = stair_mir::ops::LoadOp::new(ctx, ptr, load_ty);
+            let load = mir_dialect::ops::LoadOp::new(ctx, ptr, load_ty);
             load.get_operation().insert_at_back(insert_block, ctx);
             store_place(
                 tcx,
@@ -1997,7 +1997,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let value = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
             let value = normalize_bool_for_storage(tcx, ctx, state, insert_block, value_ty, value)?;
             let value = cast_value_to_type(ctx, insert_block, value, store_ty);
-            let store = stair_mir::ops::StoreOp::new(ctx, value, ptr);
+            let store = mir_dialect::ops::StoreOp::new(ctx, value, ptr);
             store.get_operation().insert_at_back(insert_block, ctx);
             Ok(true)
         }
@@ -2049,7 +2049,7 @@ fn lower_known_intrinsic_call<'tcx>(
             lower_abi_call_arg(ctx, insert_block, value, &mut call_args)?;
             lower_abi_call_arg(ctx, insert_block, ptr, &mut call_args)?;
             let call =
-                stair_mir::ops::CallOp::new_direct(ctx, helper, call_args, Some(storage_ty));
+                mir_dialect::ops::CallOp::new_direct(ctx, helper, call_args, Some(storage_ty));
             call.get_operation().insert_at_back(insert_block, ctx);
             let old = call.get_result(ctx);
             store_place(tcx, ctx, state, insert_block, body, destination, old)?;
@@ -2081,7 +2081,7 @@ fn lower_known_intrinsic_call<'tcx>(
                 vec![ptr_ty, val_ty, usize_ty],
                 Some(ptr_ty),
             );
-            let call = stair_mir::ops::CallOp::new_direct(
+            let call = mir_dialect::ops::CallOp::new_direct(
                 ctx,
                 memset,
                 vec![dst, val, byte_count],
@@ -2102,7 +2102,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             let lhs = cast_value_to_type(ctx, insert_block, lhs, usize_ty);
             let rhs = cast_value_to_type(ctx, insert_block, rhs, usize_ty);
-            let diff = stair_mir::ops::SubOp::new(ctx, lhs, rhs);
+            let diff = mir_dialect::ops::SubOp::new(ctx, lhs, rhs);
             diff.get_operation().insert_at_back(insert_block, ctx);
             let mut result = diff.get_operation().deref(ctx).get_result(0);
             let elem = instance.args.type_at(0);
@@ -2110,7 +2110,7 @@ fn lower_known_intrinsic_call<'tcx>(
             if elem_size > 1 {
                 let size = integer_constant(ctx, usize_ty, elem_size as u128)?;
                 size.get_operation().insert_at_back(insert_block, ctx);
-                let div = stair_mir::ops::DivOp::new(ctx, result, size.get_result(ctx));
+                let div = mir_dialect::ops::DivOp::new(ctx, result, size.get_result(ctx));
                 div.get_operation().insert_at_back(insert_block, ctx);
                 result = div.get_operation().deref(ctx).get_result(0);
             }
@@ -2136,7 +2136,7 @@ fn lower_known_intrinsic_call<'tcx>(
                 let lo_count = emit_popcount64(ctx, insert_block, lo)?;
                 let hi_count = emit_popcount64(ctx, insert_block, hi)?;
                 emit_op(
-                    stair_mir::ops::AddOp::new(ctx, lo_count, hi_count).get_operation(),
+                    mir_dialect::ops::AddOp::new(ctx, lo_count, hi_count).get_operation(),
                     ctx,
                     insert_block,
                 )
@@ -2289,20 +2289,20 @@ fn lower_known_intrinsic_call<'tcx>(
                 modulus_mask.get_operation().insert_at_back(insert_block, ctx);
                 let modulus_mask = modulus_mask.get_result(ctx);
                 let k = emit_op(
-                    stair_mir::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
+                    mir_dialect::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let width_value = integer_constant(ctx, u128_ty, 128)?;
                 width_value.get_operation().insert_at_back(insert_block, ctx);
                 let complement = emit_op(
-                    stair_mir::ops::SubOp::new(ctx, width_value.get_result(ctx), k)
+                    mir_dialect::ops::SubOp::new(ctx, width_value.get_result(ctx), k)
                         .get_operation(),
                     ctx,
                     insert_block,
                 );
                 let inv = emit_op(
-                    stair_mir::ops::BitAndOp::new(ctx, complement, modulus_mask).get_operation(),
+                    mir_dialect::ops::BitAndOp::new(ctx, complement, modulus_mask).get_operation(),
                     ctx,
                     insert_block,
                 );
@@ -2312,17 +2312,17 @@ fn lower_known_intrinsic_call<'tcx>(
                     (inv, k)
                 };
                 let left = emit_op(
-                    stair_mir::ops::ShlOp::new(ctx, x, left_amount).get_operation(),
+                    mir_dialect::ops::ShlOp::new(ctx, x, left_amount).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let right = emit_op(
-                    stair_mir::ops::ShrOp::new(ctx, x, right_amount).get_operation(),
+                    mir_dialect::ops::ShrOp::new(ctx, x, right_amount).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let rotated = emit_op(
-                    stair_mir::ops::BitOrOp::new(ctx, left, right).get_operation(),
+                    mir_dialect::ops::BitOrOp::new(ctx, left, right).get_operation(),
                     ctx,
                     insert_block,
                 );
@@ -2351,7 +2351,7 @@ fn lower_known_intrinsic_call<'tcx>(
                 // `width` bits.
                 let mask = constant(ctx, width_mask)?;
                 x = emit_op(
-                    stair_mir::ops::BitAndOp::new(ctx, x, mask).get_operation(),
+                    mir_dialect::ops::BitAndOp::new(ctx, x, mask).get_operation(),
                     ctx,
                     insert_block,
                 );
@@ -2363,18 +2363,18 @@ fn lower_known_intrinsic_call<'tcx>(
             // both halves degenerate to the untouched value.
             let modulus_mask = constant(ctx, (width - 1) as u128)?;
             let k = emit_op(
-                stair_mir::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
+                mir_dialect::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
                 ctx,
                 insert_block,
             );
             let width_value = constant(ctx, width as u128)?;
             let complement = emit_op(
-                stair_mir::ops::SubOp::new(ctx, width_value, k).get_operation(),
+                mir_dialect::ops::SubOp::new(ctx, width_value, k).get_operation(),
                 ctx,
                 insert_block,
             );
             let inv = emit_op(
-                stair_mir::ops::BitAndOp::new(ctx, complement, modulus_mask).get_operation(),
+                mir_dialect::ops::BitAndOp::new(ctx, complement, modulus_mask).get_operation(),
                 ctx,
                 insert_block,
             );
@@ -2384,24 +2384,24 @@ fn lower_known_intrinsic_call<'tcx>(
                 (inv, k)
             };
             let left = emit_op(
-                stair_mir::ops::ShlOp::new(ctx, x, left_amount).get_operation(),
+                mir_dialect::ops::ShlOp::new(ctx, x, left_amount).get_operation(),
                 ctx,
                 insert_block,
             );
             let right = emit_op(
-                stair_mir::ops::ShrOp::new(ctx, x, right_amount).get_operation(),
+                mir_dialect::ops::ShrOp::new(ctx, x, right_amount).get_operation(),
                 ctx,
                 insert_block,
             );
             let mut rotated = emit_op(
-                stair_mir::ops::BitOrOp::new(ctx, left, right).get_operation(),
+                mir_dialect::ops::BitOrOp::new(ctx, left, right).get_operation(),
                 ctx,
                 insert_block,
             );
             if width < 64 {
                 let mask = constant(ctx, width_mask)?;
                 rotated = emit_op(
-                    stair_mir::ops::BitAndOp::new(ctx, rotated, mask).get_operation(),
+                    mir_dialect::ops::BitAndOp::new(ctx, rotated, mask).get_operation(),
                     ctx,
                     insert_block,
                 );
@@ -2441,7 +2441,7 @@ fn lower_known_intrinsic_call<'tcx>(
                 vec![ptr_ty, ptr_ty, usize_ty],
                 Some(ptr_ty),
             );
-            let call = stair_mir::ops::CallOp::new_direct(
+            let call = mir_dialect::ops::CallOp::new_direct(
                 ctx,
                 helper,
                 vec![dst, src, byte_count],
@@ -2467,7 +2467,7 @@ fn lower_known_intrinsic_call<'tcx>(
             // are guaranteed non-overlapping.
             let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
             let temp_ty: TypeHandle = llvm::types::ArrayType::get(ctx, byte_ty, size).into();
-            let temp = stair_mir::ops::AllocaOp::new(ctx, temp_ty);
+            let temp = mir_dialect::ops::AllocaOp::new(ctx, temp_ty);
             temp.get_operation().insert_at_back(insert_block, ctx);
             let temp_ptr = temp.get_result(ctx);
             let memcpy: crate::identifier::Identifier = "memcpy".try_into().unwrap();
@@ -2484,7 +2484,7 @@ fn lower_known_intrinsic_call<'tcx>(
             size_value.get_operation().insert_at_back(insert_block, ctx);
             let size_value = size_value.get_result(ctx);
             for (to, from) in [(temp_ptr, x), (x, y), (y, temp_ptr)] {
-                let call = stair_mir::ops::CallOp::new_direct(
+                let call = mir_dialect::ops::CallOp::new_direct(
                     ctx,
                     memcpy.clone(),
                     vec![to, from, size_value],
@@ -2523,7 +2523,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let byte_mask = integer_constant(ctx, u64_ty, 0xff)?;
             byte_mask.get_operation().insert_at_back(insert_block, ctx);
             let lane = emit_op(
-                stair_mir::ops::BitAndOp::new(ctx, lane, byte_mask.get_result(ctx))
+                mir_dialect::ops::BitAndOp::new(ctx, lane, byte_mask.get_result(ctx))
                     .get_operation(),
                 ctx,
                 insert_block,
@@ -2531,7 +2531,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let spread = integer_constant(ctx, u64_ty, 0x0101_0101_0101_0101)?;
             spread.get_operation().insert_at_back(insert_block, ctx);
             let bits = emit_op(
-                stair_mir::ops::MulOp::new(ctx, lane, spread.get_result(ctx)).get_operation(),
+                mir_dialect::ops::MulOp::new(ctx, lane, spread.get_result(ctx)).get_operation(),
                 ctx,
                 insert_block,
             );
@@ -2552,7 +2552,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let lhs = simd_value_bits(ctx, insert_block, lhs)?;
             let rhs = simd_value_bits(ctx, insert_block, rhs)?;
             let bits = emit_op(
-                stair_mir::ops::BitOrOp::new(ctx, lhs, rhs).get_operation(),
+                mir_dialect::ops::BitOrOp::new(ctx, lhs, rhs).get_operation(),
                 ctx,
                 insert_block,
             );
@@ -2611,42 +2611,42 @@ fn lower_known_intrinsic_call<'tcx>(
                 Ok(op.get_result(ctx))
             };
             let t = emit_op(
-                stair_mir::ops::BitXorOp::new(ctx, lhs, rhs).get_operation(),
+                mir_dialect::ops::BitXorOp::new(ctx, lhs, rhs).get_operation(),
                 ctx,
                 insert_block,
             );
             let low_ones = constant(ctx, 0x0101_0101_0101_0101)?;
             let minus = emit_op(
-                stair_mir::ops::SubOp::new(ctx, t, low_ones).get_operation(),
+                mir_dialect::ops::SubOp::new(ctx, t, low_ones).get_operation(),
                 ctx,
                 insert_block,
             );
             let all_ones = constant(ctx, u64::MAX as u128)?;
             let not_t = emit_op(
-                stair_mir::ops::BitXorOp::new(ctx, t, all_ones).get_operation(),
+                mir_dialect::ops::BitXorOp::new(ctx, t, all_ones).get_operation(),
                 ctx,
                 insert_block,
             );
             let and1 = emit_op(
-                stair_mir::ops::BitAndOp::new(ctx, minus, not_t).get_operation(),
+                mir_dialect::ops::BitAndOp::new(ctx, minus, not_t).get_operation(),
                 ctx,
                 insert_block,
             );
             let high_bits = constant(ctx, 0x8080_8080_8080_8080)?;
             let mut mask = emit_op(
-                stair_mir::ops::BitAndOp::new(ctx, and1, high_bits).get_operation(),
+                mir_dialect::ops::BitAndOp::new(ctx, and1, high_bits).get_operation(),
                 ctx,
                 insert_block,
             );
             for shift in [1u128, 2, 4] {
                 let amount = constant(ctx, shift)?;
                 let shifted = emit_op(
-                    stair_mir::ops::ShrOp::new(ctx, mask, amount).get_operation(),
+                    mir_dialect::ops::ShrOp::new(ctx, mask, amount).get_operation(),
                     ctx,
                     insert_block,
                 );
                 mask = emit_op(
-                    stair_mir::ops::BitOrOp::new(ctx, mask, shifted).get_operation(),
+                    mir_dialect::ops::BitOrOp::new(ctx, mask, shifted).get_operation(),
                     ctx,
                     insert_block,
                 );
@@ -2681,43 +2681,43 @@ fn lower_known_intrinsic_call<'tcx>(
             for lane in 0..8u32 {
                 let amount = constant(ctx, (lane * 8) as u128)?;
                 let lhs_lane = emit_op(
-                    stair_mir::ops::ShrOp::new(ctx, lhs, amount).get_operation(),
+                    mir_dialect::ops::ShrOp::new(ctx, lhs, amount).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let lhs_lane = cast_value_to_type(ctx, insert_block, lhs_lane, i8_ty);
                 let rhs_lane = emit_op(
-                    stair_mir::ops::ShrOp::new(ctx, rhs, amount).get_operation(),
+                    mir_dialect::ops::ShrOp::new(ctx, rhs, amount).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let rhs_lane = cast_value_to_type(ctx, insert_block, rhs_lane, i8_ty);
                 let cond = if name == "simd_lt" {
-                    stair_mir::ops::LtOp::new(ctx, lhs_lane, rhs_lane).get_operation()
+                    mir_dialect::ops::LtOp::new(ctx, lhs_lane, rhs_lane).get_operation()
                 } else {
-                    stair_mir::ops::GeOp::new(ctx, lhs_lane, rhs_lane).get_operation()
+                    mir_dialect::ops::GeOp::new(ctx, lhs_lane, rhs_lane).get_operation()
                 };
                 let cond = emit_op(cond, ctx, insert_block);
                 let cond = cast_value_to_type(ctx, insert_block, cond, u64_ty);
                 // true -> 0xff in this lane: (0 - cond) & 0xff, shifted home.
                 let neg = emit_op(
-                    stair_mir::ops::SubOp::new(ctx, zero, cond).get_operation(),
+                    mir_dialect::ops::SubOp::new(ctx, zero, cond).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let byte_mask = constant(ctx, 0xff)?;
                 let lane_mask = emit_op(
-                    stair_mir::ops::BitAndOp::new(ctx, neg, byte_mask).get_operation(),
+                    mir_dialect::ops::BitAndOp::new(ctx, neg, byte_mask).get_operation(),
                     ctx,
                     insert_block,
                 );
                 let placed = emit_op(
-                    stair_mir::ops::ShlOp::new(ctx, lane_mask, amount).get_operation(),
+                    mir_dialect::ops::ShlOp::new(ctx, lane_mask, amount).get_operation(),
                     ctx,
                     insert_block,
                 );
                 result = emit_op(
-                    stair_mir::ops::BitOrOp::new(ctx, result, placed).get_operation(),
+                    mir_dialect::ops::BitOrOp::new(ctx, result, placed).get_operation(),
                     ctx,
                     insert_block,
                 );
@@ -2748,39 +2748,39 @@ fn lower_known_intrinsic_call<'tcx>(
             let int_ty = lhs.get_type(ctx);
             let result = if name == "saturating_add" {
                 // r = a + b; if r < a saturate to all-ones: r | (0 - (r < a)).
-                let sum = stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation();
+                let sum = mir_dialect::ops::AddOp::new(ctx, lhs, rhs).get_operation();
                 sum.insert_at_back(insert_block, ctx);
                 let sum = sum.deref(ctx).get_result(0);
-                let overflow = stair_mir::ops::LtOp::new(ctx, sum, lhs).get_operation();
+                let overflow = mir_dialect::ops::LtOp::new(ctx, sum, lhs).get_operation();
                 overflow.insert_at_back(insert_block, ctx);
                 let overflow = overflow.deref(ctx).get_result(0);
                 let overflow = cast_value_to_type(ctx, insert_block, overflow, int_ty);
                 let zero = integer_constant(ctx, int_ty, 0)?;
                 zero.get_operation().insert_at_back(insert_block, ctx);
                 let mask =
-                    stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), overflow).get_operation();
+                    mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), overflow).get_operation();
                 mask.insert_at_back(insert_block, ctx);
                 let mask = mask.deref(ctx).get_result(0);
-                let saturated = stair_mir::ops::BitOrOp::new(ctx, sum, mask).get_operation();
+                let saturated = mir_dialect::ops::BitOrOp::new(ctx, sum, mask).get_operation();
                 saturated.insert_at_back(insert_block, ctx);
                 saturated.deref(ctx).get_result(0)
             } else {
                 // r = (a - b) & (0 - (a >= b)): zero when the subtraction
                 // would underflow.
-                let diff = stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation();
+                let diff = mir_dialect::ops::SubOp::new(ctx, lhs, rhs).get_operation();
                 diff.insert_at_back(insert_block, ctx);
                 let diff = diff.deref(ctx).get_result(0);
-                let no_borrow = stair_mir::ops::GeOp::new(ctx, lhs, rhs).get_operation();
+                let no_borrow = mir_dialect::ops::GeOp::new(ctx, lhs, rhs).get_operation();
                 no_borrow.insert_at_back(insert_block, ctx);
                 let no_borrow = no_borrow.deref(ctx).get_result(0);
                 let no_borrow = cast_value_to_type(ctx, insert_block, no_borrow, int_ty);
                 let zero = integer_constant(ctx, int_ty, 0)?;
                 zero.get_operation().insert_at_back(insert_block, ctx);
-                let mask = stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), no_borrow)
+                let mask = mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), no_borrow)
                     .get_operation();
                 mask.insert_at_back(insert_block, ctx);
                 let mask = mask.deref(ctx).get_result(0);
-                let saturated = stair_mir::ops::BitAndOp::new(ctx, diff, mask).get_operation();
+                let saturated = mir_dialect::ops::BitAndOp::new(ctx, diff, mask).get_operation();
                 saturated.insert_at_back(insert_block, ctx);
                 saturated.deref(ctx).get_result(0)
             };
@@ -2809,7 +2809,7 @@ fn lower_known_intrinsic_call<'tcx>(
                 )?
             } else {
                 emit_op(
-                    stair_mir::ops::DivOp::new(ctx, lhs, rhs).get_operation(),
+                    mir_dialect::ops::DivOp::new(ctx, lhs, rhs).get_operation(),
                     ctx,
                     insert_block,
                 )
@@ -2836,7 +2836,7 @@ fn lower_known_intrinsic_call<'tcx>(
             {
                 lower_float_to_i128_sat(ctx, state.module_body, insert_block, input, dest_ty)?
             } else {
-                let cast = stair_mir::ops::CastOp::new(ctx, input, dest_ty);
+                let cast = mir_dialect::ops::CastOp::new(ctx, input, dest_ty);
                 cast.get_operation().insert_at_back(insert_block, ctx);
                 cast.get_result(ctx)
             };
@@ -2856,7 +2856,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
             let elem_size = rustc_layout_size_of_ty(tcx, typing_env, elem)?;
             let byte_offset = scale_index(ctx, insert_block, count, elem_size)?;
-            let offset = stair_mir::ops::PtrOffsetOp::new(ctx, ptr, byte_offset);
+            let offset = mir_dialect::ops::PtrOffsetOp::new(ctx, ptr, byte_offset);
             offset.get_operation().insert_at_back(insert_block, ctx);
             store_place(
                 tcx,
@@ -2885,17 +2885,17 @@ fn lower_known_intrinsic_call<'tcx>(
                     // at +8 and align at +16.
                     let fat = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
                     let ptr_ty = llvm_ptr_ty(ctx);
-                    let vtable = stair_mir::ops::ExtractValueOp::new(ctx, fat, vec![1], ptr_ty);
+                    let vtable = mir_dialect::ops::ExtractValueOp::new(ctx, fat, vec![1], ptr_ty);
                     vtable.get_operation().insert_at_back(insert_block, ctx);
                     let offset = if name == "size_of_val" { 8 } else { 16 };
                     let addr = ptr_offset_const(ctx, insert_block, vtable.get_result(ctx), offset)?;
-                    let load = stair_mir::ops::LoadOp::new(ctx, addr, usize_ty);
+                    let load = mir_dialect::ops::LoadOp::new(ctx, addr, usize_ty);
                     load.get_operation().insert_at_back(insert_block, ctx);
                     load.get_result(ctx)
                 }
                 rustc_middle::ty::TyKind::Slice(inner) => {
                     let fat = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
-                    let len = stair_mir::ops::ExtractValueOp::new(ctx, fat, vec![1], usize_ty);
+                    let len = mir_dialect::ops::ExtractValueOp::new(ctx, fat, vec![1], usize_ty);
                     len.get_operation().insert_at_back(insert_block, ctx);
                     if name == "size_of_val" {
                         let elem_size = rustc_layout_size_of_ty(tcx, typing_env, *inner)?;
@@ -2941,7 +2941,7 @@ fn lower_known_intrinsic_call<'tcx>(
             let addr = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
             let mut call_args = Vec::new();
             lower_abi_call_arg(ctx, insert_block, addr, &mut call_args)?;
-            let call = stair_mir::ops::CallOp::new_direct(ctx, symbol, call_args, None);
+            let call = mir_dialect::ops::CallOp::new_direct(ctx, symbol, call_args, None);
             call.get_operation().insert_at_back(insert_block, ctx);
             Ok(true)
         }
@@ -3052,7 +3052,7 @@ fn lower_float_math_intrinsic<'tcx>(
     .unwrap();
     let arg_tys: Vec<TypeHandle> = values.iter().map(|value| value.get_type(ctx)).collect();
     declare_external_function(ctx, state.module_body, callee.clone(), arg_tys, Some(float_ty));
-    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, values, Some(float_ty));
+    let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, values, Some(float_ty));
     call.get_operation().insert_at_back(insert_block, ctx);
     let result = call.get_result(ctx);
     store_place(tcx, ctx, state, insert_block, body, destination, result)?;
@@ -3093,26 +3093,26 @@ fn emit_cttz64(
     let zero = integer_constant(ctx, u64_ty, 0)?;
     zero.get_operation().insert_at_back(insert_block, ctx);
     let neg = emit_op(
-        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), x).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), x).get_operation(),
         ctx,
         insert_block,
     );
     let low_bit = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, x, neg).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, x, neg).get_operation(),
         ctx,
         insert_block,
     );
     let one = integer_constant(ctx, u64_ty, 1)?;
     one.get_operation().insert_at_back(insert_block, ctx);
     let below = emit_op(
-        stair_mir::ops::SubOp::new(ctx, low_bit, one.get_result(ctx)).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, low_bit, one.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     let width_mask = integer_constant(ctx, u64_ty, u64::MAX as u128 >> (64 - width as usize))?;
     width_mask.get_operation().insert_at_back(insert_block, ctx);
     let masked = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, below, width_mask.get_result(ctx)).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, below, width_mask.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
@@ -3132,7 +3132,7 @@ fn split_u128_halves(
     let sixty_four = integer_constant(ctx, u128_ty, 64)?;
     sixty_four.get_operation().insert_at_back(insert_block, ctx);
     let hi_wide = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, bits, sixty_four.get_result(ctx)).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, bits, sixty_four.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
@@ -3158,23 +3158,23 @@ fn emit_cttz128(
     let zero = integer_constant(ctx, u64_ty, 0)?;
     zero.get_operation().insert_at_back(insert_block, ctx);
     let lo_is_zero = emit_op(
-        stair_mir::ops::EqOp::new(ctx, lo, zero.get_result(ctx)).get_operation(),
+        mir_dialect::ops::EqOp::new(ctx, lo, zero.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     let lo_is_zero = cast_value_to_type(ctx, insert_block, lo_is_zero, u64_ty);
     let mask = emit_op(
-        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), lo_is_zero).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), lo_is_zero).get_operation(),
         ctx,
         insert_block,
     );
     let extra = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, mask, hi_count).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, mask, hi_count).get_operation(),
         ctx,
         insert_block,
     );
     Ok(emit_op(
-        stair_mir::ops::AddOp::new(ctx, lo_count, extra).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, lo_count, extra).get_operation(),
         ctx,
         insert_block,
     ))
@@ -3195,7 +3195,7 @@ fn emit_ctlz64(
         let up = integer_constant(ctx, u64_ty, (64 - width) as u128)?;
         up.get_operation().insert_at_back(insert_block, ctx);
         x = emit_op(
-            stair_mir::ops::ShlOp::new(ctx, x, up.get_result(ctx)).get_operation(),
+            mir_dialect::ops::ShlOp::new(ctx, x, up.get_result(ctx)).get_operation(),
             ctx,
             insert_block,
         );
@@ -3206,12 +3206,12 @@ fn emit_ctlz64(
         let amount = integer_constant(ctx, u64_ty, shift)?;
         amount.get_operation().insert_at_back(insert_block, ctx);
         let shifted = emit_op(
-            stair_mir::ops::ShrOp::new(ctx, x, amount.get_result(ctx)).get_operation(),
+            mir_dialect::ops::ShrOp::new(ctx, x, amount.get_result(ctx)).get_operation(),
             ctx,
             insert_block,
         );
         x = emit_op(
-            stair_mir::ops::BitOrOp::new(ctx, x, shifted).get_operation(),
+            mir_dialect::ops::BitOrOp::new(ctx, x, shifted).get_operation(),
             ctx,
             insert_block,
         );
@@ -3219,7 +3219,7 @@ fn emit_ctlz64(
     let ones = integer_constant(ctx, u64_ty, u64::MAX as u128)?;
     ones.get_operation().insert_at_back(insert_block, ctx);
     let inverted = emit_op(
-        stair_mir::ops::BitXorOp::new(ctx, x, ones.get_result(ctx)).get_operation(),
+        mir_dialect::ops::BitXorOp::new(ctx, x, ones.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
@@ -3244,23 +3244,23 @@ fn emit_ctlz128(
     let zero = integer_constant(ctx, u64_ty, 0)?;
     zero.get_operation().insert_at_back(insert_block, ctx);
     let hi_is_zero = emit_op(
-        stair_mir::ops::EqOp::new(ctx, hi, zero.get_result(ctx)).get_operation(),
+        mir_dialect::ops::EqOp::new(ctx, hi, zero.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     let hi_is_zero = cast_value_to_type(ctx, insert_block, hi_is_zero, u64_ty);
     let mask = emit_op(
-        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), hi_is_zero).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), hi_is_zero).get_operation(),
         ctx,
         insert_block,
     );
     let extra = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, mask, lo_count).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, mask, lo_count).get_operation(),
         ctx,
         insert_block,
     );
     Ok(emit_op(
-        stair_mir::ops::AddOp::new(ctx, hi_count, extra).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, hi_count, extra).get_operation(),
         ctx,
         insert_block,
     ))
@@ -3284,39 +3284,39 @@ fn emit_popcount64(
     }
 
     let one = constant(ctx, 1)?;
-    let shifted = stair_mir::ops::ShrOp::new(ctx, x, one).get_operation();
+    let shifted = mir_dialect::ops::ShrOp::new(ctx, x, one).get_operation();
     let shifted = emit(ctx, insert_block, shifted);
     let mask55 = constant(ctx, 0x5555_5555_5555_5555)?;
-    let and55 = stair_mir::ops::BitAndOp::new(ctx, shifted, mask55).get_operation();
+    let and55 = mir_dialect::ops::BitAndOp::new(ctx, shifted, mask55).get_operation();
     let and55 = emit(ctx, insert_block, and55);
-    let sub = stair_mir::ops::SubOp::new(ctx, x, and55).get_operation();
+    let sub = mir_dialect::ops::SubOp::new(ctx, x, and55).get_operation();
     x = emit(ctx, insert_block, sub);
 
     let mask33 = constant(ctx, 0x3333_3333_3333_3333)?;
-    let low_pairs = stair_mir::ops::BitAndOp::new(ctx, x, mask33).get_operation();
+    let low_pairs = mir_dialect::ops::BitAndOp::new(ctx, x, mask33).get_operation();
     let low_pairs = emit(ctx, insert_block, low_pairs);
     let two = constant(ctx, 2)?;
-    let shr2 = stair_mir::ops::ShrOp::new(ctx, x, two).get_operation();
+    let shr2 = mir_dialect::ops::ShrOp::new(ctx, x, two).get_operation();
     let shr2 = emit(ctx, insert_block, shr2);
-    let high_pairs = stair_mir::ops::BitAndOp::new(ctx, shr2, mask33).get_operation();
+    let high_pairs = mir_dialect::ops::BitAndOp::new(ctx, shr2, mask33).get_operation();
     let high_pairs = emit(ctx, insert_block, high_pairs);
-    let pair_sum = stair_mir::ops::AddOp::new(ctx, low_pairs, high_pairs).get_operation();
+    let pair_sum = mir_dialect::ops::AddOp::new(ctx, low_pairs, high_pairs).get_operation();
     x = emit(ctx, insert_block, pair_sum);
 
     let four = constant(ctx, 4)?;
-    let shr4 = stair_mir::ops::ShrOp::new(ctx, x, four).get_operation();
+    let shr4 = mir_dialect::ops::ShrOp::new(ctx, x, four).get_operation();
     let shr4 = emit(ctx, insert_block, shr4);
-    let nibble_sum = stair_mir::ops::AddOp::new(ctx, x, shr4).get_operation();
+    let nibble_sum = mir_dialect::ops::AddOp::new(ctx, x, shr4).get_operation();
     let nibble_sum = emit(ctx, insert_block, nibble_sum);
     let mask0f = constant(ctx, 0x0f0f_0f0f_0f0f_0f0f)?;
-    let nibbles = stair_mir::ops::BitAndOp::new(ctx, nibble_sum, mask0f).get_operation();
+    let nibbles = mir_dialect::ops::BitAndOp::new(ctx, nibble_sum, mask0f).get_operation();
     let nibbles = emit(ctx, insert_block, nibbles);
 
     let ones = constant(ctx, 0x0101_0101_0101_0101)?;
-    let spread = stair_mir::ops::MulOp::new(ctx, nibbles, ones).get_operation();
+    let spread = mir_dialect::ops::MulOp::new(ctx, nibbles, ones).get_operation();
     let spread = emit(ctx, insert_block, spread);
     let fifty_six = constant(ctx, 56)?;
-    let total = stair_mir::ops::ShrOp::new(ctx, spread, fifty_six).get_operation();
+    let total = mir_dialect::ops::ShrOp::new(ctx, spread, fifty_six).get_operation();
     Ok(emit(ctx, insert_block, total))
 }
 
@@ -3333,12 +3333,12 @@ fn join_u128_halves(
     let sixty_four = integer_constant(ctx, u128_ty, 64)?;
     sixty_four.get_operation().insert_at_back(insert_block, ctx);
     let shifted = emit_op(
-        stair_mir::ops::ShlOp::new(ctx, hi_wide, sixty_four.get_result(ctx)).get_operation(),
+        mir_dialect::ops::ShlOp::new(ctx, hi_wide, sixty_four.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     Ok(emit_op(
-        stair_mir::ops::BitOrOp::new(ctx, shifted, lo_wide).get_operation(),
+        mir_dialect::ops::BitOrOp::new(ctx, shifted, lo_wide).get_operation(),
         ctx,
         insert_block,
     ))
@@ -3365,23 +3365,23 @@ fn emit_bswap64(
     for lane in 0..lanes {
         let down = constant(ctx, (lane * 8) as u128)?;
         let shifted = emit_op(
-            stair_mir::ops::ShrOp::new(ctx, x, down).get_operation(),
+            mir_dialect::ops::ShrOp::new(ctx, x, down).get_operation(),
             ctx,
             insert_block,
         );
         let byte = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, shifted, byte_mask).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, shifted, byte_mask).get_operation(),
             ctx,
             insert_block,
         );
         let up = constant(ctx, ((lanes - 1 - lane) * 8) as u128)?;
         let placed = emit_op(
-            stair_mir::ops::ShlOp::new(ctx, byte, up).get_operation(),
+            mir_dialect::ops::ShlOp::new(ctx, byte, up).get_operation(),
             ctx,
             insert_block,
         );
         result = emit_op(
-            stair_mir::ops::BitOrOp::new(ctx, result, placed).get_operation(),
+            mir_dialect::ops::BitOrOp::new(ctx, result, placed).get_operation(),
             ctx,
             insert_block,
         );
@@ -3415,27 +3415,27 @@ fn emit_bitreverse64(
         let mask = constant(ctx, mask_bits)?;
         let amount = constant(ctx, shift)?;
         let down = emit_op(
-            stair_mir::ops::ShrOp::new(ctx, x, amount).get_operation(),
+            mir_dialect::ops::ShrOp::new(ctx, x, amount).get_operation(),
             ctx,
             insert_block,
         );
         let down = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, down, mask).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, down, mask).get_operation(),
             ctx,
             insert_block,
         );
         let up = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, x, mask).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, x, mask).get_operation(),
             ctx,
             insert_block,
         );
         let up = emit_op(
-            stair_mir::ops::ShlOp::new(ctx, up, amount).get_operation(),
+            mir_dialect::ops::ShlOp::new(ctx, up, amount).get_operation(),
             ctx,
             insert_block,
         );
         x = emit_op(
-            stair_mir::ops::BitOrOp::new(ctx, down, up).get_operation(),
+            mir_dialect::ops::BitOrOp::new(ctx, down, up).get_operation(),
             ctx,
             insert_block,
         );
@@ -3444,7 +3444,7 @@ fn emit_bitreverse64(
     if width < 64 {
         let down = constant(ctx, (64 - width) as u128)?;
         x = emit_op(
-            stair_mir::ops::ShrOp::new(ctx, x, down).get_operation(),
+            mir_dialect::ops::ShrOp::new(ctx, x, down).get_operation(),
             ctx,
             insert_block,
         );
@@ -3484,7 +3484,7 @@ fn set_internal_linkage(
     module_body: Ptr<BasicBlock>,
     symbol: &crate::identifier::Identifier,
 ) {
-    if std::env::var_os("STAIR_DEBUG_EXPORT_ALL").is_some() {
+    if std::env::var_os("CRABBIT_DEBUG_EXPORT_ALL").is_some() {
         return;
     }
     set_function_linkage(ctx, module_body, symbol, LinkageAttr::InternalLinkage);
@@ -3554,7 +3554,7 @@ fn reassemble_abi_arg(
         ArgAbi::Indirect => {
             let ptr = entry.deref(ctx).get_argument(*block_arg_idx);
             *block_arg_idx += 1;
-            let load = stair_mir::ops::LoadOp::new(ctx, ptr, value_ty);
+            let load = mir_dialect::ops::LoadOp::new(ctx, ptr, value_ty);
             load.get_operation().insert_at_back(insert_block, ctx);
             load.get_result(ctx)
         }
@@ -3564,13 +3564,13 @@ fn reassemble_abi_arg(
             arg
         }
         ArgAbi::Leaves(group) => {
-            let undef = stair_mir::ops::UndefOp::new(ctx, value_ty);
+            let undef = mir_dialect::ops::UndefOp::new(ctx, value_ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
             let mut current = undef.get_result(ctx);
             for (indices, _) in group {
                 let field = entry.deref(ctx).get_argument(*block_arg_idx);
                 *block_arg_idx += 1;
-                let insert = stair_mir::ops::InsertValueOp::new(ctx, field, current, indices);
+                let insert = mir_dialect::ops::InsertValueOp::new(ctx, field, current, indices);
                 insert.get_operation().insert_at_back(insert_block, ctx);
                 current = insert.get_result(ctx);
             }
@@ -3595,7 +3595,7 @@ fn arg_abi_for_ty(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
     // argument. This must stay symmetric across import_function signatures,
     // entry reassembly, and lower_abi_call_arg — an asymmetry shifts every
     // later parameter one register over.
-    if let Ok(0) = stair_ty_size(ctx, ty) {
+    if let Ok(0) = crabbit_ty_size(ctx, ty) {
         return Ok(ArgAbi::Leaves(Vec::new()));
     }
     let ty_ref = ty.deref(ctx);
@@ -3603,7 +3603,7 @@ fn arg_abi_for_ty(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
         ty_ref.is::<llvm::types::StructType>() || ty_ref.is::<llvm::types::ArrayType>();
     drop(ty_ref);
     if is_aggregate {
-        if stair_ty_size(ctx, ty)? > 16 {
+        if crabbit_ty_size(ctx, ty)? > 16 {
             return Ok(ArgAbi::Indirect);
         }
         if let Ok(leaves) = simple_abi_leaves_for_ty(ctx, ty) {
@@ -3614,9 +3614,9 @@ fn arg_abi_for_ty(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
     Ok(ArgAbi::Leaves(simple_abi_leaves_for_ty(ctx, ty)?))
 }
 
-/// Byte size of a converted STAIR type, mirroring the AArch64 lowering's
+/// Byte size of a converted crabbit type, mirroring the AArch64 lowering's
 /// `stack_size_of` alignment rules.
-fn stair_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
+fn crabbit_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         return Ok((int_ty.width() as u64).div_ceil(8).max(1));
@@ -3637,7 +3637,7 @@ fn stair_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
         let elem = array_ty.elem_type();
         let len = array_ty.size();
         drop(ty_ref);
-        let stride = align_to(stair_ty_size(ctx, elem)?, stair_ty_align(ctx, elem)?);
+        let stride = align_to(crabbit_ty_size(ctx, elem)?, crabbit_ty_align(ctx, elem)?);
         return Ok(stride * len);
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
@@ -3649,11 +3649,11 @@ fn stair_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
         let mut size = 0u64;
         let mut align = 1u64;
         for field in fields {
-            let field_size = stair_ty_size(ctx, field)?;
+            let field_size = crabbit_ty_size(ctx, field)?;
             if field_size == 0 {
                 continue;
             }
-            let field_align = stair_ty_align(ctx, field)?;
+            let field_align = crabbit_ty_align(ctx, field)?;
             size = align_to(size, field_align) + field_size;
             align = align.max(field_align);
         }
@@ -3662,7 +3662,7 @@ fn stair_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
     Err(format!("unsupported ABI type: {:?}", &*ty_ref))
 }
 
-fn stair_ty_align(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
+fn crabbit_ty_align(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
     let ty_ref = ty.deref(ctx);
     if ty_ref.is::<UnitType>() {
         return Ok(1);
@@ -3670,7 +3670,7 @@ fn stair_ty_align(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
     if let Some(array_ty) = ty_ref.downcast_ref::<llvm::types::ArrayType>() {
         let elem = array_ty.elem_type();
         drop(ty_ref);
-        return stair_ty_align(ctx, elem);
+        return crabbit_ty_align(ctx, elem);
     }
     if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
         if struct_ty.is_opaque() {
@@ -3680,15 +3680,15 @@ fn stair_ty_align(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
         drop(ty_ref);
         let mut align = 1u64;
         for field in fields {
-            if stair_ty_size(ctx, field)? == 0 {
+            if crabbit_ty_size(ctx, field)? == 0 {
                 continue;
             }
-            align = align.max(stair_ty_align(ctx, field)?);
+            align = align.max(crabbit_ty_align(ctx, field)?);
         }
         return Ok(align);
     }
     drop(ty_ref);
-    Ok(stair_ty_size(ctx, ty)?.clamp(1, 8))
+    Ok(crabbit_ty_size(ctx, ty)?.clamp(1, 8))
 }
 
 fn lower_abi_call_arg(
@@ -3700,9 +3700,9 @@ fn lower_abi_call_arg(
     let value_ty = value.get_type(ctx);
     match arg_abi_for_ty(ctx, value_ty)? {
         ArgAbi::Indirect => {
-            let slot = stair_mir::ops::AllocaOp::new(ctx, value_ty);
+            let slot = mir_dialect::ops::AllocaOp::new(ctx, value_ty);
             slot.get_operation().insert_at_back(insert_block, ctx);
-            let store = stair_mir::ops::StoreOp::new(ctx, value, slot.get_result(ctx));
+            let store = mir_dialect::ops::StoreOp::new(ctx, value, slot.get_result(ctx));
             store.get_operation().insert_at_back(insert_block, ctx);
             out.push(slot.get_result(ctx));
             Ok(())
@@ -3713,7 +3713,7 @@ fn lower_abi_call_arg(
                 return Ok(());
             }
             for (indices, result_ty) in leaves {
-                let field = stair_mir::ops::ExtractValueOp::new(ctx, value, indices, result_ty);
+                let field = mir_dialect::ops::ExtractValueOp::new(ctx, value, indices, result_ty);
                 field.get_operation().insert_at_back(insert_block, ctx);
                 out.push(field.get_result(ctx));
             }
@@ -3761,7 +3761,7 @@ fn lower_i128_divrem(
         vec![int_ty, int_ty],
         Some(int_ty),
     );
-    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, vec![lhs, rhs], Some(int_ty));
+    let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, vec![lhs, rhs], Some(int_ty));
     call.get_operation().insert_at_back(insert_block, ctx);
     Ok(call.get_result(ctx))
 }
@@ -3791,7 +3791,7 @@ fn lower_i128_to_float(
     .unwrap();
     let int_ty = input.get_type(ctx);
     declare_external_function(ctx, module_body, callee.clone(), vec![int_ty], Some(float_ty));
-    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, vec![input], Some(float_ty));
+    let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, vec![input], Some(float_ty));
     call.get_operation().insert_at_back(insert_block, ctx);
     Ok(call.get_result(ctx))
 }
@@ -3832,7 +3832,7 @@ fn lower_float_to_i128_sat(
         vec![float_ty],
         Some(dest_ty),
     );
-    let call = stair_mir::ops::CallOp::new_direct(ctx, callee, vec![input], Some(dest_ty));
+    let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, vec![input], Some(dest_ty));
     call.get_operation().insert_at_back(insert_block, ctx);
     let raw = call.get_result(ctx);
 
@@ -3865,7 +3865,7 @@ fn lower_float_to_i128_sat(
      -> Result<Value, String> {
         let wide = cast_value_to_type(ctx, insert_block, cond, dest_ty);
         Ok(emit_op(
-            stair_mir::ops::SubOp::new(ctx, zero, wide).get_operation(),
+            mir_dialect::ops::SubOp::new(ctx, zero, wide).get_operation(),
             ctx,
             insert_block,
         ))
@@ -3877,14 +3877,14 @@ fn lower_float_to_i128_sat(
         // i128::MIN, which the libcall already produces).
         let low_bound = float_const(ctx, -two_pow_127)?;
         let below = emit_op(
-            stair_mir::ops::LtOp::new(ctx, input, low_bound).get_operation(),
+            mir_dialect::ops::LtOp::new(ctx, input, low_bound).get_operation(),
             ctx,
             insert_block,
         );
         let mask_low = mask_of(ctx, insert_block, below)?;
         // Ordered self-equality: false exactly for NaN.
         let ordered = emit_op(
-            stair_mir::ops::EqOp::new(ctx, input, input).get_operation(),
+            mir_dialect::ops::EqOp::new(ctx, input, input).get_operation(),
             ctx,
             insert_block,
         );
@@ -3895,7 +3895,7 @@ fn lower_float_to_i128_sat(
         // and NaN or x <= -1 goes to zero (`x > -1.0` is false for both).
         let minus_one = float_const(ctx, -1.0)?;
         let in_low_range = emit_op(
-            stair_mir::ops::GtOp::new(ctx, input, minus_one).get_operation(),
+            mir_dialect::ops::GtOp::new(ctx, input, minus_one).get_operation(),
             ctx,
             insert_block,
         );
@@ -3905,69 +3905,69 @@ fn lower_float_to_i128_sat(
 
     let upper = float_const(ctx, upper_bound)?;
     let above = emit_op(
-        stair_mir::ops::GeOp::new(ctx, input, upper).get_operation(),
+        mir_dialect::ops::GeOp::new(ctx, input, upper).get_operation(),
         ctx,
         insert_block,
     );
     let mask_high = mask_of(ctx, insert_block, above)?;
     let not_high = emit_op(
-        stair_mir::ops::BitXorOp::new(ctx, mask_high, ones).get_operation(),
+        mir_dialect::ops::BitXorOp::new(ctx, mask_high, ones).get_operation(),
         ctx,
         insert_block,
     );
     let high_sat = int_const(ctx, high_sat_bits)?;
     let high_sel = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, high_sat, mask_high).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, high_sat, mask_high).get_operation(),
         ctx,
         insert_block,
     );
 
     let mut result = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, raw, not_high).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, raw, not_high).get_operation(),
         ctx,
         insert_block,
     );
     if signed {
         let not_low = emit_op(
-            stair_mir::ops::BitXorOp::new(ctx, mask_low_sat, ones).get_operation(),
+            mir_dialect::ops::BitXorOp::new(ctx, mask_low_sat, ones).get_operation(),
             ctx,
             insert_block,
         );
         result = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, result, not_low).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, result, not_low).get_operation(),
             ctx,
             insert_block,
         );
         let min_sat = int_const(ctx, 1u128 << 127)?;
         let low_sel = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, min_sat, mask_low_sat).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, min_sat, mask_low_sat).get_operation(),
             ctx,
             insert_block,
         );
         result = emit_op(
-            stair_mir::ops::BitOrOp::new(ctx, result, low_sel).get_operation(),
+            mir_dialect::ops::BitOrOp::new(ctx, result, low_sel).get_operation(),
             ctx,
             insert_block,
         );
         result = emit_op(
-            stair_mir::ops::BitOrOp::new(ctx, result, high_sel).get_operation(),
+            mir_dialect::ops::BitOrOp::new(ctx, result, high_sel).get_operation(),
             ctx,
             insert_block,
         );
         // NaN: every compare above was false, so force the result to zero.
         result = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, result, mask_keep).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, result, mask_keep).get_operation(),
             ctx,
             insert_block,
         );
     } else {
         result = emit_op(
-            stair_mir::ops::BitOrOp::new(ctx, result, high_sel).get_operation(),
+            mir_dialect::ops::BitOrOp::new(ctx, result, high_sel).get_operation(),
             ctx,
             insert_block,
         );
         result = emit_op(
-            stair_mir::ops::BitAndOp::new(ctx, result, mask_keep).get_operation(),
+            mir_dialect::ops::BitAndOp::new(ctx, result, mask_keep).get_operation(),
             ctx,
             insert_block,
         );
@@ -4045,9 +4045,9 @@ fn lower_signed_saturating(
         .ok_or_else(|| "saturating intrinsic on non-integer type".to_string())?;
     let wrapped = emit_op(
         if is_add {
-            stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation()
+            mir_dialect::ops::AddOp::new(ctx, lhs, rhs).get_operation()
         } else {
-            stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation()
+            mir_dialect::ops::SubOp::new(ctx, lhs, rhs).get_operation()
         },
         ctx,
         insert_block,
@@ -4060,17 +4060,17 @@ fn lower_signed_saturating(
         ((lhs, rhs), (lhs, wrapped))
     };
     let a = emit_op(
-        stair_mir::ops::BitXorOp::new(ctx, xor_a.0, xor_a.1).get_operation(),
+        mir_dialect::ops::BitXorOp::new(ctx, xor_a.0, xor_a.1).get_operation(),
         ctx,
         insert_block,
     );
     let b = emit_op(
-        stair_mir::ops::BitXorOp::new(ctx, xor_b.0, xor_b.1).get_operation(),
+        mir_dialect::ops::BitXorOp::new(ctx, xor_b.0, xor_b.1).get_operation(),
         ctx,
         insert_block,
     );
     let sign = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, a, b).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, a, b).get_operation(),
         ctx,
         insert_block,
     );
@@ -4080,41 +4080,41 @@ fn lower_signed_saturating(
     // `int_ty` is Signed, so the sign-aware shift is arithmetic: all-ones
     // when the sign bit is set, zero otherwise.
     let overflow_mask = emit_op(
-        stair_mir::ops::SignAwareShrOp::new(ctx, sign, top_bit).get_operation(),
+        mir_dialect::ops::SignAwareShrOp::new(ctx, sign, top_bit).get_operation(),
         ctx,
         insert_block,
     );
     let lhs_sign = emit_op(
-        stair_mir::ops::SignAwareShrOp::new(ctx, lhs, top_bit).get_operation(),
+        mir_dialect::ops::SignAwareShrOp::new(ctx, lhs, top_bit).get_operation(),
         ctx,
         insert_block,
     );
     let max = integer_constant(ctx, int_ty, u128::MAX >> (129 - width as usize))?;
     max.get_operation().insert_at_back(insert_block, ctx);
     let saturated = emit_op(
-        stair_mir::ops::BitXorOp::new(ctx, lhs_sign, max.get_result(ctx)).get_operation(),
+        mir_dialect::ops::BitXorOp::new(ctx, lhs_sign, max.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     let ones = integer_constant(ctx, int_ty, u128::MAX >> (128 - width as usize))?;
     ones.get_operation().insert_at_back(insert_block, ctx);
     let keep_mask = emit_op(
-        stair_mir::ops::BitXorOp::new(ctx, overflow_mask, ones.get_result(ctx)).get_operation(),
+        mir_dialect::ops::BitXorOp::new(ctx, overflow_mask, ones.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     let kept = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, wrapped, keep_mask).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, wrapped, keep_mask).get_operation(),
         ctx,
         insert_block,
     );
     let sat_sel = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, saturated, overflow_mask).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, saturated, overflow_mask).get_operation(),
         ctx,
         insert_block,
     );
     Ok(emit_op(
-        stair_mir::ops::BitOrOp::new(ctx, kept, sat_sel).get_operation(),
+        mir_dialect::ops::BitOrOp::new(ctx, kept, sat_sel).get_operation(),
         ctx,
         insert_block,
     ))
@@ -4146,8 +4146,8 @@ fn lower_unsigned_overflow_binary(
     }
 
     let wrapped = match op {
-        BinOp::AddWithOverflow => stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation(),
-        BinOp::SubWithOverflow => stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation(),
+        BinOp::AddWithOverflow => mir_dialect::ops::AddOp::new(ctx, lhs, rhs).get_operation(),
+        BinOp::SubWithOverflow => mir_dialect::ops::SubOp::new(ctx, lhs, rhs).get_operation(),
         other => return Err(format!("unsupported MIR overflow binary op: {other:?}")),
     };
     wrapped.insert_at_back(insert_block, ctx);
@@ -4155,9 +4155,9 @@ fn lower_unsigned_overflow_binary(
 
     let overflow = match op {
         BinOp::AddWithOverflow => {
-            stair_mir::ops::LtOp::new(ctx, wrapped_value, lhs).get_operation()
+            mir_dialect::ops::LtOp::new(ctx, wrapped_value, lhs).get_operation()
         }
-        BinOp::SubWithOverflow => stair_mir::ops::LtOp::new(ctx, lhs, rhs).get_operation(),
+        BinOp::SubWithOverflow => mir_dialect::ops::LtOp::new(ctx, lhs, rhs).get_operation(),
         _ => unreachable!(),
     };
     overflow.insert_at_back(insert_block, ctx);
@@ -4193,8 +4193,8 @@ fn lower_signed_overflow_binary(
     }
 
     let wrapped = match op {
-        BinOp::AddWithOverflow => stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation(),
-        BinOp::SubWithOverflow => stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation(),
+        BinOp::AddWithOverflow => mir_dialect::ops::AddOp::new(ctx, lhs, rhs).get_operation(),
+        BinOp::SubWithOverflow => mir_dialect::ops::SubOp::new(ctx, lhs, rhs).get_operation(),
         other => return Err(format!("unsupported MIR overflow binary op: {other:?}")),
     };
     wrapped.insert_at_back(insert_block, ctx);
@@ -4209,20 +4209,20 @@ fn lower_signed_overflow_binary(
         BinOp::SubWithOverflow => ((lhs, rhs), (lhs, wrapped_value)),
         _ => unreachable!(),
     };
-    let a = stair_mir::ops::BitXorOp::new(ctx, xor_a.0, xor_a.1).get_operation();
+    let a = mir_dialect::ops::BitXorOp::new(ctx, xor_a.0, xor_a.1).get_operation();
     a.insert_at_back(insert_block, ctx);
     let a = a.deref(ctx).get_result(0);
-    let b = stair_mir::ops::BitXorOp::new(ctx, xor_b.0, xor_b.1).get_operation();
+    let b = mir_dialect::ops::BitXorOp::new(ctx, xor_b.0, xor_b.1).get_operation();
     b.insert_at_back(insert_block, ctx);
     let b = b.deref(ctx).get_result(0);
-    let sign = stair_mir::ops::BitAndOp::new(ctx, a, b).get_operation();
+    let sign = mir_dialect::ops::BitAndOp::new(ctx, a, b).get_operation();
     sign.insert_at_back(insert_block, ctx);
     let sign = sign.deref(ctx).get_result(0);
 
     let zero = integer_constant(ctx, ty, 0)?;
     zero.get_operation().insert_at_back(insert_block, ctx);
     // A signed lt: `ty` is a Signed integer type, so dialect-mir picks slt.
-    let overflow = stair_mir::ops::LtOp::new(ctx, sign, zero.get_result(ctx)).get_operation();
+    let overflow = mir_dialect::ops::LtOp::new(ctx, sign, zero.get_result(ctx)).get_operation();
     overflow.insert_at_back(insert_block, ctx);
     let overflow_value = overflow.deref(ctx).get_result(0);
     Ok(pack_overflow_result(
@@ -4259,12 +4259,12 @@ fn lower_signed_mul_overflow(
     let wide_ty: TypeHandle = IntegerType::get(ctx, width * 2, Signedness::Signed).into();
     let wide_lhs = cast_value_to_type(ctx, insert_block, lhs, wide_ty);
     let wide_rhs = cast_value_to_type(ctx, insert_block, rhs, wide_ty);
-    let wide_mul = stair_mir::ops::MulOp::new(ctx, wide_lhs, wide_rhs);
+    let wide_mul = mir_dialect::ops::MulOp::new(ctx, wide_lhs, wide_rhs);
     wide_mul.get_operation().insert_at_back(insert_block, ctx);
     let wide_value = wide_mul.get_operation().deref(ctx).get_result(0);
     let wrapped_value = cast_value_to_type(ctx, insert_block, wide_value, ty);
     let widened_back = cast_value_to_type(ctx, insert_block, wrapped_value, wide_ty);
-    let overflow = stair_mir::ops::NeOp::new(ctx, wide_value, widened_back);
+    let overflow = mir_dialect::ops::NeOp::new(ctx, wide_value, widened_back);
     overflow.get_operation().insert_at_back(insert_block, ctx);
     let overflow_value = overflow.get_result(ctx);
     Ok(pack_overflow_result(
@@ -4292,7 +4292,7 @@ fn lower_signed_mul_overflow_128(
     let rhs_bits = cast_value_to_type(ctx, insert_block, rhs, u128_ty);
 
     let wrapped = emit_op(
-        stair_mir::ops::MulOp::new(ctx, lhs, rhs).get_operation(),
+        mir_dialect::ops::MulOp::new(ctx, lhs, rhs).get_operation(),
         ctx,
         insert_block,
     );
@@ -4302,22 +4302,22 @@ fn lower_signed_mul_overflow_128(
     let lhs_mask = emit_sign_mask128(ctx, insert_block, lhs_bits)?;
     let rhs_mask = emit_sign_mask128(ctx, insert_block, rhs_bits)?;
     let lhs_fix = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, lhs_mask, rhs_bits).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, lhs_mask, rhs_bits).get_operation(),
         ctx,
         insert_block,
     );
     let rhs_fix = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, rhs_mask, lhs_bits).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, rhs_mask, lhs_bits).get_operation(),
         ctx,
         insert_block,
     );
     let signed_high = emit_op(
-        stair_mir::ops::SubOp::new(ctx, unsigned_high, lhs_fix).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, unsigned_high, lhs_fix).get_operation(),
         ctx,
         insert_block,
     );
     let signed_high = emit_op(
-        stair_mir::ops::SubOp::new(ctx, signed_high, rhs_fix).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, signed_high, rhs_fix).get_operation(),
         ctx,
         insert_block,
     );
@@ -4326,7 +4326,7 @@ fn lower_signed_mul_overflow_128(
     let wrapped_bits = cast_value_to_type(ctx, insert_block, wrapped, u128_ty);
     let expected_high = emit_sign_mask128(ctx, insert_block, wrapped_bits)?;
     let overflow = emit_op(
-        stair_mir::ops::NeOp::new(ctx, signed_high, expected_high).get_operation(),
+        mir_dialect::ops::NeOp::new(ctx, signed_high, expected_high).get_operation(),
         ctx,
         insert_block,
     );
@@ -4347,12 +4347,12 @@ fn pack_overflow_result(
     let result_ty =
         llvm::types::StructType::get_unnamed(ctx, vec![wrapped_value.get_type(ctx), overflow_ty])
             .into();
-    let undef = stair_mir::ops::UndefOp::new(ctx, result_ty);
+    let undef = mir_dialect::ops::UndefOp::new(ctx, result_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
     let with_value =
-        stair_mir::ops::InsertValueOp::new(ctx, wrapped_value, undef.get_result(ctx), vec![0]);
+        mir_dialect::ops::InsertValueOp::new(ctx, wrapped_value, undef.get_result(ctx), vec![0]);
     with_value.get_operation().insert_at_back(insert_block, ctx);
-    let with_overflow = stair_mir::ops::InsertValueOp::new(
+    let with_overflow = mir_dialect::ops::InsertValueOp::new(
         ctx,
         overflow_value,
         with_value.get_result(ctx),
@@ -4393,43 +4393,43 @@ fn emit_umulh128(
     let sixty_four = constant(ctx, 64)?;
 
     let a_lo = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, lhs, mask).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, lhs, mask).get_operation(),
         ctx,
         insert_block,
     );
     let a_hi = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, lhs, sixty_four).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, lhs, sixty_four).get_operation(),
         ctx,
         insert_block,
     );
     let b_lo = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, rhs, mask).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, rhs, mask).get_operation(),
         ctx,
         insert_block,
     );
     let b_hi = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, rhs, sixty_four).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, rhs, sixty_four).get_operation(),
         ctx,
         insert_block,
     );
 
     let lo_lo = emit_op(
-        stair_mir::ops::MulOp::new(ctx, a_lo, b_lo).get_operation(),
+        mir_dialect::ops::MulOp::new(ctx, a_lo, b_lo).get_operation(),
         ctx,
         insert_block,
     );
     let cross_a = emit_op(
-        stair_mir::ops::MulOp::new(ctx, a_hi, b_lo).get_operation(),
+        mir_dialect::ops::MulOp::new(ctx, a_hi, b_lo).get_operation(),
         ctx,
         insert_block,
     );
     let cross_b = emit_op(
-        stair_mir::ops::MulOp::new(ctx, a_lo, b_hi).get_operation(),
+        mir_dialect::ops::MulOp::new(ctx, a_lo, b_hi).get_operation(),
         ctx,
         insert_block,
     );
     let hi_hi = emit_op(
-        stair_mir::ops::MulOp::new(ctx, a_hi, b_hi).get_operation(),
+        mir_dialect::ops::MulOp::new(ctx, a_hi, b_hi).get_operation(),
         ctx,
         insert_block,
     );
@@ -4438,32 +4438,32 @@ fn emit_umulh128(
     // carry out of bit 127 of the full product (sum of three values < 2^64,
     // exact in u128).
     let cross_a_lo = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, cross_a, mask).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, cross_a, mask).get_operation(),
         ctx,
         insert_block,
     );
     let cross_b_lo = emit_op(
-        stair_mir::ops::BitAndOp::new(ctx, cross_b, mask).get_operation(),
+        mir_dialect::ops::BitAndOp::new(ctx, cross_b, mask).get_operation(),
         ctx,
         insert_block,
     );
     let lo_lo_hi = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, lo_lo, sixty_four).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, lo_lo, sixty_four).get_operation(),
         ctx,
         insert_block,
     );
     let mid_sum = emit_op(
-        stair_mir::ops::AddOp::new(ctx, cross_a_lo, cross_b_lo).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, cross_a_lo, cross_b_lo).get_operation(),
         ctx,
         insert_block,
     );
     let mid_sum = emit_op(
-        stair_mir::ops::AddOp::new(ctx, mid_sum, lo_lo_hi).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, mid_sum, lo_lo_hi).get_operation(),
         ctx,
         insert_block,
     );
     let carry = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, mid_sum, sixty_four).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, mid_sum, sixty_four).get_operation(),
         ctx,
         insert_block,
     );
@@ -4471,27 +4471,27 @@ fn emit_umulh128(
     // high = hi_hi + (cross_a >> 64) + (cross_b >> 64) + carry; the true
     // high half is < 2^128, and no intermediate sum wraps.
     let cross_a_hi = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, cross_a, sixty_four).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, cross_a, sixty_four).get_operation(),
         ctx,
         insert_block,
     );
     let cross_b_hi = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, cross_b, sixty_four).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, cross_b, sixty_four).get_operation(),
         ctx,
         insert_block,
     );
     let high = emit_op(
-        stair_mir::ops::AddOp::new(ctx, hi_hi, cross_a_hi).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, hi_hi, cross_a_hi).get_operation(),
         ctx,
         insert_block,
     );
     let high = emit_op(
-        stair_mir::ops::AddOp::new(ctx, high, cross_b_hi).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, high, cross_b_hi).get_operation(),
         ctx,
         insert_block,
     );
     let high = emit_op(
-        stair_mir::ops::AddOp::new(ctx, high, carry).get_operation(),
+        mir_dialect::ops::AddOp::new(ctx, high, carry).get_operation(),
         ctx,
         insert_block,
     );
@@ -4509,14 +4509,14 @@ fn emit_sign_mask128(
     let shift = integer_constant(ctx, u128_ty, 127)?;
     shift.get_operation().insert_at_back(insert_block, ctx);
     let sign_bit = emit_op(
-        stair_mir::ops::ShrOp::new(ctx, value, shift.get_result(ctx)).get_operation(),
+        mir_dialect::ops::ShrOp::new(ctx, value, shift.get_result(ctx)).get_operation(),
         ctx,
         insert_block,
     );
     let zero = integer_constant(ctx, u128_ty, 0)?;
     zero.get_operation().insert_at_back(insert_block, ctx);
     Ok(emit_op(
-        stair_mir::ops::SubOp::new(ctx, zero.get_result(ctx), sign_bit).get_operation(),
+        mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), sign_bit).get_operation(),
         ctx,
         insert_block,
     ))
@@ -4538,7 +4538,7 @@ fn lower_unsigned_mul_overflow(
         // No wider type exists: the product wraps in-register and overflow
         // is exactly "the true high 128 bits are non-zero".
         let wrapped = emit_op(
-            stair_mir::ops::MulOp::new(ctx, lhs, rhs).get_operation(),
+            mir_dialect::ops::MulOp::new(ctx, lhs, rhs).get_operation(),
             ctx,
             insert_block,
         );
@@ -4547,7 +4547,7 @@ fn lower_unsigned_mul_overflow(
         let zero = integer_constant(ctx, u128_ty, 0)?;
         zero.get_operation().insert_at_back(insert_block, ctx);
         let overflow = emit_op(
-            stair_mir::ops::NeOp::new(ctx, high, zero.get_result(ctx)).get_operation(),
+            mir_dialect::ops::NeOp::new(ctx, high, zero.get_result(ctx)).get_operation(),
             ctx,
             insert_block,
         );
@@ -4562,14 +4562,14 @@ fn lower_unsigned_mul_overflow(
     let wide_ty: TypeHandle = IntegerType::get(ctx, width * 2, Signedness::Unsigned).into();
     let wide_lhs = cast_value_to_type(ctx, insert_block, lhs, wide_ty);
     let wide_rhs = cast_value_to_type(ctx, insert_block, rhs, wide_ty);
-    let wide_mul = stair_mir::ops::MulOp::new(ctx, wide_lhs, wide_rhs);
+    let wide_mul = mir_dialect::ops::MulOp::new(ctx, wide_lhs, wide_rhs);
     wide_mul.get_operation().insert_at_back(insert_block, ctx);
     let wide_value = wide_mul.get_operation().deref(ctx).get_result(0);
     let wrapped_value = cast_value_to_type(ctx, insert_block, wide_value, ty);
 
     let narrow_max = integer_constant(ctx, wide_ty, u128::MAX >> (128 - width as usize))?;
     narrow_max.get_operation().insert_at_back(insert_block, ctx);
-    let overflow = stair_mir::ops::GtOp::new(ctx, wide_value, narrow_max.get_result(ctx));
+    let overflow = mir_dialect::ops::GtOp::new(ctx, wide_value, narrow_max.get_result(ctx));
     overflow.get_operation().insert_at_back(insert_block, ctx);
     let overflow_value = overflow.get_operation().deref(ctx).get_result(0);
     Ok(pack_overflow_result(
@@ -4593,24 +4593,24 @@ fn lower_three_way_cmp<'tcx>(
     rhs: Value,
 ) -> Result<Value, String> {
     // dialect-mir compares resolve signedness from the operand types.
-    let gt = stair_mir::ops::GtOp::new(ctx, lhs, rhs);
+    let gt = mir_dialect::ops::GtOp::new(ctx, lhs, rhs);
     gt.get_operation().insert_at_back(insert_block, ctx);
-    let lt = stair_mir::ops::LtOp::new(ctx, lhs, rhs);
+    let lt = mir_dialect::ops::LtOp::new(ctx, lhs, rhs);
     lt.get_operation().insert_at_back(insert_block, ctx);
     let byte_ty = bool_storage_ty(ctx);
     let gt = cast_value_to_type(ctx, insert_block, gt.get_result(ctx), byte_ty);
     let lt = cast_value_to_type(ctx, insert_block, lt.get_result(ctx), byte_ty);
-    let tag = stair_mir::ops::SubOp::new(ctx, gt, lt).get_operation();
+    let tag = mir_dialect::ops::SubOp::new(ctx, gt, lt).get_operation();
     tag.insert_at_back(insert_block, ctx);
     let tag = tag.deref(ctx).get_result(0);
 
     let blob_ty = convert_ty(tcx, ctx, ordering_ty)?;
-    let slot = stair_mir::ops::AllocaOp::new(ctx, blob_ty);
+    let slot = mir_dialect::ops::AllocaOp::new(ctx, blob_ty);
     slot.get_operation().insert_at_back(insert_block, ctx);
     let slot = slot.get_result(ctx);
-    let store = stair_mir::ops::StoreOp::new(ctx, tag, slot);
+    let store = mir_dialect::ops::StoreOp::new(ctx, tag, slot);
     store.get_operation().insert_at_back(insert_block, ctx);
-    let load = stair_mir::ops::LoadOp::new(ctx, slot, blob_ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, slot, blob_ty);
     load.get_operation().insert_at_back(insert_block, ctx);
     Ok(load.get_result(ctx))
 }
@@ -4644,7 +4644,7 @@ fn cast_value_to_type(
     if value.get_type(ctx) == target_ty {
         return value;
     }
-    let cast = stair_mir::ops::CastOp::new(ctx, value, target_ty);
+    let cast = mir_dialect::ops::CastOp::new(ctx, value, target_ty);
     cast.get_operation().insert_at_back(insert_block, ctx);
     cast.get_result(ctx)
 }
@@ -4767,14 +4767,14 @@ fn lower_arguments_from_str_call<'tcx>(
     let ptr_ty = llvm_ptr_ty(ctx);
     let fmt_ty = fmt_arguments_ty(ctx);
 
-    let template = stair_mir::ops::ExtractValueOp::new(ctx, str_value, vec![0], ptr_ty);
+    let template = mir_dialect::ops::ExtractValueOp::new(ctx, str_value, vec![0], ptr_ty);
     template.get_operation().insert_at_back(insert_block, ctx);
 
     let usize_ty: TypeHandle = usize_ty(ctx).into();
-    let len = stair_mir::ops::ExtractValueOp::new(ctx, str_value, vec![1], usize_ty);
+    let len = mir_dialect::ops::ExtractValueOp::new(ctx, str_value, vec![1], usize_ty);
     len.get_operation().insert_at_back(insert_block, ctx);
 
-    let one = stair_mir::ops::ConstantOp::new_integer(
+    let one = mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(
             TypedHandle::from_handle(usize_ty, ctx).unwrap(),
@@ -4783,17 +4783,17 @@ fn lower_arguments_from_str_call<'tcx>(
     );
     one.get_operation().insert_at_back(insert_block, ctx);
 
-    let shifted = stair_mir::ops::ShlOp::new(ctx, len.get_result(ctx), one.get_result(ctx));
+    let shifted = mir_dialect::ops::ShlOp::new(ctx, len.get_result(ctx), one.get_result(ctx));
     shifted.get_operation().insert_at_back(insert_block, ctx);
-    let encoded = stair_mir::ops::BitOrOp::new(ctx, shifted.get_result(ctx), one.get_result(ctx));
+    let encoded = mir_dialect::ops::BitOrOp::new(ctx, shifted.get_result(ctx), one.get_result(ctx));
     encoded.get_operation().insert_at_back(insert_block, ctx);
 
-    let args_ptr = stair_mir::ops::CastOp::new(ctx, encoded.get_result(ctx), ptr_ty);
+    let args_ptr = mir_dialect::ops::CastOp::new(ctx, encoded.get_result(ctx), ptr_ty);
     args_ptr.get_operation().insert_at_back(insert_block, ctx);
 
-    let undef = stair_mir::ops::UndefOp::new(ctx, fmt_ty);
+    let undef = mir_dialect::ops::UndefOp::new(ctx, fmt_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
-    let with_template = stair_mir::ops::InsertValueOp::new(
+    let with_template = mir_dialect::ops::InsertValueOp::new(
         ctx,
         template.get_result(ctx),
         undef.get_result(ctx),
@@ -4802,7 +4802,7 @@ fn lower_arguments_from_str_call<'tcx>(
     with_template
         .get_operation()
         .insert_at_back(insert_block, ctx);
-    let args = stair_mir::ops::InsertValueOp::new(
+    let args = mir_dialect::ops::InsertValueOp::new(
         ctx,
         args_ptr.get_result(ctx),
         with_template.get_result(ctx),
@@ -4871,7 +4871,7 @@ fn import_rvalue<'tcx>(
             let symbol = legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
             declare_thread_local_global(tcx, ctx, state.module_body, symbol.clone(), *def_id)?;
             let ty = convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, rvalue.ty(body, tcx)))?;
-            let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
+            let op = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ty);
             op.get_operation().insert_at_back(insert_block, ctx);
             Ok(op.get_result(ctx))
         }
@@ -4882,7 +4882,7 @@ fn import_rvalue<'tcx>(
                 let lhs_ty = mono_ty(tcx, state, operands.0.ty(body, tcx));
                 let elem_size = layout_size_of_ty(tcx, pointee_ty(lhs_ty)?)?;
                 let byte_offset = scale_index(ctx, insert_block, rhs, elem_size)?;
-                let offset = stair_mir::ops::PtrOffsetOp::new(ctx, lhs, byte_offset);
+                let offset = mir_dialect::ops::PtrOffsetOp::new(ctx, lhs, byte_offset);
                 offset.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(offset.get_result(ctx));
             }
@@ -4901,31 +4901,31 @@ fn import_rvalue<'tcx>(
             }
             let op = match op {
                 BinOp::Add | BinOp::AddUnchecked => {
-                    stair_mir::ops::AddOp::new(ctx, lhs, rhs).get_operation()
+                    mir_dialect::ops::AddOp::new(ctx, lhs, rhs).get_operation()
                 }
                 BinOp::Sub | BinOp::SubUnchecked => {
-                    stair_mir::ops::SubOp::new(ctx, lhs, rhs).get_operation()
+                    mir_dialect::ops::SubOp::new(ctx, lhs, rhs).get_operation()
                 }
                 BinOp::Mul | BinOp::MulUnchecked => {
-                    stair_mir::ops::MulOp::new(ctx, lhs, rhs).get_operation()
+                    mir_dialect::ops::MulOp::new(ctx, lhs, rhs).get_operation()
                 }
                 BinOp::Shr | BinOp::ShrUnchecked => {
-                    stair_mir::ops::SignAwareShrOp::new(ctx, lhs, rhs).get_operation()
+                    mir_dialect::ops::SignAwareShrOp::new(ctx, lhs, rhs).get_operation()
                 }
                 BinOp::Shl | BinOp::ShlUnchecked => {
-                    stair_mir::ops::ShlOp::new(ctx, lhs, rhs).get_operation()
+                    mir_dialect::ops::ShlOp::new(ctx, lhs, rhs).get_operation()
                 }
-                BinOp::Div => stair_mir::ops::DivOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Rem => stair_mir::ops::RemOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::BitAnd => stair_mir::ops::BitAndOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::BitOr => stair_mir::ops::BitOrOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::BitXor => stair_mir::ops::BitXorOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Eq => stair_mir::ops::EqOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Ne => stair_mir::ops::NeOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Lt => stair_mir::ops::LtOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Le => stair_mir::ops::LeOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Gt => stair_mir::ops::GtOp::new(ctx, lhs, rhs).get_operation(),
-                BinOp::Ge => stair_mir::ops::GeOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Div => mir_dialect::ops::DivOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Rem => mir_dialect::ops::RemOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::BitAnd => mir_dialect::ops::BitAndOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::BitOr => mir_dialect::ops::BitOrOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::BitXor => mir_dialect::ops::BitXorOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Eq => mir_dialect::ops::EqOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Ne => mir_dialect::ops::NeOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Lt => mir_dialect::ops::LtOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Le => mir_dialect::ops::LeOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Gt => mir_dialect::ops::GtOp::new(ctx, lhs, rhs).get_operation(),
+                BinOp::Ge => mir_dialect::ops::GeOp::new(ctx, lhs, rhs).get_operation(),
                 other => return Err(format!("unsupported MIR binary op: {other:?}")),
             };
             op.insert_at_back(insert_block, ctx);
@@ -4965,13 +4965,13 @@ fn import_rvalue<'tcx>(
             }
             let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
             let result_type = convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, *ty))?;
-            let cast = stair_mir::ops::CastOp::new(ctx, input, result_type);
+            let cast = mir_dialect::ops::CastOp::new(ctx, input, result_type);
             cast.get_operation().insert_at_back(insert_block, ctx);
             Ok(cast.get_result(ctx))
         }
         Rvalue::UnaryOp(rustc_mir::UnOp::Neg, operand) => {
             let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
-            let neg = stair_mir::ops::NegOp::new(ctx, input);
+            let neg = mir_dialect::ops::NegOp::new(ctx, input);
             neg.get_operation().insert_at_back(insert_block, ctx);
             Ok(neg.get_result(ctx))
         }
@@ -4988,13 +4988,13 @@ fn import_rvalue<'tcx>(
                 false_value
                     .get_operation()
                     .insert_at_back(insert_block, ctx);
-                let eq = stair_mir::ops::EqOp::new(ctx, input, false_value.get_result(ctx));
+                let eq = mir_dialect::ops::EqOp::new(ctx, input, false_value.get_result(ctx));
                 eq.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(eq.get_result(ctx));
             }
             let ones = integer_constant(ctx, input_ty, u128::MAX >> (128 - width as usize))?;
             ones.get_operation().insert_at_back(insert_block, ctx);
-            let xor = stair_mir::ops::BitXorOp::new(ctx, input, ones.get_result(ctx));
+            let xor = mir_dialect::ops::BitXorOp::new(ctx, input, ones.get_result(ctx));
             xor.get_operation().insert_at_back(insert_block, ctx);
             Ok(xor.get_result(ctx))
         }
@@ -5018,7 +5018,7 @@ fn import_rvalue<'tcx>(
                 
                 struct_ty.field_type(1)
             };
-            let extract = stair_mir::ops::ExtractValueOp::new(ctx, value, vec![1], result_ty);
+            let extract = mir_dialect::ops::ExtractValueOp::new(ctx, value, vec![1], result_ty);
             extract.get_operation().insert_at_back(insert_block, ctx);
             Ok(extract.get_result(ctx))
         }
@@ -5063,20 +5063,20 @@ fn import_rvalue<'tcx>(
                     let data = if data.get_type(ctx) == ptr_ty {
                         data
                     } else {
-                        let cast = stair_mir::ops::CastOp::new(ctx, data, ptr_ty);
+                        let cast = mir_dialect::ops::CastOp::new(ctx, data, ptr_ty);
                         cast.get_operation().insert_at_back(insert_block, ctx);
                         cast.get_result(ctx)
                     };
-                    let undef = stair_mir::ops::UndefOp::new(ctx, aggregate_ty);
+                    let undef = mir_dialect::ops::UndefOp::new(ctx, aggregate_ty);
                     undef.get_operation().insert_at_back(insert_block, ctx);
-                    let with_data = stair_mir::ops::InsertValueOp::new(
+                    let with_data = mir_dialect::ops::InsertValueOp::new(
                         ctx,
                         data,
                         undef.get_result(ctx),
                         vec![0],
                     );
                     with_data.get_operation().insert_at_back(insert_block, ctx);
-                    let with_metadata = stair_mir::ops::InsertValueOp::new(
+                    let with_metadata = mir_dialect::ops::InsertValueOp::new(
                         ctx,
                         metadata,
                         with_data.get_result(ctx),
@@ -5090,7 +5090,7 @@ fn import_rvalue<'tcx>(
                 let _ = mutability;
                 return Ok(data);
             }
-            let undef = stair_mir::ops::UndefOp::new(ctx, aggregate_ty);
+            let undef = mir_dialect::ops::UndefOp::new(ctx, aggregate_ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
             let mut current = undef.get_result(ctx);
 
@@ -5144,12 +5144,12 @@ fn import_rvalue<'tcx>(
                         return Err(format!("unsupported fmt ArgumentType variant: {other}"));
                     }
                 };
-                let undef = stair_mir::ops::UndefOp::new(ctx, aggregate_ty);
+                let undef = mir_dialect::ops::UndefOp::new(ctx, aggregate_ty);
                 undef.get_operation().insert_at_back(insert_block, ctx);
                 let with_value =
-                    stair_mir::ops::InsertValueOp::new(ctx, value, undef.get_result(ctx), vec![0]);
+                    mir_dialect::ops::InsertValueOp::new(ctx, value, undef.get_result(ctx), vec![0]);
                 with_value.get_operation().insert_at_back(insert_block, ctx);
-                let with_formatter = stair_mir::ops::InsertValueOp::new(
+                let with_formatter = mir_dialect::ops::InsertValueOp::new(
                     ctx,
                     formatter,
                     with_value.get_result(ctx),
@@ -5175,7 +5175,7 @@ fn import_rvalue<'tcx>(
                 // layout, then load it back: an enum value simply *is* its real
                 // in-memory bytes. This keeps it interoperable with prebuilt std
                 // code that reads and writes enums by reference.
-                let slot = stair_mir::ops::AllocaOp::new(ctx, blob_ty);
+                let slot = mir_dialect::ops::AllocaOp::new(ctx, blob_ty);
                 slot.get_operation().insert_at_back(insert_block, ctx);
                 let slot = slot.get_result(ctx);
                 write_enum_tag(tcx, ctx, insert_block, enum_ty, variant_idx, slot)?;
@@ -5202,11 +5202,11 @@ fn import_rvalue<'tcx>(
                         normalize_bool_for_storage(tcx, ctx, state, insert_block, field_ty, value)?;
                     let conv_field_ty = convert_ty(tcx, ctx, field_ty)?;
                     let value = cast_value_to_type(ctx, insert_block, value, conv_field_ty);
-                    let store = stair_mir::ops::StoreOp::new(ctx, value, field_addr);
+                    let store = mir_dialect::ops::StoreOp::new(ctx, value, field_addr);
                     store.get_operation().insert_at_back(insert_block, ctx);
                 }
 
-                let load = stair_mir::ops::LoadOp::new(ctx, slot, blob_ty);
+                let load = mir_dialect::ops::LoadOp::new(ctx, slot, blob_ty);
                 load.get_operation().insert_at_back(insert_block, ctx);
                 return Ok(load.get_result(ctx));
             }
@@ -5233,7 +5233,7 @@ fn import_rvalue<'tcx>(
                 let value = import_operand(tcx, ctx, state, insert_block, body, operand)?;
                 let field_ty = aggregate_field_type(ctx, current.get_type(ctx), index as usize)?;
                 let value = cast_value_to_type(ctx, insert_block, value, field_ty);
-                let insert = stair_mir::ops::InsertValueOp::new(ctx, value, current, vec![index]);
+                let insert = mir_dialect::ops::InsertValueOp::new(ctx, value, current, vec![index]);
                 insert.get_operation().insert_at_back(insert_block, ctx);
                 current = insert.get_result(ctx);
             }
@@ -5246,13 +5246,13 @@ fn import_rvalue<'tcx>(
             let elem_ty = convert_ty(tcx, ctx, elem_ty)?;
             let len = array_len(tcx, mono_ty_const(tcx, state, *len))?;
             let aggregate_ty = llvm::types::ArrayType::get(ctx, elem_ty, len).into();
-            let undef = stair_mir::ops::UndefOp::new(ctx, aggregate_ty);
+            let undef = mir_dialect::ops::UndefOp::new(ctx, aggregate_ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
             let mut current = undef.get_result(ctx);
             let value = cast_value_to_type(ctx, insert_block, value, elem_ty);
             for idx in 0..len {
                 let insert =
-                    stair_mir::ops::InsertValueOp::new(ctx, value, current, vec![idx as u32]);
+                    mir_dialect::ops::InsertValueOp::new(ctx, value, current, vec![idx as u32]);
                 insert.get_operation().insert_at_back(insert_block, ctx);
                 current = insert.get_result(ctx);
             }
@@ -5293,7 +5293,7 @@ fn reify_fn_pointer<'tcx>(
     };
 
     let ptr_ty = llvm_ptr_ty(ctx);
-    let op = stair_mir::ops::AddressOfOp::new(ctx, target_symbol, ptr_ty);
+    let op = mir_dialect::ops::AddressOfOp::new(ctx, target_symbol, ptr_ty);
     op.get_operation().insert_at_back(insert_block, ctx);
     Ok(op.get_result(ctx))
 }
@@ -5308,7 +5308,7 @@ fn emit_fn_ptr_thunk<'tcx>(
     instance: Instance<'tcx>,
 ) -> Result<crate::identifier::Identifier, String> {
     let mut legaliser = Legaliser::default();
-    let thunk_symbol = legaliser.legalise(&format!("{symbol}__stair_fnptr_thunk"));
+    let thunk_symbol = legaliser.legalise(&format!("{symbol}__crabbit_fnptr_thunk"));
     if symbol_exists(ctx, module_body, thunk_symbol.as_ref()) {
         return Ok(thunk_symbol);
     }
@@ -5338,14 +5338,14 @@ fn emit_fn_ptr_thunk<'tcx>(
     declare_external_function(ctx, module_body, symbol.clone(), inputs.clone(), result_ty);
 
     let fn_ty = FunctionType::get(ctx, inputs, results);
-    let func = stair_mir::ops::FuncOp::new(ctx, thunk_symbol.clone(), fn_ty);
+    let func = mir_dialect::ops::FuncOp::new(ctx, thunk_symbol.clone(), fn_ty);
     func.get_operation().insert_at_back(module_body, ctx);
     let entry = func.get_entry_block(ctx);
     let args: Vec<Value> = entry.deref(ctx).arguments().collect();
-    let call = stair_mir::ops::CallOp::new_direct(ctx, symbol, args, result_ty);
+    let call = mir_dialect::ops::CallOp::new_direct(ctx, symbol, args, result_ty);
     call.get_operation().insert_at_back(entry, ctx);
     let ret_val = result_ty.map(|_| call.get_operation().deref(ctx).get_result(0));
-    let ret = stair_mir::ops::ReturnOp::new(ctx, ret_val);
+    let ret = mir_dialect::ops::ReturnOp::new(ctx, ret_val);
     ret.get_operation().insert_at_back(entry, ctx);
     set_internal_linkage(ctx, module_body, &thunk_symbol);
     Ok(thunk_symbol)
@@ -5384,7 +5384,7 @@ fn import_transmute<'tcx>(
                 || ty_ref.is::<FP64Type>()
         };
         if is_scalar(ctx, value.get_type(ctx)) && is_scalar(ctx, result_ty) {
-            let cast = stair_mir::ops::CastOp::new(ctx, value, result_ty);
+            let cast = mir_dialect::ops::CastOp::new(ctx, value, result_ty);
             cast.get_operation().insert_at_back(insert_block, ctx);
             return Ok(cast.get_result(ctx));
         }
@@ -5399,10 +5399,10 @@ fn import_transmute<'tcx>(
     let word_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
     let words = src_size.max(dst_size).div_ceil(8).max(1);
     let blob_ty: TypeHandle = llvm::types::ArrayType::get(ctx, word_ty, words).into();
-    let slot = stair_mir::ops::AllocaOp::new(ctx, blob_ty);
+    let slot = mir_dialect::ops::AllocaOp::new(ctx, blob_ty);
     slot.get_operation().insert_at_back(insert_block, ctx);
     let slot = slot.get_result(ctx);
-    let store = stair_mir::ops::StoreOp::new(ctx, value, slot);
+    let store = mir_dialect::ops::StoreOp::new(ctx, value, slot);
     store.get_operation().insert_at_back(insert_block, ctx);
     load_value_from_real_layout(tcx, ctx, insert_block, dst_ty, slot)
 }
@@ -5472,7 +5472,7 @@ fn lower_pointer_unsize_cast<'tcx>(
                 LinkageAttr::InternalLinkage,
                 false,
             )?;
-            let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            let op = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             op.get_operation().insert_at_back(insert_block, ctx);
             op.get_result(ctx)
         }
@@ -5486,12 +5486,12 @@ fn lower_pointer_unsize_cast<'tcx>(
                 return Ok(Some(input));
             }
             let input_ty = input.get_type(ctx);
-            let spill = stair_mir::ops::AllocaOp::new(ctx, input_ty);
+            let spill = mir_dialect::ops::AllocaOp::new(ctx, input_ty);
             spill.get_operation().insert_at_back(insert_block, ctx);
             let spill = spill.get_result(ctx);
-            let store = stair_mir::ops::StoreOp::new(ctx, input, spill);
+            let store = mir_dialect::ops::StoreOp::new(ctx, input, spill);
             store.get_operation().insert_at_back(insert_block, ctx);
-            let load = stair_mir::ops::LoadOp::new(ctx, spill, result_ty);
+            let load = mir_dialect::ops::LoadOp::new(ctx, spill, result_ty);
             load.get_operation().insert_at_back(insert_block, ctx);
             return Ok(Some(load.get_result(ctx)));
         }
@@ -5505,25 +5505,25 @@ fn lower_pointer_unsize_cast<'tcx>(
         // assemble the fat value through memory at real byte offsets rather
         // than by insertvalue paths.
         let input_ty = input.get_type(ctx);
-        let spill = stair_mir::ops::AllocaOp::new(ctx, input_ty);
+        let spill = mir_dialect::ops::AllocaOp::new(ctx, input_ty);
         spill.get_operation().insert_at_back(insert_block, ctx);
         let spill = spill.get_result(ctx);
-        let store = stair_mir::ops::StoreOp::new(ctx, input, spill);
+        let store = mir_dialect::ops::StoreOp::new(ctx, input, spill);
         store.get_operation().insert_at_back(insert_block, ctx);
-        let load_ptr = stair_mir::ops::LoadOp::new(ctx, spill, ptr_ty);
+        let load_ptr = mir_dialect::ops::LoadOp::new(ctx, spill, ptr_ty);
         load_ptr.get_operation().insert_at_back(insert_block, ctx);
         let data_ptr = load_ptr.get_result(ctx);
 
         let result_ty = convert_ty(tcx, ctx, target_ty)?;
-        let out = stair_mir::ops::AllocaOp::new(ctx, result_ty);
+        let out = mir_dialect::ops::AllocaOp::new(ctx, result_ty);
         out.get_operation().insert_at_back(insert_block, ctx);
         let out = out.get_result(ctx);
-        let store_ptr = stair_mir::ops::StoreOp::new(ctx, data_ptr, out);
+        let store_ptr = mir_dialect::ops::StoreOp::new(ctx, data_ptr, out);
         store_ptr.get_operation().insert_at_back(insert_block, ctx);
         let meta_addr = ptr_offset_const(ctx, insert_block, out, 8)?;
-        let store_meta = stair_mir::ops::StoreOp::new(ctx, metadata_value, meta_addr);
+        let store_meta = mir_dialect::ops::StoreOp::new(ctx, metadata_value, meta_addr);
         store_meta.get_operation().insert_at_back(insert_block, ctx);
-        let load = stair_mir::ops::LoadOp::new(ctx, out, result_ty);
+        let load = mir_dialect::ops::LoadOp::new(ctx, out, result_ty);
         load.get_operation().insert_at_back(insert_block, ctx);
         return Ok(Some(load.get_result(ctx)));
     }
@@ -5531,18 +5531,18 @@ fn lower_pointer_unsize_cast<'tcx>(
     let data_ptr = if input.get_type(ctx) == ptr_ty {
         input
     } else {
-        let cast = stair_mir::ops::CastOp::new(ctx, input, ptr_ty);
+        let cast = mir_dialect::ops::CastOp::new(ctx, input, ptr_ty);
         cast.get_operation().insert_at_back(insert_block, ctx);
         cast.get_result(ctx)
     };
 
     let result_ty = convert_ty(tcx, ctx, target_ty)?;
-    let undef = stair_mir::ops::UndefOp::new(ctx, result_ty);
+    let undef = mir_dialect::ops::UndefOp::new(ctx, result_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
     let with_ptr =
-        stair_mir::ops::InsertValueOp::new(ctx, data_ptr, undef.get_result(ctx), vec![0]);
+        mir_dialect::ops::InsertValueOp::new(ctx, data_ptr, undef.get_result(ctx), vec![0]);
     with_ptr.get_operation().insert_at_back(insert_block, ctx);
-    let with_meta = stair_mir::ops::InsertValueOp::new(
+    let with_meta = mir_dialect::ops::InsertValueOp::new(
         ctx,
         metadata_value,
         with_ptr.get_result(ctx),
@@ -5739,7 +5739,7 @@ fn import_constant<'tcx>(
     {
         let ty = convert_ty(tcx, ctx, const_.ty())?;
         let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
-        let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
+        let op = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ty);
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
     }
@@ -5749,12 +5749,12 @@ fn import_constant<'tcx>(
         let mut legaliser = Legaliser::default();
         let symbol = legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, def_id)).name);
         declare_static_global(tcx, ctx, state.module_body, symbol.clone(), def_id)?;
-        let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
+        let op = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ty);
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
     }
     if layout_size_of_ty(tcx, const_.ty())? == 0 {
-        let op = stair_mir::ops::UndefOp::new(ctx, ty);
+        let op = mir_dialect::ops::UndefOp::new(ctx, ty);
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
     }
@@ -5770,7 +5770,7 @@ fn import_constant<'tcx>(
         return Ok(value);
     }
     if contains_maybe_uninit_ty(tcx, const_.ty()) {
-        let op = stair_mir::ops::UndefOp::new(ctx, ty);
+        let op = mir_dialect::ops::UndefOp::new(ctx, ty);
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
     }
@@ -5841,7 +5841,7 @@ fn import_constant<'tcx>(
             if let Some(value) = scalar_constant_in_aggregate(ctx, insert_block, ty, bits)? {
                 return Ok(value);
             }
-            let op = stair_mir::ops::UndefOp::new(ctx, ty);
+            let op = mir_dialect::ops::UndefOp::new(ctx, ty);
             op.get_operation().insert_at_back(insert_block, ctx);
             Ok(op.get_result(ctx))
         }
@@ -5882,9 +5882,9 @@ fn import_memory_constant<'tcx>(
         .to_vec();
     let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
     let ptr_ty = llvm_ptr_ty(ctx);
-    let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+    let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
     addr.get_operation().insert_at_back(insert_block, ctx);
-    let load = stair_mir::ops::LoadOp::new(ctx, addr.get_result(ctx), ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, addr.get_result(ctx), ty);
     load.get_operation().insert_at_back(insert_block, ctx);
     Ok(Some(load.get_result(ctx)))
 }
@@ -5948,7 +5948,7 @@ fn import_pointer_to_plain_data_constant<'tcx>(
                 )
                 .to_vec();
             let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
-            let op = stair_mir::ops::AddressOfOp::new(ctx, symbol, ty);
+            let op = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ty);
             op.get_operation().insert_at_back(insert_block, ctx);
             Ok(Some(op.get_result(ctx)))
         }
@@ -5964,21 +5964,21 @@ fn import_pointer_to_plain_data_constant<'tcx>(
             };
             let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
             let ptr_ty = llvm_ptr_ty(ctx);
-            let data = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            let data = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             data.get_operation().insert_at_back(insert_block, ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             let len = integer_constant(ctx, usize_ty, meta as u128)?;
             len.get_operation().insert_at_back(insert_block, ctx);
-            let undef = stair_mir::ops::UndefOp::new(ctx, ty);
+            let undef = mir_dialect::ops::UndefOp::new(ctx, ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
-            let with_ptr = stair_mir::ops::InsertValueOp::new(
+            let with_ptr = mir_dialect::ops::InsertValueOp::new(
                 ctx,
                 data.get_result(ctx),
                 undef.get_result(ctx),
                 vec![0],
             );
             with_ptr.get_operation().insert_at_back(insert_block, ctx);
-            let with_len = stair_mir::ops::InsertValueOp::new(
+            let with_len = mir_dialect::ops::InsertValueOp::new(
                 ctx,
                 len.get_result(ctx),
                 with_ptr.get_result(ctx),
@@ -6037,7 +6037,7 @@ fn import_pointer_constant<'tcx>(
             let symbol =
                 data_global_for_alloc(tcx, ctx, state.module_body, provenance.alloc_id())?;
             let ptr_ty = llvm_ptr_ty(ctx);
-            let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             addr.get_operation().insert_at_back(insert_block, ctx);
             let mut value = addr.get_result(ctx);
             if offset.bytes() != 0 {
@@ -6048,21 +6048,21 @@ fn import_pointer_constant<'tcx>(
         rustc_mir::ConstValue::Slice { alloc_id, meta } => {
             let symbol = data_global_for_alloc(tcx, ctx, state.module_body, alloc_id)?;
             let ptr_ty = llvm_ptr_ty(ctx);
-            let data = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            let data = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             data.get_operation().insert_at_back(insert_block, ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             let len = integer_constant(ctx, usize_ty, meta as u128)?;
             len.get_operation().insert_at_back(insert_block, ctx);
-            let undef = stair_mir::ops::UndefOp::new(ctx, ty);
+            let undef = mir_dialect::ops::UndefOp::new(ctx, ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
-            let with_ptr = stair_mir::ops::InsertValueOp::new(
+            let with_ptr = mir_dialect::ops::InsertValueOp::new(
                 ctx,
                 data.get_result(ctx),
                 undef.get_result(ctx),
                 vec![0],
             );
             with_ptr.get_operation().insert_at_back(insert_block, ctx);
-            let with_len = stair_mir::ops::InsertValueOp::new(
+            let with_len = mir_dialect::ops::InsertValueOp::new(
                 ctx,
                 len.get_result(ctx),
                 with_ptr.get_result(ctx),
@@ -6074,13 +6074,13 @@ fn import_pointer_constant<'tcx>(
         rustc_mir::ConstValue::Indirect { alloc_id, offset } => {
             let symbol = data_global_for_alloc(tcx, ctx, state.module_body, alloc_id)?;
             let ptr_ty = llvm_ptr_ty(ctx);
-            let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+            let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             addr.get_operation().insert_at_back(insert_block, ctx);
             let mut addr_value = addr.get_result(ctx);
             if offset.bytes() != 0 {
                 addr_value = ptr_offset_const(ctx, insert_block, addr_value, offset.bytes())?;
             }
-            let load = stair_mir::ops::LoadOp::new(ctx, addr_value, ty);
+            let load = mir_dialect::ops::LoadOp::new(ctx, addr_value, ty);
             load.get_operation().insert_at_back(insert_block, ctx);
             Ok(Some(load.get_result(ctx)))
         }
@@ -6103,7 +6103,7 @@ fn load_value_from_real_layout<'tcx>(
     let rust_ty = normalize_ty(tcx, runtime_ty(rust_ty));
 
     let load_direct = |ctx: &mut Context, ty: TypeHandle| -> Value {
-        let load = stair_mir::ops::LoadOp::new(ctx, addr, ty);
+        let load = mir_dialect::ops::LoadOp::new(ctx, addr, ty);
         load.get_operation().insert_at_back(insert_block, ctx);
         load.get_result(ctx)
     };
@@ -6113,7 +6113,7 @@ fn load_value_from_real_layout<'tcx>(
         let layout = tcx
             .layout_of(typing_env.as_query_input(rust_ty))
             .map_err(|error| format!("no layout for {rust_ty:?}: {error:?}"))?;
-        let undef = stair_mir::ops::UndefOp::new(ctx, our_ty);
+        let undef = mir_dialect::ops::UndefOp::new(ctx, our_ty);
         undef.get_operation().insert_at_back(insert_block, ctx);
         let mut current = undef.get_result(ctx);
         for (idx, field_ty) in fields.into_iter().enumerate() {
@@ -6128,7 +6128,7 @@ fn load_value_from_real_layout<'tcx>(
             };
             let value = load_value_from_real_layout(tcx, ctx, insert_block, field_ty, field_addr)?;
             let index = converted_field_index(tcx, rust_ty, idx)?;
-            let insert = stair_mir::ops::InsertValueOp::new(ctx, value, current, vec![index]);
+            let insert = mir_dialect::ops::InsertValueOp::new(ctx, value, current, vec![index]);
             insert.get_operation().insert_at_back(insert_block, ctx);
             current = insert.get_result(ctx);
         }
@@ -6180,7 +6180,7 @@ fn load_value_from_real_layout<'tcx>(
             let our_ty = convert_ty(tcx, ctx, rust_ty)?;
             let len = array_len(tcx, *len)?;
             let elem_stride = rustc_layout_size_of_ty(tcx, typing_env, *elem)?;
-            let undef = stair_mir::ops::UndefOp::new(ctx, our_ty);
+            let undef = mir_dialect::ops::UndefOp::new(ctx, our_ty);
             undef.get_operation().insert_at_back(insert_block, ctx);
             let mut current = undef.get_result(ctx);
             for idx in 0..len {
@@ -6192,7 +6192,7 @@ fn load_value_from_real_layout<'tcx>(
                 };
                 let value = load_value_from_real_layout(tcx, ctx, insert_block, *elem, elem_addr)?;
                 let insert =
-                    stair_mir::ops::InsertValueOp::new(ctx, value, current, vec![idx as u32]);
+                    mir_dialect::ops::InsertValueOp::new(ctx, value, current, vec![idx as u32]);
                 insert.get_operation().insert_at_back(insert_block, ctx);
                 current = insert.get_result(ctx);
             }
@@ -6221,7 +6221,7 @@ fn import_enum_constant<'tcx>(
     let rust_ty = normalize_ty(tcx, runtime_ty(constant.ty()));
     let size = rustc_layout_size_of_ty(tcx, typing_env, rust_ty)?;
     if size == 0 {
-        let op = stair_mir::ops::UndefOp::new(ctx, ty);
+        let op = mir_dialect::ops::UndefOp::new(ctx, ty);
         op.get_operation().insert_at_back(insert_block, ctx);
         return Ok(op.get_result(ctx));
     }
@@ -6236,9 +6236,9 @@ fn import_enum_constant<'tcx>(
     };
     let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
     let ptr_ty = llvm_ptr_ty(ctx);
-    let addr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+    let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
     addr.get_operation().insert_at_back(insert_block, ctx);
-    let load = stair_mir::ops::LoadOp::new(ctx, addr.get_result(ctx), ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, addr.get_result(ctx), ty);
     load.get_operation().insert_at_back(insert_block, ctx);
     Ok(load.get_result(ctx))
 }
@@ -6303,11 +6303,11 @@ fn import_initialized_maybe_uninit_u8_constant<'tcx>(
     byte.get_operation().insert_at_back(insert_block, ctx);
 
     let array_ty = llvm::types::ArrayType::get(ctx, byte_ty, 1).into();
-    let array_undef = stair_mir::ops::UndefOp::new(ctx, array_ty);
+    let array_undef = mir_dialect::ops::UndefOp::new(ctx, array_ty);
     array_undef
         .get_operation()
         .insert_at_back(insert_block, ctx);
-    let array = stair_mir::ops::InsertValueOp::new(
+    let array = mir_dialect::ops::InsertValueOp::new(
         ctx,
         byte.get_result(ctx),
         array_undef.get_result(ctx),
@@ -6315,11 +6315,11 @@ fn import_initialized_maybe_uninit_u8_constant<'tcx>(
     );
     array.get_operation().insert_at_back(insert_block, ctx);
 
-    let outer_undef = stair_mir::ops::UndefOp::new(ctx, ty);
+    let outer_undef = mir_dialect::ops::UndefOp::new(ctx, ty);
     outer_undef
         .get_operation()
         .insert_at_back(insert_block, ctx);
-    let outer = stair_mir::ops::InsertValueOp::new(
+    let outer = mir_dialect::ops::InsertValueOp::new(
         ctx,
         array.get_result(ctx),
         outer_undef.get_result(ctx),
@@ -6419,11 +6419,11 @@ fn import_str_constant<'tcx>(
     bytes.push(0);
     let symbol = declare_anonymous_byte_global(ctx, module_body, &bytes);
     let ptr_ty = llvm_ptr_ty(ctx);
-    let ptr = stair_mir::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
+    let ptr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
     ptr.get_operation().insert_at_back(insert_block, ctx);
 
     let usize_ty = usize_ty(ctx);
-    let len = stair_mir::ops::ConstantOp::new_integer(
+    let len = mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(
             usize_ty,
@@ -6433,16 +6433,16 @@ fn import_str_constant<'tcx>(
     len.get_operation().insert_at_back(insert_block, ctx);
 
     let str_ref_ty = str_ref_ty(ctx);
-    let undef = stair_mir::ops::UndefOp::new(ctx, str_ref_ty);
+    let undef = mir_dialect::ops::UndefOp::new(ctx, str_ref_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
-    let with_ptr = stair_mir::ops::InsertValueOp::new(
+    let with_ptr = mir_dialect::ops::InsertValueOp::new(
         ctx,
         ptr.get_result(ctx),
         undef.get_result(ctx),
         vec![0],
     );
     with_ptr.get_operation().insert_at_back(insert_block, ctx);
-    let with_len = stair_mir::ops::InsertValueOp::new(
+    let with_len = mir_dialect::ops::InsertValueOp::new(
         ctx,
         len.get_result(ctx),
         with_ptr.get_result(ctx),
@@ -6475,7 +6475,7 @@ fn scalar_constant_in_aggregate(
         struct_ty.fields().collect::<Vec<_>>()
     };
     let mut sized = fields.iter().enumerate().filter(|(_, field)| {
-        stair_ty_size(ctx, **field)
+        crabbit_ty_size(ctx, **field)
             .map(|size| size > 0)
             .unwrap_or(true)
     });
@@ -6489,10 +6489,10 @@ fn scalar_constant_in_aggregate(
     let Some(inner) = scalar_constant_in_aggregate(ctx, insert_block, field_ty, bits)? else {
         return Ok(None);
     };
-    let undef = stair_mir::ops::UndefOp::new(ctx, ty);
+    let undef = mir_dialect::ops::UndefOp::new(ctx, ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
     let wrap =
-        stair_mir::ops::InsertValueOp::new(ctx, inner, undef.get_result(ctx), vec![index as u32]);
+        mir_dialect::ops::InsertValueOp::new(ctx, inner, undef.get_result(ctx), vec![index as u32]);
     wrap.get_operation().insert_at_back(insert_block, ctx);
     Ok(Some(wrap.get_result(ctx)))
 }
@@ -6501,15 +6501,15 @@ fn constant_from_bits(
     ctx: &mut Context,
     ty: TypeHandle,
     bits: u128,
-) -> Result<stair_mir::ops::ConstantOp, String> {
+) -> Result<mir_dialect::ops::ConstantOp, String> {
     if ty.deref(ctx).downcast_ref::<FP32Type>().is_some() {
-        return Ok(stair_mir::ops::ConstantOp::new(
+        return Ok(mir_dialect::ops::ConstantOp::new(
             ctx,
             FPSingleAttr::from(f32::from_bits(bits as u32)).into(),
         ));
     }
     if ty.deref(ctx).downcast_ref::<FP64Type>().is_some() {
-        return Ok(stair_mir::ops::ConstantOp::new(
+        return Ok(mir_dialect::ops::ConstantOp::new(
             ctx,
             FPDoubleAttr::from(f64::from_bits(bits as u64)).into(),
         ));
@@ -6521,7 +6521,7 @@ fn integer_constant(
     ctx: &mut Context,
     ty: TypeHandle,
     bits: u128,
-) -> Result<stair_mir::ops::ConstantOp, String> {
+) -> Result<mir_dialect::ops::ConstantOp, String> {
     let ty_ref = ty.deref(ctx);
     let int_ty = ty_ref
         .downcast_ref::<IntegerType>()
@@ -6529,7 +6529,7 @@ fn integer_constant(
     let width = int_ty.width();
     let int_ty: TypedHandle<IntegerType> = TypedHandle::from_handle(ty, ctx).unwrap();
     drop(ty_ref);
-    Ok(stair_mir::ops::ConstantOp::new_integer(
+    Ok(mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(
             int_ty,
@@ -6553,14 +6553,14 @@ fn load_place<'tcx>(
     let rust_ty = mono_ty(tcx, state, place.ty(body, tcx).ty);
     if convert_storage_ty(tcx, ctx, rust_ty)?.is_none() {
         let unit_ty = convert_ty(tcx, ctx, rust_ty)?;
-        let undef = stair_mir::ops::UndefOp::new(ctx, unit_ty);
+        let undef = mir_dialect::ops::UndefOp::new(ctx, unit_ty);
         undef.get_operation().insert_at_back(insert_block, ctx);
         return Ok(undef.get_result(ctx));
     }
 
     let slot = place_addr(tcx, ctx, state, insert_block, body, &place)?;
     let ty = convert_ty(tcx, ctx, rust_ty)?;
-    let load = stair_mir::ops::LoadOp::new(ctx, slot, ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, slot, ty);
     load.get_operation().insert_at_back(insert_block, ctx);
     normalize_bool_for_immediate(tcx, ctx, state, insert_block, rust_ty, load.get_result(ctx))
 }
@@ -6589,7 +6589,7 @@ fn try_load_field_projection<'tcx>(
         ctx,
         mono_ty(tcx, state, body.local_decls[place.local].ty),
     )?;
-    let load = stair_mir::ops::LoadOp::new(ctx, slot, aggregate_ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, slot, aggregate_ty);
     load.get_operation().insert_at_back(insert_block, ctx);
     let mut current = load.get_result(ctx);
     let mut current_rust_ty = mono_ty(tcx, state, body.local_decls[place.local].ty);
@@ -6600,7 +6600,7 @@ fn try_load_field_projection<'tcx>(
         };
         let index = converted_field_index(tcx, current_rust_ty, field.index())?;
         let result_ty = convert_ty(tcx, ctx, mono_ty(tcx, state, field_ty))?;
-        let extract = stair_mir::ops::ExtractValueOp::new(ctx, current, vec![index], result_ty);
+        let extract = mir_dialect::ops::ExtractValueOp::new(ctx, current, vec![index], result_ty);
         extract.get_operation().insert_at_back(insert_block, ctx);
         current = extract.get_result(ctx);
         current_rust_ty = mono_ty(tcx, state, field_ty);
@@ -6650,7 +6650,7 @@ fn store_place<'tcx>(
     }
 
     let addr = place_addr(tcx, ctx, state, insert_block, body, place)?;
-    let store = stair_mir::ops::StoreOp::new(ctx, value, addr);
+    let store = mir_dialect::ops::StoreOp::new(ctx, value, addr);
     store.get_operation().insert_at_back(insert_block, ctx);
     Ok(())
 }
@@ -6670,7 +6670,7 @@ fn store_field_projection<'tcx>(
         ctx,
         mono_ty(tcx, state, body.local_decls[place.local].ty),
     )?;
-    let load = stair_mir::ops::LoadOp::new(ctx, slot, aggregate_ty);
+    let load = mir_dialect::ops::LoadOp::new(ctx, slot, aggregate_ty);
     load.get_operation().insert_at_back(insert_block, ctx);
 
     let mut current = load.get_result(ctx);
@@ -6687,7 +6687,7 @@ fn store_field_projection<'tcx>(
         let index = converted_field_index(tcx, current_rust_ty, field.index())?;
         let result_ty = convert_ty(tcx, ctx, mono_ty(tcx, state, field_ty))?;
         parents.push((index, current));
-        let extract = stair_mir::ops::ExtractValueOp::new(ctx, current, vec![index], result_ty);
+        let extract = mir_dialect::ops::ExtractValueOp::new(ctx, current, vec![index], result_ty);
         extract.get_operation().insert_at_back(insert_block, ctx);
         current = extract.get_result(ctx);
         current_rust_ty = mono_ty(tcx, state, field_ty);
@@ -6697,17 +6697,17 @@ fn store_field_projection<'tcx>(
         unreachable!("non-empty field-only projection checked above");
     };
     let last_index = converted_field_index(tcx, current_rust_ty, field.index())?;
-    let insert = stair_mir::ops::InsertValueOp::new(ctx, value, current, vec![last_index]);
+    let insert = mir_dialect::ops::InsertValueOp::new(ctx, value, current, vec![last_index]);
     insert.get_operation().insert_at_back(insert_block, ctx);
     let mut updated = insert.get_result(ctx);
 
     for (index, parent) in parents.into_iter().rev() {
-        let insert = stair_mir::ops::InsertValueOp::new(ctx, updated, parent, vec![index]);
+        let insert = mir_dialect::ops::InsertValueOp::new(ctx, updated, parent, vec![index]);
         insert.get_operation().insert_at_back(insert_block, ctx);
         updated = insert.get_result(ctx);
     }
 
-    let store = stair_mir::ops::StoreOp::new(ctx, updated, slot);
+    let store = mir_dialect::ops::StoreOp::new(ctx, updated, slot);
     store.get_operation().insert_at_back(insert_block, ctx);
     Ok(())
 }
@@ -6767,7 +6767,7 @@ fn place_addr<'tcx>(
         match elem {
             rustc_mir::ProjectionElem::Deref => {
                 let ptr_ty = convert_ty(tcx, ctx, mono_ty(tcx, state, current_ty))?;
-                let load = stair_mir::ops::LoadOp::new(ctx, addr, ptr_ty);
+                let load = mir_dialect::ops::LoadOp::new(ctx, addr, ptr_ty);
                 load.get_operation().insert_at_back(insert_block, ctx);
                 addr = load.get_result(ctx);
                 current_ty = mono_ty(tcx, state, pointee_ty(current_ty)?);
@@ -6787,7 +6787,7 @@ fn place_addr<'tcx>(
                     // keeps the metadata.
                     let fat_ty = addr.get_type(ctx);
                     let ptr_ty = llvm_ptr_ty(ctx);
-                    let data = stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
+                    let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
                     data.get_operation().insert_at_back(insert_block, ctx);
                     let mut data = data.get_result(ctx);
                     if offset != 0 {
@@ -6799,18 +6799,18 @@ fn place_addr<'tcx>(
                     } else {
                         let usize_ty: TypeHandle = usize_ty(ctx).into();
                         let meta =
-                            stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![1], usize_ty);
+                            mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![1], usize_ty);
                         meta.get_operation().insert_at_back(insert_block, ctx);
-                        let undef = stair_mir::ops::UndefOp::new(ctx, fat_ty);
+                        let undef = mir_dialect::ops::UndefOp::new(ctx, fat_ty);
                         undef.get_operation().insert_at_back(insert_block, ctx);
-                        let with_ptr = stair_mir::ops::InsertValueOp::new(
+                        let with_ptr = mir_dialect::ops::InsertValueOp::new(
                             ctx,
                             data,
                             undef.get_result(ctx),
                             vec![0],
                         );
                         with_ptr.get_operation().insert_at_back(insert_block, ctx);
-                        let with_meta = stair_mir::ops::InsertValueOp::new(
+                        let with_meta = mir_dialect::ops::InsertValueOp::new(
                             ctx,
                             meta.get_result(ctx),
                             with_ptr.get_result(ctx),
@@ -6832,7 +6832,7 @@ fn place_addr<'tcx>(
                 let index = load_place(tcx, ctx, state, insert_block, body, index_local.into())?;
                 let elem_size = indexed_elem_size(tcx, current_ty)?;
                 let byte_offset = scale_index(ctx, insert_block, index, elem_size)?;
-                let offset = stair_mir::ops::PtrOffsetOp::new(ctx, addr, byte_offset);
+                let offset = mir_dialect::ops::PtrOffsetOp::new(ctx, addr, byte_offset);
                 offset.get_operation().insert_at_back(insert_block, ctx);
                 addr = offset.get_result(ctx);
                 current_ty = mono_ty(tcx, state, indexed_elem_ty(current_ty)?);
@@ -6886,7 +6886,7 @@ fn place_addr<'tcx>(
                         let fat_ty = addr.get_type(ctx);
                         let ptr_ty = llvm_ptr_ty(ctx);
                         let usize_ty: TypeHandle = usize_ty(ctx).into();
-                        let data = stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
+                        let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
                         data.get_operation().insert_at_back(insert_block, ctx);
                         let mut data = data.get_result(ctx);
                         if from != 0 {
@@ -6894,11 +6894,11 @@ fn place_addr<'tcx>(
                         }
                         let new_len = if from_end {
                             let len =
-                                stair_mir::ops::ExtractValueOp::new(ctx, addr, vec![1], usize_ty);
+                                mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![1], usize_ty);
                             len.get_operation().insert_at_back(insert_block, ctx);
                             let dropped = integer_constant(ctx, usize_ty, (from + to) as u128)?;
                             dropped.get_operation().insert_at_back(insert_block, ctx);
-                            let sub = stair_mir::ops::SubOp::new(
+                            let sub = mir_dialect::ops::SubOp::new(
                                 ctx,
                                 len.get_result(ctx),
                                 dropped.get_result(ctx),
@@ -6910,16 +6910,16 @@ fn place_addr<'tcx>(
                             len.get_operation().insert_at_back(insert_block, ctx);
                             len.get_result(ctx)
                         };
-                        let undef = stair_mir::ops::UndefOp::new(ctx, fat_ty);
+                        let undef = mir_dialect::ops::UndefOp::new(ctx, fat_ty);
                         undef.get_operation().insert_at_back(insert_block, ctx);
-                        let with_ptr = stair_mir::ops::InsertValueOp::new(
+                        let with_ptr = mir_dialect::ops::InsertValueOp::new(
                             ctx,
                             data,
                             undef.get_result(ctx),
                             vec![0],
                         );
                         with_ptr.get_operation().insert_at_back(insert_block, ctx);
-                        let with_len = stair_mir::ops::InsertValueOp::new(
+                        let with_len = mir_dialect::ops::InsertValueOp::new(
                             ctx,
                             new_len,
                             with_ptr.get_result(ctx),
@@ -6957,7 +6957,7 @@ fn ptr_offset_const(
     let usize_ty: TypeHandle = usize_ty(ctx).into();
     let offset_op = integer_constant(ctx, usize_ty, offset as u128)?;
     offset_op.get_operation().insert_at_back(insert_block, ctx);
-    let ptr_offset = stair_mir::ops::PtrOffsetOp::new(ctx, base, offset_op.get_result(ctx));
+    let ptr_offset = mir_dialect::ops::PtrOffsetOp::new(ctx, base, offset_op.get_result(ctx));
     ptr_offset.get_operation().insert_at_back(insert_block, ctx);
     Ok(ptr_offset.get_result(ctx))
 }
@@ -6973,7 +6973,7 @@ fn scale_index(
     }
     let scale = integer_constant(ctx, index.get_type(ctx), element_size as u128)?;
     scale.get_operation().insert_at_back(insert_block, ctx);
-    let mul = stair_mir::ops::MulOp::new(ctx, index, scale.get_result(ctx));
+    let mul = mir_dialect::ops::MulOp::new(ctx, index, scale.get_result(ctx));
     mul.get_operation().insert_at_back(insert_block, ctx);
     Ok(mul.get_result(ctx))
 }
@@ -7170,7 +7170,7 @@ fn align_to(value: u64, align: u64) -> u64 {
     }
 }
 
-/// Alignment of the converted STAIR type for a Rust type, mirroring the
+/// Alignment of the converted crabbit type for a Rust type, mirroring the
 /// AArch64 lowering's `stack_align_of` rules.
 fn layout_align_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Result<u64, String> {
     let ty = normalize_ty(tcx, runtime_ty(ty));
@@ -7756,14 +7756,14 @@ fn convert_ty<'tcx>(
             return enum_blob_ty(tcx, ctx, ty);
         }
         TyKind::Adt(_, args)
-            if is_stair_device_wrapper_ty(ty, "DeviceSliceMut")
-                || is_stair_device_wrapper_ty(ty, "DisjointSlice") =>
+            if is_crabbit_device_wrapper_ty(ty, "DeviceSliceMut")
+                || is_crabbit_device_wrapper_ty(ty, "DisjointSlice") =>
         {
             let elem = args[0].expect_ty();
             let elem = convert_ty(tcx, ctx, elem)?;
             return Ok(device_slice_ty(ctx, elem, true));
         }
-        TyKind::Adt(_, args) if is_stair_device_wrapper_ty(ty, "DeviceSlice") => {
+        TyKind::Adt(_, args) if is_crabbit_device_wrapper_ty(ty, "DeviceSlice") => {
             let elem = args[0].expect_ty();
             let elem = convert_ty(tcx, ctx, elem)?;
             return Ok(device_slice_ty(ctx, elem, false));
@@ -7895,7 +7895,7 @@ fn read_enum_discriminant<'tcx>(
             } else {
                 addr
             };
-            let load = stair_mir::ops::LoadOp::new(ctx, tag_addr, tag_ty);
+            let load = mir_dialect::ops::LoadOp::new(ctx, tag_addr, tag_ty);
             load.get_operation().insert_at_back(insert_block, ctx);
             let tag_value = load.get_result(ctx);
             match tag_encoding {
@@ -7921,7 +7921,7 @@ fn read_enum_discriminant<'tcx>(
                     niche_start_const
                         .get_operation()
                         .insert_at_back(insert_block, ctx);
-                    let relative_tag = stair_mir::ops::SubOp::new(
+                    let relative_tag = mir_dialect::ops::SubOp::new(
                         ctx,
                         tag_value,
                         niche_start_const.get_result(ctx),
@@ -7936,7 +7936,7 @@ fn read_enum_discriminant<'tcx>(
                     relative_max_const
                         .get_operation()
                         .insert_at_back(insert_block, ctx);
-                    let is_niche = stair_mir::ops::LeOp::new(
+                    let is_niche = mir_dialect::ops::LeOp::new(
                         ctx,
                         relative_tag,
                         relative_max_const.get_result(ctx),
@@ -7957,7 +7957,7 @@ fn read_enum_discriminant<'tcx>(
                     )?;
                     niche_base.get_operation().insert_at_back(insert_block, ctx);
                     let tagged =
-                        stair_mir::ops::AddOp::new(ctx, niche_base.get_result(ctx), relative_discr)
+                        mir_dialect::ops::AddOp::new(ctx, niche_base.get_result(ctx), relative_discr)
                             .get_operation();
                     tagged.insert_at_back(insert_block, ctx);
                     let tagged = tagged.deref(ctx).get_result(0);
@@ -7967,13 +7967,13 @@ fn read_enum_discriminant<'tcx>(
                     let base = integer_constant(ctx, discr_ty, untagged & discr_mask)?;
                     base.get_operation().insert_at_back(insert_block, ctx);
                     let base = base.get_result(ctx);
-                    let diff = stair_mir::ops::SubOp::new(ctx, tagged, base).get_operation();
+                    let diff = mir_dialect::ops::SubOp::new(ctx, tagged, base).get_operation();
                     diff.insert_at_back(insert_block, ctx);
                     let diff = diff.deref(ctx).get_result(0);
-                    let scaled = stair_mir::ops::MulOp::new(ctx, diff, is_niche).get_operation();
+                    let scaled = mir_dialect::ops::MulOp::new(ctx, diff, is_niche).get_operation();
                     scaled.insert_at_back(insert_block, ctx);
                     let scaled = scaled.deref(ctx).get_result(0);
-                    let discr = stair_mir::ops::AddOp::new(ctx, base, scaled).get_operation();
+                    let discr = mir_dialect::ops::AddOp::new(ctx, base, scaled).get_operation();
                     discr.insert_at_back(insert_block, ctx);
                     Ok(discr.deref(ctx).get_result(0))
                 }
@@ -8015,7 +8015,7 @@ fn write_enum_tag<'tcx>(
     } else {
         addr
     };
-    let store = stair_mir::ops::StoreOp::new(ctx, tag_const.get_result(ctx), tag_addr);
+    let store = mir_dialect::ops::StoreOp::new(ctx, tag_const.get_result(ctx), tag_addr);
     store.get_operation().insert_at_back(insert_block, ctx);
     Ok(())
 }
@@ -8036,10 +8036,10 @@ fn is_fmt_rt_argument_type<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_id::D
     tcx.def_path_str(def_id).contains("fmt::rt::ArgumentType")
 }
 
-fn is_stair_device_wrapper_ty<'tcx>(ty: Ty<'tcx>, name: &str) -> bool {
+fn is_crabbit_device_wrapper_ty<'tcx>(ty: Ty<'tcx>, name: &str) -> bool {
     let ty = format!("{ty:?}");
-    ty.starts_with(&format!("stair_device::{name}"))
-        || ty.starts_with(&format!("stair_device::slice::{name}"))
+    ty.starts_with(&format!("crabbit_device::{name}"))
+        || ty.starts_with(&format!("crabbit_device::slice::{name}"))
 }
 
 fn int_width(kind: rustc_middle::ty::IntTy) -> u32 {

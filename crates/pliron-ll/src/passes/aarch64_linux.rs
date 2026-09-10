@@ -5,7 +5,7 @@ use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
     conversion::pass::Passes,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::aarch64::{self, TargetOs};
@@ -18,6 +18,6 @@ pub fn pipeline() -> Passes {
 }
 
 /// Runs [pipeline] on `root` (a `builtin.module`) in place.
-pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<()> {
+pub fn lower_module(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<()> {
     aarch64::lower_module(ctx, root, TargetOs::Linux)
 }

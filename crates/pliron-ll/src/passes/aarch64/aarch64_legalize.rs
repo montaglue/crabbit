@@ -13,7 +13,7 @@ use crate::{
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{error::Aarch64Err, frontend::module_op};
@@ -106,7 +106,7 @@ fn expected_operand_classes(
 /// Reject a register operand in the wrong register file before RA/encoding
 /// instead of letting it collide with a virtual register name or panic in
 /// the encoder's register-number extraction.
-fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> STAIRResult<()> {
+fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> CrabbitResult<()> {
     let mnemonic = aarch64_ops::mnemonic(ctx, op).unwrap_or("<unknown>");
     let Some(opcode) = aarch64_ops::opcode(ctx, op) else {
         return Ok(());

@@ -44,7 +44,7 @@ use crate::{
     },
     linked_list::{ContainsLinkedList, LinkedList as _},
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
     utils::apint::APInt,
 };
 
@@ -153,7 +153,7 @@ enum SlotAccess {
     },
 }
 
-fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> STAIRResult<()> {
+fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> CrabbitResult<()> {
     let elem_ty = alloca.result_pointee_type(ctx);
     if elem_ty.deref(ctx).downcast_ref::<StructType>().is_none() {
         return Ok(());

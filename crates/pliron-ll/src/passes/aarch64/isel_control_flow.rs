@@ -7,7 +7,7 @@ use crate::{
     dialects::aarch64::{ops as aarch64_ops, registers::Register},
     input_error_noloc,
     ir::{basic_block::BasicBlock, r#type::Typed, value::Value},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use crate::dialects::aarch64::registers::RegisterClass;
@@ -36,7 +36,7 @@ pub(super) fn branch_edge_target(
     args: &[Value],
     next_vreg: &mut usize,
     next_edge_block: &mut usize,
-) -> STAIRResult<Ptr<BasicBlock>> {
+) -> CrabbitResult<Ptr<BasicBlock>> {
     if args.is_empty() {
         return machine_block(block_map, dest);
     }
@@ -61,7 +61,7 @@ pub(super) fn emit_block_arg_copies(
     dest: Ptr<BasicBlock>,
     args: &[Value],
     next_vreg: &mut usize,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     let dest_args: Vec<_> = dest.deref(ctx).arguments().collect();
     if dest_args.len() != args.len() {
         return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
@@ -153,7 +153,7 @@ pub(super) fn emit_block_arg_copies(
 pub(super) fn machine_block(
     block_map: &HashMap<Ptr<BasicBlock>, Ptr<BasicBlock>>,
     target: Ptr<BasicBlock>,
-) -> STAIRResult<Ptr<BasicBlock>> {
+) -> CrabbitResult<Ptr<BasicBlock>> {
     block_map.get(&target).copied().ok_or_else(|| {
         input_error_noloc!(Aarch64Err::UnsupportedOp(
             "branch target block was not lowered".to_string()
@@ -172,7 +172,7 @@ fn flatten_incoming(
     ty: TypeHandle,
     next_vreg: &mut usize,
     out: &mut Vec<Option<Register>>,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(());
     }

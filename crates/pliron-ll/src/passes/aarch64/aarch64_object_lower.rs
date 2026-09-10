@@ -12,7 +12,7 @@ use crate::{
     input_error_noloc,
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{
@@ -112,7 +112,7 @@ pub(super) fn collect_object_parts(
     ctx: &Context,
     root: Ptr<Operation>,
     os: TargetOs,
-) -> STAIRResult<ObjectParts> {
+) -> CrabbitResult<ObjectParts> {
     let module = module_op(ctx, root)?;
     let body = module_body(ctx, module);
     let mut text = Vec::new();
@@ -217,7 +217,7 @@ pub(super) fn collect_object_parts(
 /// operation. This is a translation out of the pass pipeline (the way
 /// `mlir-translate` sits outside `mlir-opt`), not a [pliron::pass::Pass]:
 /// it produces a new operation instead of transforming the module.
-pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResult<ObjectOp> {
+pub fn aarch64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<ObjectOp> {
     let parts = collect_object_parts(ctx, root, TargetOs::Darwin)?;
     if parts.data_sections().next().is_some() {
         return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(

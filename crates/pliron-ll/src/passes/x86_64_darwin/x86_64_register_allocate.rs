@@ -13,7 +13,7 @@ use crate::{
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    result::STAIRResult,
+    result::CrabbitResult,
 };
 
 use super::{error::X86_64DarwinErr, frontend::module_op, util::cast_operation};
@@ -66,7 +66,7 @@ enum Allocation {
     Spill(u64),
 }
 
-fn allocate_function(ctx: &mut Context, func: FuncOp) -> STAIRResult<()> {
+fn allocate_function(ctx: &mut Context, func: FuncOp) -> CrabbitResult<()> {
     let (insts, intervals) = collect_live_intervals(ctx, func);
     let call_crossing = values_live_across_calls(ctx, &insts, &intervals);
     let allocation = linear_scan(&intervals, &call_crossing);
@@ -357,7 +357,7 @@ fn rewrite_allocated_registers(
     insts: &[Ptr<Operation>],
     assignments: &HashMap<VirtualRegister, Allocation>,
     spill_base_offset: u64,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     for op in insts {
         if !x86_64_ops::is_instruction(ctx, *op) {
             continue;
@@ -472,7 +472,7 @@ fn virtual_operands_with_kind(
         .collect()
 }
 
-fn next_spill_scratch(scratch_index: &mut usize) -> STAIRResult<Register> {
+fn next_spill_scratch(scratch_index: &mut usize) -> CrabbitResult<Register> {
     let Some(scratch) = SPILL_SCRATCH_GPRS.get(*scratch_index) else {
         return Err(crate::input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
             "x86_64 instruction needs more spill scratch registers than are reserved".to_string()

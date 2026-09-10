@@ -34,7 +34,7 @@ use crate::{
     linked_list::ContainsLinkedList,
     parsable::{Parsable, ParseResult, StateStream},
     printable::{self, Printable},
-    result::STAIRResult,
+    result::CrabbitResult,
     utils::apint::APInt,
 };
 
@@ -854,9 +854,9 @@ fn apply_instruction_field(
     loc: &Location,
     key: &Identifier,
     value: ParsedInstructionField,
-) -> STAIRResult<()> {
+) -> CrabbitResult<()> {
     use ParsedInstructionField::{Block, List, Text};
-    let int_value = |text: &str| -> STAIRResult<u64> {
+    let int_value = |text: &str| -> CrabbitResult<u64> {
         text.parse().map_err(|_| {
             input_error!(
                 loc.clone(),
@@ -864,7 +864,7 @@ fn apply_instruction_field(
             )
         })
     };
-    let register_value = |text: &str| -> STAIRResult<Register> {
+    let register_value = |text: &str| -> CrabbitResult<Register> {
         Register::parse(text).ok_or_else(|| {
             input_error!(loc.clone(), "invalid AArch64 register `{text}` for `{key}`")
         })
@@ -994,7 +994,7 @@ macro_rules! define_aarch64_instruction {
                 ctx: &Context,
                 pc: u64,
                 refs: &BinarySerializationContext<'_>,
-            ) -> STAIRResult<BinaryEncoding> {
+            ) -> CrabbitResult<BinaryEncoding> {
                 encoding::encode_inst(ctx, self.op, Self::OPCODE, Self::MNEMONIC, pc, refs)
             }
         }
