@@ -41,7 +41,8 @@ use self::{
     verify_llvm_for_x86_64_darwin::VerifyLlvmForX86_64DarwinPass,
 };
 
-/// The x86-64-darwin lowering pipeline: every step is a [Pass] on the
+/// The x86-64-darwin lowering pipeline: every step is a
+/// [Pass](crate::conversion::pass::Pass) on the
 /// `builtin.module`, from LLVM-dialect verification down to encoded machine
 /// code. Translation to Mach-O bytes happens outside the pipeline, in
 /// [write_macho_object_from_ir].

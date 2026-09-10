@@ -18,7 +18,7 @@
 //! LLVM computes probabilities on IR, transfers them onto machine basic
 //! blocks during instruction selection, and consumes the machine-level
 //! frequencies after register allocation (`MachineBlockPlacement`). crabbit
-//! mirrors that flow: [`HotPathInfo::for_op`] serves successor-based dialects
+//! mirrors that flow: `HotPathInfo::for_op` serves successor-based dialects
 //! (`llvm`, `cf`), and [`HotPathInfo::from_edges`] serves label-based machine
 //! CFGs (e.g. the `aarch64` dialect, see the `aarch64-block-placement` pass).
 

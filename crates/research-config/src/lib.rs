@@ -4,7 +4,7 @@
 //! |---|---|---|---|
 //! | `CRABBIT_REGALLOC` | `linear`, or a linked engine (`eregalloc`) | `linear` | `linear` keeps the backend's own allocator; other names resolve through the [engine registry](register_engine) — the public backend links no engines, `libcrabbit_research.so` registers `eregalloc` |
 //! | `CRABBIT_REGALLOC_ORACLE` | `c0`, `c2` | `c0` | `c0` → syntactic oracle, `c2` → saturated e-graph oracle; only read under `eregalloc` |
-//! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile` | `uniform` | under `eregalloc`: the pass's frequency source (`spectral` is the fallthrough-aware machine-CFG Perron computation; `profile` reads measured frequencies from the `CRABBIT_PROFILE` JSON via a [BlockFreqSource::Provider], with per-function uniform fallback — see docs/PROFILE-FEEDBACK-PLAN.md) |
+//! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile` | `uniform` | under `eregalloc`: the pass's frequency source (`spectral` is the fallthrough-aware machine-CFG Perron computation; `profile` reads measured frequencies from the `CRABBIT_PROFILE` JSON via a `BlockFreqSource::Provider`, with per-function uniform fallback — see docs/PROFILE-FEEDBACK-PLAN.md) |
 //!
 //! Under `eregalloc`, `CRABBIT_SPILL_POLICY` / `CRABBIT_RESTORE_ESTIMATE`
 //! are superseded (the oracle scoring and plan-driven remat are the engine)
@@ -32,7 +32,7 @@ use pliron_ll::{
 };
 
 /// Measured block frequencies from the `CRABBIT_PROFILE` JSON, in the
-/// exact shape of [BlockFreqSource::Provider]. Called once per machine
+/// exact shape of `BlockFreqSource::Provider`. Called once per machine
 /// function with its region at RA time; the profile's per-symbol vectors
 /// are indexed by RA-order block position, which is precisely this
 /// region's block order at that point. Any miss — no profile configured,

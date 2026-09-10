@@ -1,0 +1,34 @@
+name: docs
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+jobs:
+  rustdoc:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps (triskel C++ bindings need fmt>=10 + modern g++)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-14 libffi-dev cmake
+          # apt's libfmt is v9; triskel relies on fmt>=10 (format_as).
+          # Build fmt 11 into /usr/local, matching the dev machines.
+          curl -sL https://github.com/fmtlib/fmt/archive/refs/tags/11.0.2.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/fmt-11.0.2 -B /tmp/fmt-build -DFMT_TEST=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+          cmake --build /tmp/fmt-build -j >/dev/null
+          sudo cmake --install /tmp/fmt-build >/dev/null
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+      - name: Toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Build docs (warnings are errors)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked

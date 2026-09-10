@@ -1,4 +1,4 @@
-//! The aarch64-darwin backend: the shared [aarch64](super::aarch64) pipeline
+//! The aarch64-darwin backend: the shared [super::aarch64] pipeline
 //! configured for Mach-O/Darwin. Kept as a facade so existing users keep
 //! their entry points while the core lives in the OS-neutral module.
 

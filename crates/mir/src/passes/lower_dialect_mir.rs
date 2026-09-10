@@ -1,7 +1,7 @@
 //! pliron [Pass] wrapper over cuda-oxide's `mir-lower` (dialect-mir → llvm
 //! dialect lowering).
 //!
-//! [dialect_mir] and crabbit's own [mir](crate::mir) dialect both register
+//! [dialect_mir] and crabbit's own `mir` dialect (`crate::mir`) both register
 //! under the dialect name `mir` with overlapping op names, so a [Context] can
 //! hold only one of them. This pass belongs to a dialect-mir pipeline; running
 //! it in a context where crabbit's dialect is registered is a logic error.

@@ -5,7 +5,7 @@
 //! Memory model (deliberately conservative, syntactic): two accesses are
 //! to the *same* address only when their addresses are the same SSA value
 //! or structurally identical GEP chains off the same base with identical
-//! indices ([AddrKey]). Availability of a memory value is killed by any
+//! indices (`AddrKey`). Availability of a memory value is killed by any
 //! store to a non-identical address key, any call, and any op outside the
 //! known-benign set. A load is resolved by scanning backwards from its
 //! position within its block and then through the *unique-predecessor

@@ -1,4 +1,4 @@
-//! The aarch64-linux backend: the shared [aarch64](super::aarch64) pipeline
+//! The aarch64-linux backend: the shared [super::aarch64] pipeline
 //! configured for ELF/Linux (AAPCS64, unprefixed symbols).
 
 use crate::{

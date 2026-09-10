@@ -1,5 +1,13 @@
 # crabbit
 
+[![CI](https://github.com/montaglue/crabbit/actions/workflows/ci.yml/badge.svg)](https://github.com/montaglue/crabbit/actions/workflows/ci.yml)
+[![docs](https://github.com/montaglue/crabbit/actions/workflows/docs.yml/badge.svg)](https://github.com/montaglue/crabbit/actions/workflows/docs.yml)
+[![coverage](https://codecov.io/gh/montaglue/crabbit/graph/badge.svg)](https://codecov.io/gh/montaglue/crabbit)
+[![dependencies](https://deps.rs/repo/github/montaglue/crabbit/status.svg)](https://deps.rs/repo/github/montaglue/crabbit)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![rustc](https://img.shields.io/badge/rustc-nightly--2026--04--03-orange.svg)](rust-toolchain.toml)
+[![last commit](https://img.shields.io/github/last-commit/montaglue/crabbit)](https://github.com/montaglue/crabbit/commits/main)
+
 **An LLVM-free Rust compiler backend — pure Rust from MIR to machine code —
 that compiles real crates: all four `apache/arrow-rs` core crates build
 through it today.**

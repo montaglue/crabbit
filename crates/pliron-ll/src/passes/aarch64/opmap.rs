@@ -58,7 +58,8 @@ pub mod roots {
     /// fallthrough.
     pub const PLACEMENT: i64 = -4;
     /// Final-IR ops that no pass stamped (reported by the sidecar so
-    /// nothing is silently dropped; [unstamped_op_count] audits this).
+    /// nothing is silently dropped; [`unstamped_op_count`](crate::passes::aarch64::opmap::unstamped_op_count)
+    /// audits this).
     pub const UNATTRIBUTED: i64 = -5;
     /// Ops created by a mid-end pass that declared no adjoint for them —
     /// visible as a category so imprecise mid-end stamping is loud, not
