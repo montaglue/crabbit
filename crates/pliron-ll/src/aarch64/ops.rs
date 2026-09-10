@@ -1,6 +1,6 @@
 use awint::bw;
 use combine::{Parser, attempt, many, many1, optional, satisfy, token};
-use pliron::derive::{def_op, derive_op_interface_impl};
+use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use pliron::derive::op_interface_impl;
 
 use crate::ll::BranchWeightsAttr;
@@ -19,7 +19,7 @@ use crate::{
     },
     dict_key,
     identifier::Identifier,
-    impl_verify_succ, input_err, input_error,
+    input_err, input_error,
     ir::{
         basic_block::BasicBlock,
         irfmt::{
@@ -70,6 +70,7 @@ dict_key!(ATTR_KEY_AARCH64_STACK_SIZE, "aarch64_stack_size");
     NOpdsInterface<0>,
     NResultsInterface<0>
 )]
+#[verify_succ]
 pub struct FuncOp;
 
 impl FuncOp {
@@ -189,8 +190,6 @@ impl Parsable for FuncOp {
             .into()
     }
 }
-
-impl_verify_succ!(FuncOp);
 
 pub fn mov_imm(ctx: &mut Context, rd: Register, imm: u64) -> Ptr<Operation> {
     let op = MovImmOp::new(ctx).op;
@@ -942,6 +941,7 @@ fn parse_instruction_op<'a>(
 // never a string opcode attribute.
 macro_rules! define_aarch64_instruction {
     ($name:ident, $id:literal, $variant:ident, $mnemonic:literal, [$($reg_key:ident => $reg_kind:ident),* $(,)?]) => {
+        #[verify_succ]
         #[def_op($id)]
         pub struct $name;
 
@@ -1024,7 +1024,6 @@ macro_rules! define_aarch64_instruction {
             }
         }
 
-        impl_verify_succ!($name);
     };
 }
 
@@ -1049,7 +1048,7 @@ macro_rules! define_aarch64_instructions {
             }
         }
 
-        fn register_instructions(ctx: &mut Context) {
+        fn register_instructions(_ctx: &mut Context) {
             
         }
 

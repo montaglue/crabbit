@@ -3,12 +3,11 @@
 //! form throughout; there is no phi operation.
 
 use combine::Parser;
-use pliron::derive::{def_op, derive_op_interface_impl};
+use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use pliron::{
     builtin::{attributes::StringAttr, op_interfaces::{NResultsInterface, OneResultInterface}},
     context::Context,
     identifier::Identifier,
-    impl_verify_succ,
     irfmt::parsers::{process_parsed_ssa_defs, spaced},
     location::Location,
     op::{Op, OpObj},
@@ -25,6 +24,7 @@ pliron::dict_key!(ATTR_KEY_LL_CSTR_VALUE, "ll_cstr_value");
 /// A NUL-terminatable C string literal materialized as a pointer, used by the
 /// MIR importer for string constants before they get a layout in the object's
 /// literal pool.
+#[verify_succ]
 #[def_op("ll.cstr")]
 #[derive_op_interface_impl(NResultsInterface<1>, OneResultInterface)]
 pub struct CStrOp;
@@ -95,4 +95,3 @@ impl Parsable for CStrOp {
     }
 }
 
-impl_verify_succ!(CStrOp);

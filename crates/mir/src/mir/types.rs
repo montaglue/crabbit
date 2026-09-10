@@ -4,11 +4,10 @@ use combine::{
     Parser, between, optional,
     parser::char::{char, string},
 };
-use pliron::derive::def_type;
+use pliron::derive::{def_type, verify_succ};
 
 use crate::{
     context::Context,
-    impl_verify_succ,
     ir::{
         irfmt::parsers::{spaced, type_parser},
         r#type::{Type, TypeHandle, TypedHandle},
@@ -18,6 +17,7 @@ use crate::{
 };
 
 /// Pointer/reference-like MIR place type.
+#[verify_succ]
 #[def_type("cmir.ptr")]
 #[derive(Hash, PartialEq, Eq, Debug, Clone)]
 pub struct PtrType {
@@ -75,8 +75,6 @@ impl Parsable for PtrType {
             .into()
     }
 }
-
-impl_verify_succ!(PtrType);
 
 pub fn register(_ctx: &mut Context) {
 }

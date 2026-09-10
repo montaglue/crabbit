@@ -1,4 +1,4 @@
-use pliron::derive::{def_op, derive_op_interface_impl};
+use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 
 use crate::{
     context::Context,
@@ -8,7 +8,7 @@ use crate::{
     },
     dict_key,
     identifier::Identifier,
-    impl_verify_succ, input_err,
+    input_err,
     ir::{
         location::{Located, Location},
         op::{Op, OpObj},
@@ -40,6 +40,7 @@ pub struct Relocation {
     pub kind: u8,
 }
 
+#[verify_succ]
 #[def_op("macho.object")]
 #[derive_op_interface_impl(SymbolOpInterface, NOpdsInterface<0>, NResultsInterface<0>)]
 pub struct ObjectOp;
@@ -139,8 +140,6 @@ impl Parsable for ObjectOp {
         )?
     }
 }
-
-impl_verify_succ!(ObjectOp);
 
 fn encode_symbols(symbols: &[Symbol]) -> String {
     symbols

@@ -1,7 +1,7 @@
 //! Operations defined by the Rust MIR dialect.
 
 use combine::{Parser, optional, parser::char::char, sep_by, token, value};
-use pliron::derive::{def_op, derive_op_interface_impl};
+use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use pliron::derive::derive_attr_get_set;
 
 use pliron_inspect_driver::FunctionLikeInterface;
@@ -25,7 +25,7 @@ use crate::{
     },
     dict_key,
     identifier::Identifier,
-    impl_verify_succ, input_err,
+    input_err,
     ir::{
         attribute::{AttrObj, attr_cast},
         basic_block::BasicBlock,
@@ -73,6 +73,7 @@ dict_key!(ATTR_KEY_MIR_INSERTVALUE_INDICES, "cmir_insertvalue_indices");
     NOpdsInterface<0>,
     NResultsInterface<0>
 )]
+#[verify_succ]
 #[derive_attr_get_set(cmir_func_type : TypeAttr)]
 pub struct FuncOp;
 
@@ -166,13 +167,12 @@ impl Parsable for FuncOp {
     }
 }
 
-impl_verify_succ!(FuncOp);
-
 // ============================================================================
 // Constants and memory
 // ============================================================================
 
 /// Integer constant.
+#[verify_succ]
 #[def_op("cmir.constant")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct ConstantOp;
@@ -255,9 +255,8 @@ impl Parsable for ConstantOp {
     }
 }
 
-impl_verify_succ!(ConstantOp);
-
 /// Pointer to a null-terminated string literal.
+#[verify_succ]
 #[def_op("cmir.cstr")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct CStrOp;
@@ -334,9 +333,8 @@ impl Parsable for CStrOp {
     }
 }
 
-impl_verify_succ!(CStrOp);
-
 /// Address of a symbol visible to later object emission.
+#[verify_succ]
 #[def_op("cmir.addressof")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct AddressOfOp;
@@ -414,9 +412,8 @@ impl Parsable for AddressOfOp {
     }
 }
 
-impl_verify_succ!(AddressOfOp);
-
 /// Undefined aggregate or scalar value used as a construction seed.
+#[verify_succ]
 #[def_op("cmir.undef")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct UndefOp;
@@ -471,9 +468,8 @@ impl Parsable for UndefOp {
     }
 }
 
-impl_verify_succ!(UndefOp);
-
 /// Stack slot for a MIR local/place.
+#[verify_succ]
 #[def_op("cmir.alloca")]
 #[derive_op_interface_impl(OneResultInterface, NOpdsInterface<0>)]
 pub struct AllocaOp;
@@ -543,9 +539,8 @@ impl Parsable for AllocaOp {
     }
 }
 
-impl_verify_succ!(AllocaOp);
-
 /// Load from a MIR pointer/place.
+#[verify_succ]
 #[def_op("cmir.load")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct LoadOp;
@@ -608,9 +603,8 @@ impl Parsable for LoadOp {
     }
 }
 
-impl_verify_succ!(LoadOp);
-
 /// Store to a MIR pointer/place.
+#[verify_succ]
 #[def_op("cmir.store")]
 #[derive_op_interface_impl(NResultsInterface<0>)]
 pub struct StoreOp;
@@ -681,9 +675,8 @@ impl Parsable for StoreOp {
     }
 }
 
-impl_verify_succ!(StoreOp);
-
 /// Compute a pointer advanced by a byte offset.
+#[verify_succ]
 #[def_op("cmir.ptr_offset")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct PtrOffsetOp;
@@ -751,8 +744,6 @@ impl Parsable for PtrOffsetOp {
     }
 }
 
-impl_verify_succ!(PtrOffsetOp);
-
 // ============================================================================
 // Arithmetic and comparison operations
 // ============================================================================
@@ -766,6 +757,7 @@ macro_rules! def_mir_binary_op {
             SameResultsType,
             SameOperandsAndResultType
         )]
+        #[verify_succ]
         pub struct $name;
 
         impl $name {
@@ -835,12 +827,12 @@ macro_rules! def_mir_binary_op {
             }
         }
 
-        impl_verify_succ!($name);
     };
 }
 
 macro_rules! def_mir_cmp_op {
     ($name:ident, $opid:literal) => {
+        #[verify_succ]
         #[def_op($opid)]
         #[derive_op_interface_impl(OneResultInterface, SameOperandsType)]
         pub struct $name;
@@ -916,7 +908,6 @@ macro_rules! def_mir_cmp_op {
             }
         }
 
-        impl_verify_succ!($name);
     };
 }
 
@@ -939,6 +930,7 @@ def_mir_cmp_op!(GtOp, "cmir.gt");
 def_mir_cmp_op!(GeOp, "cmir.ge");
 
 /// Cast between scalar MIR types.
+#[verify_succ]
 #[def_op("cmir.cast")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct CastOp;
@@ -1006,9 +998,8 @@ impl Parsable for CastOp {
     }
 }
 
-impl_verify_succ!(CastOp);
-
 /// Extract a field from an aggregate MIR value.
+#[verify_succ]
 #[def_op("cmir.extractvalue")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct ExtractValueOp;
@@ -1093,9 +1084,8 @@ impl Parsable for ExtractValueOp {
     }
 }
 
-impl_verify_succ!(ExtractValueOp);
-
 /// Insert a value into an aggregate MIR value.
+#[verify_succ]
 #[def_op("cmir.insertvalue")]
 #[derive_op_interface_impl(OneResultInterface)]
 pub struct InsertValueOp;
@@ -1184,13 +1174,12 @@ impl Parsable for InsertValueOp {
     }
 }
 
-impl_verify_succ!(InsertValueOp);
-
 // ============================================================================
 // Control flow
 // ============================================================================
 
 /// MIR return.
+#[verify_succ]
 #[def_op("cmir.return")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>)]
 pub struct ReturnOp;
@@ -1251,9 +1240,8 @@ impl Parsable for ReturnOp {
     }
 }
 
-impl_verify_succ!(ReturnOp);
-
 /// MIR unconditional branch.
+#[verify_succ]
 #[def_op("cmir.goto")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>)]
 pub struct GotoOp;
@@ -1337,9 +1325,8 @@ impl Parsable for GotoOp {
     }
 }
 
-impl_verify_succ!(GotoOp);
-
 /// MIR conditional branch.
+#[verify_succ]
 #[def_op("cmir.cond_br")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>, OperandSegmentInterface)]
 pub struct CondBrOp;
@@ -1471,9 +1458,8 @@ impl Parsable for CondBrOp {
     }
 }
 
-impl_verify_succ!(CondBrOp);
-
 /// MIR unreachable terminator.
+#[verify_succ]
 #[def_op("cmir.unreachable")]
 #[derive_op_interface_impl(IsTerminatorInterface, NResultsInterface<0>, NOpdsInterface<0>)]
 pub struct UnreachableOp;
@@ -1518,13 +1504,12 @@ impl Parsable for UnreachableOp {
     }
 }
 
-impl_verify_succ!(UnreachableOp);
-
 // ============================================================================
 // Calls
 // ============================================================================
 
 /// Direct MIR call.
+#[verify_succ]
 #[def_op("cmir.call")]
 pub struct CallOp;
 
@@ -1659,8 +1644,6 @@ impl Parsable for CallOp {
             .into()
     }
 }
-
-impl_verify_succ!(CallOp);
 
 fn successor_operands_parser<'a>() -> impl Parser<StateStream<'a>, Output = Vec<Value>> {
     token('(')

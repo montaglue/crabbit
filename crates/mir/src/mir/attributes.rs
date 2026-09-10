@@ -1,17 +1,17 @@
 //! Attributes defined by the Rust MIR dialect.
 
 use combine::{Parser, between, parser::char::char, sep_by};
-use pliron::derive::def_attribute;
+use pliron::derive::{def_attribute, verify_succ};
 
 use crate::{
     context::Context,
-    impl_verify_succ,
     ir::irfmt::parsers::{int_parser, spaced},
     parsable::{Parsable, ParseResult, StateStream},
     printable::{self, Printable},
 };
 
 /// Indices for MIR aggregate insert/extract operations.
+#[verify_succ]
 #[def_attribute("cmir.insert_extract_value_indices")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct InsertExtractValueIndicesAttr(pub Vec<u32>);
@@ -54,8 +54,6 @@ impl Parsable for InsertExtractValueIndicesAttr {
             .into()
     }
 }
-
-impl_verify_succ!(InsertExtractValueIndicesAttr);
 
 pub fn register(_ctx: &mut Context) {
 }

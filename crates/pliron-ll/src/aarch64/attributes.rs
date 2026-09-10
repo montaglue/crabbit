@@ -1,11 +1,11 @@
 use combine::{Parser, between, many1, optional, satisfy, sep_by, token};
-use pliron::derive::def_attribute;
+use pliron::derive::{def_attribute, verify_succ};
 use thiserror::Error;
 
 use crate::{
     common_traits::Verify,
     context::Context,
-    impl_verify_succ, input_err,
+    input_err,
     ir::irfmt::parsers::{int_parser, spaced},
     ir::location::Located,
     parsable::{Parsable, ParseResult, StateStream},
@@ -22,11 +22,10 @@ use super::{
 /// A typed AArch64 register operand. Stored on instructions instead of a
 /// string so that only values [Register] can represent exist in the IR;
 /// malformed spellings are rejected at parse time.
+#[verify_succ]
 #[def_attribute("aarch64.register")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct RegisterAttr(pub Register);
-
-impl_verify_succ!(RegisterAttr);
 
 impl Printable for RegisterAttr {
     fn fmt(
@@ -149,11 +148,10 @@ impl core::fmt::Display for ConditionCode {
 /// A [ConditionCode] as an attribute. Stored on `b_cond`/`cset` instead of a
 /// raw immediate so an invalid condition code cannot exist in the IR;
 /// malformed spellings are rejected at parse time.
+#[verify_succ]
 #[def_attribute("aarch64.condition_code")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct ConditionCodeAttr(pub ConditionCode);
-
-impl_verify_succ!(ConditionCodeAttr);
 
 impl Printable for ConditionCodeAttr {
     fn fmt(
@@ -351,11 +349,10 @@ impl Parsable for FunctionAbiAttr {
 /// The module's [BinaryFixup]s as an attribute: the encode pass records them
 /// and MachO lowering consumes them directly, so a malformed fixup is a parse
 /// error instead of a silently dropped relocation.
+#[verify_succ]
 #[def_attribute("aarch64.fixups")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct FixupsAttr(pub Vec<BinaryFixup>);
-
-impl_verify_succ!(FixupsAttr);
 
 impl Printable for FixupsAttr {
     fn fmt(
