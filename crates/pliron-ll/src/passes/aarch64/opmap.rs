@@ -329,15 +329,24 @@ pub fn effective_sources(ctx: &Context, op: Ptr<Operation>) -> Vec<i64> {
     Vec::new()
 }
 
+/// Whether `op` already carries ANY attribution — the exact complement
+/// of what [effective_sources] reads, `inlined_from` included: an op
+/// stamped only with its call-site tag is attributed, and re-stamping it
+/// with `derived_from_many` (which outranks `inlined_from`) would clobber
+/// the call-site dimension of the backward lift.
+pub fn has_attribution(ctx: &Context, op: Ptr<Operation>) -> bool {
+    derived_from(ctx, op).is_some()
+        || derived_from_many(ctx, op).is_some()
+        || inlined_from(ctx, op).is_some()
+        || op_id(ctx, op).is_some()
+}
+
 /// A mid-end pass's adjoint in one call: stamp a newly created `new_op`
 /// as derived from `source_op`'s effective sources. No-op when
 /// attribution is off (source carries nothing) or the new op is already
 /// attributed.
 pub fn derive_new_from(ctx: &Context, new_op: Ptr<Operation>, source_op: Ptr<Operation>) {
-    if derived_from(ctx, new_op).is_some()
-        || derived_from_many(ctx, new_op).is_some()
-        || op_id(ctx, new_op).is_some()
-    {
+    if has_attribution(ctx, new_op) {
         return;
     }
     let sources = effective_sources(ctx, source_op);
@@ -365,10 +374,7 @@ pub fn derive_chain_from(ctx: &Context, value: crate::ir::value::Value, source_o
         if !seen.insert(op) {
             continue;
         }
-        if derived_from(ctx, op).is_some()
-            || derived_from_many(ctx, op).is_some()
-            || op_id(ctx, op).is_some()
-        {
+        if has_attribution(ctx, op) {
             continue;
         }
         set_derived_from_many(ctx, op, sources.clone());
@@ -406,10 +412,7 @@ pub fn stamp_expansion_before(
             break;
         }
         cursor = op.deref(ctx).get_next();
-        if derived_from(ctx, op).is_none()
-            && derived_from_many(ctx, op).is_none()
-            && op_id(ctx, op).is_none()
-        {
+        if !has_attribution(ctx, op) {
             set_derived_from_many(ctx, op, sources.clone());
         }
     }
@@ -571,5 +574,46 @@ impl IselStamper {
                 stamp_ops_after(ctx, candidate, None, from);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialects::builtin::{
+        attributes::IntegerAttr,
+        ops::ConstantOp,
+        types::{IntegerType, Signedness},
+    };
+    use crate::ir::op::Op as _;
+    use crate::utils::apint::APInt;
+    use std::num::NonZero;
+
+    fn constant(ctx: &mut Context) -> Ptr<Operation> {
+        let ty = IntegerType::get(ctx, 64, Signedness::Signless);
+        let attr = IntegerAttr::new(ty, APInt::from_u64(1, NonZero::new(64).unwrap()));
+        ConstantOp::new(ctx, Box::new(attr)).get_operation()
+    }
+
+    /// An op carrying only `inlined_from` is attributed: the derive
+    /// helpers must not clobber the call-site tag with a
+    /// `derived_from_many` (which would outrank it in
+    /// [effective_sources]).
+    #[test]
+    fn inlined_from_counts_as_attribution() {
+        let mut ctx = Context::new();
+        let source = constant(&mut ctx);
+        set_derived_from(&ctx, source, 7);
+        let inlined = constant(&mut ctx);
+        set_inlined_from(&ctx, inlined, 3);
+
+        assert!(has_attribution(&ctx, inlined));
+        derive_new_from(&ctx, inlined, source);
+        assert_eq!(derived_from_many(&ctx, inlined), None);
+        assert_eq!(
+            effective_sources(&ctx, inlined),
+            vec![3],
+            "call-site attribution must survive derive_new_from"
+        );
     }
 }

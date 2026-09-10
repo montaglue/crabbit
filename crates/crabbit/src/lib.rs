@@ -365,6 +365,16 @@ fn emit_object(
     let tracing = std::env::var("CRABBIT_TRACE").is_ok_and(|value| !value.is_empty() && value != "0");
 
     let mut analyses = AnalysisManager::default();
+    // The trace's "initial" entry must be captured BEFORE any lowering:
+    // with CRABBIT_EMIT_IR set, `emit_lowered_ir` runs lower-dialect-mir
+    // in place, and capturing afterwards would present post-lowering IR
+    // as "initial" while the recorded pipeline omitted the pass that ran.
+    let mut initial_dump = if tracing {
+        Some(imported.module.disp(&imported.ctx).to_string())
+    } else {
+        None
+    };
+    let mut emitted_lowering_dump = None;
     let emit_dir = emit_ir_dir();
     if let Some(dir) = &emit_dir {
         emit_lowered_ir(
@@ -373,10 +383,15 @@ fn emit_object(
             dir,
             &format!("{}-stair_rust", trace_project(sess)),
         )?;
+        if tracing {
+            // Record the stage the emit path ran outside the pipeline, so
+            // the trace still shows every pass that touched the module.
+            emitted_lowering_dump =
+                Some(imported.module.disp(&imported.ctx).to_string());
+        }
     }
     let mut pipeline = pipeline(target, emit_dir.is_some())?;
     let mut dump_dir = None;
-    let mut initial_dump = None;
     let version = trace_version();
     if tracing {
         // Per-pass IR dumps come from pliron's own PMConfig printing hooks;
@@ -390,7 +405,8 @@ fn emit_object(
         config.ir_printing_dir = Some(dir.clone());
         pipeline.set_config(config);
         dump_dir = Some(dir);
-        initial_dump = Some(imported.module.disp(&imported.ctx).to_string());
+    } else {
+        initial_dump = None;
     }
 
     let run_result = pipeline.run(imported.module, &mut imported.ctx, &mut analyses);
@@ -405,12 +421,19 @@ fn emit_object(
             kind: "compiler-run".to_string(),
             entry: None,
             source: None,
-            pipeline: dumps.iter().map(|(name, _)| name.clone()).collect(),
+            pipeline: emitted_lowering_dump
+                .iter()
+                .map(|_| "lower-dialect-mir(emit-ir)".to_string())
+                .chain(dumps.iter().map(|(name, _)| name.clone()))
+                .collect(),
             target: Some(sess.target.llvm_target.to_string()),
             note: Some(format!("version {version}")),
             extra: BTreeMap::new(),
         });
-        trace.push_dump("initial", initial_dump.unwrap_or_default());
+        trace.push_dump("initial", initial_dump.take().unwrap_or_default());
+        if let Some(dump) = emitted_lowering_dump.take() {
+            trace.push_dump("lower-dialect-mir(emit-ir)", dump);
+        }
         for (name, dump) in dumps {
             trace.push_dump(name, dump);
         }

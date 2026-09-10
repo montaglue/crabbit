@@ -169,6 +169,17 @@ pub fn collect_blockmap(
             .unwrap_or_default();
         let mut ranges = Vec::new();
         let mut stamped = false;
+        // Whether op-level stamping ran for this function at all: any op
+        // anywhere carrying attribution. Distinguishes blockmap-only mode
+        // (no per-op rows wanted) from a stamping run with a block the
+        // stampers missed — whose rows must SURVIVE as `unattributed`
+        // (roots::UNATTRIBUTED exists so nothing is silently dropped).
+        let op_stamping_ran = func.get_region(ctx).deref(ctx).iter(ctx).any(|block| {
+            block
+                .deref(ctx)
+                .iter(ctx)
+                .any(|inst| super::opmap::derived_from(ctx, inst).is_some())
+        });
         let mut offset = function_offset;
         let mut op_index = 0u32;
         for block in func.get_region(ctx).deref(ctx).iter(ctx) {
@@ -194,12 +205,12 @@ pub fn collect_blockmap(
                 op_index += 1;
                 size += bytes;
             }
-            // Op-level attribution rows are only kept when stamping ran:
-            // an all-UNATTRIBUTED block means blockmap-only mode.
-            if ops
-                .iter()
-                .all(|op| op.derived_from == super::opmap::roots::UNATTRIBUTED)
-            {
+            // Op-level attribution rows are only kept when stamping ran
+            // (blockmap-only mode wants block ranges, not op rows). When
+            // stamping DID run, an all-UNATTRIBUTED block is a stamping
+            // gap and its rows are kept so ingest reports the cost under
+            // the `unattributed` root instead of dropping it.
+            if !op_stamping_ran {
                 ops.clear();
             }
             let id = match blockmap_id(ctx, block) {

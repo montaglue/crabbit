@@ -82,12 +82,15 @@ IP_ONLY_RE = re.compile(r"^\s*([0-9a-fA-F]+)\s*$")
 
 
 # Synthetic derived_from roots (crates/pliron-ll/src/passes/aarch64/opmap.rs).
+# Keep in sync with `pub mod roots` in
+# crates/pliron-ll/src/passes/aarch64/opmap.rs (test_root_names_cover_rust_roots).
 ROOT_NAMES = {
     -1: "isel:abi",
     -2: "regalloc",
     -3: "frame",
     -4: "placement",
     -5: "unattributed",
+    -6: "midend",
 }
 
 
@@ -364,6 +367,15 @@ def main(argv=None):
         "(fallback when perf script cannot print sym+symoff)",
     )
     parser.add_argument(
+        "--smooth",
+        type=float,
+        default=1.0,
+        help="additive (Laplace) smoothing per block, in samples; the "
+        "default 1.0 floors unsampled blocks at the detection threshold "
+        "(a sampled zero means below resolution, not 'never executes'); "
+        "0 restores raw counts for A/B comparison",
+    )
+    parser.add_argument(
         "--load-bias",
         default="0",
         help="runtime load address minus link address, for --nm-binary "
@@ -389,7 +401,7 @@ def main(argv=None):
             with open(path) as handle:
                 ingest_lines(handle, blockmaps, counts, stats, op_counts, nm_table)
 
-    profile = normalize(blockmaps, counts, smooth=getattr(args, "smooth", 1.0))
+    profile = normalize(blockmaps, counts, smooth=args.smooth)
     with open(args.output, "w") as handle:
         json.dump(profile, handle, indent=2, sort_keys=True)
         handle.write("\n")

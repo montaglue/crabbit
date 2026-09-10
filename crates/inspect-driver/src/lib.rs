@@ -146,11 +146,11 @@ impl DriverHooks for ServeHooks {
     ) -> Result<pliron_inspect_driver::AttributionOps, String> {
         // Force attribution stamping on for the replay: stamping only adds
         // attributes, so the transformations (and therefore the boundary
-        // IR) match the original run exactly.
+        // IR) match the original run exactly. Unconditional insert — a
+        // stored config carrying an explicit "0" must not silently turn
+        // the replay into an empty attribution table.
         let mut config = config.clone();
-        config
-            .entry("CRABBIT_PROFILE_MAP".to_string())
-            .or_insert_with(|| "1".to_string());
+        config.insert("CRABBIT_PROFILE_MAP".to_string(), "1".to_string());
         research_config::with_env_config(&config, || {
             let hooks = analysis_hooks_factory()();
             let mut ctx = hooks.create_context();
@@ -334,9 +334,12 @@ impl DriverHooks for ServeHooks {
         }
         // The blockmap sidecar exists when the run's config enabled it
         // (the ids were stamped during the pipeline, under the same env).
-        let enabled = config
-            .get("CRABBIT_BLOCKMAP")
-            .is_some_and(|v| !v.is_empty() && v != "0");
+        // Mirror `blockmap_enabled()` exactly: either variable, non-empty,
+        // not "0" — the stamping and the sidecar must never diverge.
+        let set = |var: &str| {
+            config.get(var).is_some_and(|v| !v.is_empty() && v != "0")
+        };
+        let enabled = set("CRABBIT_BLOCKMAP") || set("CRABBIT_PROFILE_MAP");
         if !enabled {
             return vec![];
         }
