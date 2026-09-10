@@ -118,8 +118,8 @@ impl ServeHooks {
             return Ok(passes);
         }
         let backend = Self::backend(target)?;
-        let engine = research_config::RegallocEngine::from_env()?;
-        passes.extend(engine.machine_pipeline(backend)?);
+        let engine = research_config::RegallocEngine::from_env().map_err(|e| e.to_string())?;
+        passes.extend(engine.machine_pipeline(backend).map_err(|e| e.to_string())?);
         Ok(passes)
     }
 }
@@ -140,7 +140,8 @@ impl DriverHooks for ServeHooks {
     ) -> Result<Vec<String>, String> {
         research_config::with_env_config(config, || {
             Self::build_pipeline(target).map(|p| p.names())
-        })?
+        })
+        .map_err(|e| e.to_string())?
     }
 
     fn attribution_ops(
@@ -244,7 +245,8 @@ impl DriverHooks for ServeHooks {
                 functions.push((symbol, table));
             }
             Ok(pliron_inspect_driver::AttributionOps { ir, functions })
-        })?
+        })
+        .map_err(|e| e.to_string())?
     }
 
     fn run_pipeline(
@@ -286,7 +288,8 @@ impl DriverHooks for ServeHooks {
                 })
                 .map(|_| ())
                 .map_err(|e| format!("{e}"))
-        })?
+        })
+        .map_err(|e| e.to_string())?
     }
 
     fn write_artifact(

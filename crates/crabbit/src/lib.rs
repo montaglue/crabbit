@@ -139,18 +139,51 @@ impl CodegenBackend for CrabbitBackend {
     }
 }
 
+/// Errors from the object/kernel emission path. Fatal at the rustc
+/// boundary (reported via the session diagnostic context), typed through
+/// the chain so intermediate layers and the resident server can match.
+#[derive(Debug, thiserror::Error)]
+pub enum EmitError {
+    #[error(transparent)]
+    Config(#[from] research_config::ConfigError),
+    #[error(
+        "no crabbit object backend is registered for target `{target}` \
+         (parsed as `{triple}`); registered backends: {registered}"
+    )]
+    UnsupportedTarget {
+        target: String,
+        triple: String,
+        registered: String,
+    },
+    #[error("failed to {action} `{path}`: {source}")]
+    Io {
+        action: &'static str,
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{stage} failed: {reason}")]
+    Pipeline {
+        stage: &'static str,
+        reason: String,
+    },
+    #[error("CRABBIT_PTX_SM must be an integer SM number, got `{got}`")]
+    InvalidPtxSm { got: String },
+}
+
+fn io_err(action: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> EmitError {
+    let path = path.to_path_buf();
+    move |source| EmitError::Io { action, path, source }
+}
+
 /// Resolves the session's LLVM target triple against pliron-ll's backend
 /// registry, the way LLVM's `TargetRegistry::lookupTarget` resolves a
 /// `Target` from a triple.
-fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String> {
+fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, EmitError> {
     let triple = Triple::parse(&sess.target.llvm_target);
-    targets::lookup(&triple).ok_or_else(|| {
-        format!(
-            "no crabbit object backend is registered for target `{}` (parsed as `{triple}`); \
-             registered backends: {}",
-            sess.target.llvm_target,
-            targets::registered_names().collect::<Vec<_>>().join(", ")
-        )
+    targets::lookup(&triple).ok_or_else(|| EmitError::UnsupportedTarget {
+        target: sess.target.llvm_target.to_string(),
+        triple: triple.to_string(),
+        registered: targets::registered_names().collect::<Vec<_>>().join(", "),
     })
 }
 
@@ -158,7 +191,7 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, String>
 /// The CFG stays in pliron's block-argument form throughout; pliron's own
 /// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
 /// values directly in that form.
-fn pipeline(target: &TargetBackend, already_lowered: bool) -> Result<Passes, String> {
+fn pipeline(target: &TargetBackend, already_lowered: bool) -> Result<Passes, EmitError> {
     let mut passes = Passes::default();
     if already_lowered {
         // CRABBIT_EMIT_IR ran lower-dialect-mir standalone (to print the
@@ -215,17 +248,15 @@ fn emit_lowered_ir(
     module: pliron::context::Ptr<pliron::operation::Operation>,
     dir: &std::path::Path,
     stem: &str,
-) -> Result<(), String> {
+) -> Result<(), EmitError> {
     let mut lower = Passes::default();
     lower.add_pass(crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass);
     lower
         .run(module, ctx, &mut AnalysisManager::default())
-        .map_err(|error| format!("lower-dialect-mir (CRABBIT_EMIT_IR) failed: {error}"))?;
-    std::fs::create_dir_all(dir)
-        .map_err(|error| format!("failed to create CRABBIT_EMIT_IR dir: {error}"))?;
+        .map_err(|error| EmitError::Pipeline { stage: "lower-dialect-mir (CRABBIT_EMIT_IR)", reason: error.disp(ctx).to_string() })?;
+    std::fs::create_dir_all(dir).map_err(io_err("create CRABBIT_EMIT_IR dir", dir))?;
     let path = dir.join(format!("{stem}.plir"));
-    std::fs::write(&path, module.disp(ctx).to_string())
-        .map_err(|error| format!("failed to write `{}`: {error}", path.display()))
+    std::fs::write(&path, module.disp(ctx).to_string()).map_err(io_err("write", &path))
 }
 
 fn emit_ir_dir() -> Option<std::path::PathBuf> {
@@ -243,7 +274,7 @@ fn emit_kernels(
     object: &std::path::Path,
     tracing: bool,
     ir_stem: &str,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<std::path::PathBuf, EmitError> {
     let mut analyses = AnalysisManager::default();
     let emit_dir = emit_ir_dir();
     if let Some(dir) = &emit_dir {
@@ -258,8 +289,7 @@ fn emit_kernels(
     let mut dump_dir = None;
     if tracing {
         let dir = std::env::temp_dir().join(format!("crabbit-kernel-pass-dumps-{}", trace_version()));
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| format!("failed to create kernel pass dump directory: {error}"))?;
+        std::fs::create_dir_all(&dir).map_err(io_err("create kernel pass dump directory", &dir))?;
         pipeline.set_config(PMConfig {
             print_after_all: true,
             ir_printing_dir: Some(dir.clone()),
@@ -281,7 +311,10 @@ fn emit_kernels(
             })
         });
     }
-    run_result.map_err(|error| format!("kernel pipeline failed: {error}"))?;
+    run_result.map_err(|error| EmitError::Pipeline {
+        stage: "kernel pipeline",
+        reason: error.disp(&imported.ctx).to_string(),
+    })?;
 
     let mut target = pliron_ll::nvptx::PtxTarget::default();
     if let Ok(sm) = std::env::var("CRABBIT_PTX_SM")
@@ -289,24 +322,23 @@ fn emit_kernels(
     {
         target.sm = sm
             .parse()
-            .map_err(|_| format!("CRABBIT_PTX_SM must be an integer SM number, got `{sm}`"))?;
+            .map_err(|_| EmitError::InvalidPtxSm { got: sm.clone() })?;
     }
     let (ptx, linemap) =
         pliron_ll::nvptx::write_ptx_and_linemap_from_ir(&imported.ctx, imported.kernel_module, &target)
-            .map_err(|error| format!("NVPTX emission failed: {error}"))?;
+            .map_err(|error| EmitError::Pipeline {
+                stage: "NVPTX emission",
+                reason: error.to_string(),
+            })?;
 
     let sidecar = object.with_extension("ptx");
-    std::fs::write(&sidecar, &ptx).map_err(|error| {
-        format!("failed to write PTX sidecar `{}`: {error}", sidecar.display())
-    })?;
+    std::fs::write(&sidecar, &ptx).map_err(io_err("write PTX sidecar", &sidecar))?;
     // The GPU analogue of the machine op-map: `<ptx>.linemap.json` next to
     // every PTX we write (docs/PROFILE-FEEDBACK-BACKWARD.md, ncu leg).
-    let write_linemap = |ptx_path: &std::path::Path| -> Result<(), String> {
+    let write_linemap = |ptx_path: &std::path::Path| -> Result<(), EmitError> {
         if let Some(json) = &linemap {
             let path = ptx_path.with_extension("ptx.linemap.json");
-            std::fs::write(&path, json).map_err(|error| {
-                format!("failed to write PTX linemap `{}`: {error}", path.display())
-            })?;
+            std::fs::write(&path, json).map_err(io_err("write PTX linemap", &path))?;
         }
         Ok(())
     };
@@ -315,16 +347,19 @@ fn emit_kernels(
         && !out.is_empty()
     {
         std::fs::write(&out, &ptx)
-            .map_err(|error| format!("failed to write CRABBIT_PTX_OUT `{out}`: {error}"))?;
+            .map_err(io_err("write CRABBIT_PTX_OUT", std::path::Path::new(&out)))?;
         write_linemap(std::path::Path::new(&out))?;
     }
     if let Ok(out) = std::env::var("CRABBIT_LL_OUT")
         && !out.is_empty()
     {
         let ll = kernel_llvm_export::export_kernel_module(&mut imported.ctx, imported.kernel_module)
-            .map_err(|error| format!("LLVM IR export of the kernel module failed: {error}"))?;
+            .map_err(|error| EmitError::Pipeline {
+                stage: "LLVM IR export of the kernel module",
+                reason: error,
+            })?;
         std::fs::write(&out, ll)
-            .map_err(|error| format!("failed to write CRABBIT_LL_OUT `{out}`: {error}"))?;
+            .map_err(io_err("write CRABBIT_LL_OUT", std::path::Path::new(&out)))?;
     }
     Ok(sidecar)
 }
@@ -356,7 +391,7 @@ fn emit_object(
     sess: &Session,
     outputs: &OutputFilenames,
     imported: &mut importer::ImportedCrate,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<std::path::PathBuf, EmitError> {
     let target = backend_for_session(sess)?;
 
     // Per-pass IR dumps and the trace file cost O(passes × module text) in
@@ -398,8 +433,7 @@ fn emit_object(
         // the trace file is assembled from the dumped files after the run,
         // so a failed pipeline still leaves a trace up to the failing pass.
         let dir = std::env::temp_dir().join(format!("crabbit-pass-dumps-{version}"));
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| format!("failed to create pass dump directory: {error}"))?;
+        std::fs::create_dir_all(&dir).map_err(io_err("create pass dump directory", &dir))?;
         pipeline.set_config(PMConfig {
             print_after_all: true,
             ir_printing_dir: Some(dir.clone()),
@@ -440,32 +474,36 @@ fn emit_object(
         let trace_path = trace::project_trace_path(&project, &version);
         if let Err(error) = &run_result {
             let _ = trace.write(&trace_path);
-            return Err(error.to_string());
+            return Err(EmitError::Pipeline {
+                stage: "machine pipeline",
+                reason: error.disp(&imported.ctx).to_string(),
+            });
         }
-        trace
-            .write(&trace_path)
-            .map_err(|error| error.to_string())?;
+        trace.write(&trace_path).map_err(|error| EmitError::Pipeline {
+            stage: "trace write",
+            reason: error.to_string(),
+        })?;
     }
     if let Err(error) = run_result {
-        return Err(error.to_string());
+        return Err(EmitError::Pipeline {
+            stage: "machine pipeline",
+            reason: error.disp(&imported.ctx).to_string(),
+        });
     }
 
     // No invocation-temp component: the object must outlive the rustc
     // invocation (backend-tests inspect it after the build).
     let object = outputs.temp_path_for_cgu(OutputType::Object, "crabbit_rust", None);
     if let Some(parent) = object.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create object output directory: {error}"))?;
+        std::fs::create_dir_all(parent).map_err(io_err("create object output directory", parent))?;
     }
     let bytes = target
         .write_object(&mut imported.ctx, imported.module)
-        .map_err(|error| error.to_string())?;
-    std::fs::write(&object, bytes).map_err(|error| {
-        format!(
-            "failed to write object file `{}`: {error}",
-            object.display()
-        )
-    })?;
+        .map_err(|error| EmitError::Pipeline {
+            stage: "object write",
+            reason: error.to_string(),
+        })?;
+    std::fs::write(&object, bytes).map_err(io_err("write object file", &object))?;
     // CRABBIT_BLOCKMAP=1: the profile-feedback sidecar mapping final .text
     // byte ranges back to RA-position block ids, next to the object
     // (docs/PROFILE-FEEDBACK-PLAN.md). The ids were stamped by the
@@ -475,12 +513,7 @@ fn emit_object(
             pliron_ll::passes::aarch64::blockmap::blockmap_json_from_ir(&imported.ctx, imported.module)
     {
         let sidecar = object.with_extension("blockmap.json");
-        std::fs::write(&sidecar, json).map_err(|error| {
-            format!(
-                "failed to write blockmap sidecar `{}`: {error}",
-                sidecar.display()
-            )
-        })?;
+        std::fs::write(&sidecar, json).map_err(io_err("write blockmap sidecar", &sidecar))?;
     }
     if imported.kernel_count > 0 {
         emit_kernels(imported, &object, tracing, &format!("{}-crabbit_rust", trace_project(sess)))?;

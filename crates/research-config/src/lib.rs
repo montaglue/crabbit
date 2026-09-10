@@ -99,6 +99,35 @@ pub enum RegallocEngine {
     },
 }
 
+
+/// Errors from engine selection and environment configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("unknown value `{value}` for {var}; expected one of: {expected}")]
+    UnknownValue {
+        var: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    /// The engine exists but is compiled only into the research
+    /// composition dylib, not the backend currently running.
+    #[error(
+        "the `{engine}` engine is not linked into this backend: it lives in \
+         crates/crabbit-research (which needs the private research checkouts); \
+         build that crate and point -Zcodegen-backend at libcrabbit_research.so"
+    )]
+    EngineNotLinked { engine: String },
+    #[error("engine `{engine}` failed to construct its allocator: {reason}")]
+    EngineFactory { engine: String, reason: String },
+    #[error(
+        "CRABBIT_REGALLOC={engine} is not supported by the `{backend}` backend \
+         (no swappable allocator)"
+    )]
+    NoSwappableAllocator { engine: String, backend: String },
+    #[error("config key `{key}` is not a CRABBIT_* variable")]
+    NonCrabbitKey { key: String },
+}
+
 /// Compared by identity/name only: factories are `fn` pointers, whose
 /// address comparison the compiler rightly flags as meaningless.
 impl PartialEq for RegallocEngine {
@@ -116,19 +145,20 @@ impl PartialEq for RegallocEngine {
 impl Eq for RegallocEngine {}
 
 impl RegallocEngine {
-    pub fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let engine = env("CRABBIT_REGALLOC");
         match engine.as_deref() {
             None | Some("linear") => Ok(RegallocEngine::Linear),
             Some(name) => match engine_factory(name) {
                 Some((name, factory)) => Ok(RegallocEngine::External { name, factory }),
-                None if name == "eregalloc" => Err(
-                    "the `eregalloc` engine is not linked into this backend: it lives in \
-                     crates/crabbit-research (which needs the private research checkouts); \
-                     build that crate and point -Zcodegen-backend at libcrabbit_research.so"
-                        .to_string(),
-                ),
-                None => Err(unknown("CRABBIT_REGALLOC", name, "linear, eregalloc")),
+                None if name == "eregalloc" => Err(ConfigError::EngineNotLinked {
+                    engine: name.to_string(),
+                }),
+                None => Err(ConfigError::UnknownValue {
+                    var: "CRABBIT_REGALLOC",
+                    value: name.to_string(),
+                    expected: "linear, eregalloc",
+                }),
             },
         }
     }
@@ -136,28 +166,25 @@ impl RegallocEngine {
     /// The machine pipeline for `target` under this engine — the one place
     /// that knows which allocator the engine substitutes, so callers (the
     /// rustc backend and the resident server) never name engine types.
-    pub fn machine_pipeline(self, target: &TargetBackend) -> Result<Passes, String> {
+    pub fn machine_pipeline(self, target: &TargetBackend) -> Result<Passes, ConfigError> {
         match self {
             RegallocEngine::Linear => Ok(target.pipeline()),
             RegallocEngine::External { name, factory } => {
-                let allocator = factory()?;
+                let allocator = factory().map_err(|reason| ConfigError::EngineFactory {
+                    engine: name.to_string(),
+                    reason,
+                })?;
                 target.pipeline_with_allocator(allocator).ok_or_else(|| {
-                    format!(
-                        "CRABBIT_REGALLOC={name} is not supported by the `{}` backend (no swappable allocator)",
-                        target.name
-                    )
+                    ConfigError::NoSwappableAllocator {
+                        engine: name.to_string(),
+                        backend: target.name.to_string(),
+                    }
                 })
             }
         }
     }
 }
 
-/// Run `f` with the given/// Run `f` with the given `CRABBIT_*` environment configuration set,
-/// restoring the previous values afterwards (also on panic). Process
-/// environment is global, so this serializes: every configured pipeline
-/// section in a resident server runs under one lock. Only `CRABBIT_*`
-/// keys are accepted — the config channel must not become an arbitrary
-/// environment injector.
 /// Set or clear an environment variable under this crate's env-mutation
 /// discipline.
 ///
@@ -175,14 +202,20 @@ fn apply_env(key: &str, value: Option<&str>) {
     }
 }
 
+/// Run `f` with the given `CRABBIT_*` environment configuration set,
+/// restoring the previous values afterwards (also on panic). Process
+/// environment is global, so this serializes: every configured pipeline
+/// section in a resident server runs under one lock. Only `CRABBIT_*`
+/// keys are accepted — the config channel must not become an arbitrary
+/// environment injector.
 pub fn with_env_config<R>(
     config: &std::collections::BTreeMap<String, String>,
     f: impl FnOnce() -> R,
-) -> Result<R, String> {
+) -> Result<R, ConfigError> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     for key in config.keys() {
         if !key.starts_with("CRABBIT_") {
-            return Err(format!("config key `{key}` is not a CRABBIT_* variable"));
+            return Err(ConfigError::NonCrabbitKey { key: key.clone() });
         }
     }
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -206,10 +239,6 @@ pub fn with_env_config<R>(
         apply_env(key, Some(value));
     }
     Ok(f())
-}
-
-fn unknown(var: &str, value: &str, expected: &str) -> String {
-    format!("unknown value `{value}` for {var}; expected one of: {expected}")
 }
 
 fn env(var: &str) -> Option<String> {
@@ -255,7 +284,7 @@ mod tests {
         with_env(&[("CRABBIT_REGALLOC", "eregalloc")], || {
             // No engine registered in this crate's own tests: the message
             // must point at the composition dylib, not at a cargo feature.
-            let err = RegallocEngine::from_env().unwrap_err();
+            let err = RegallocEngine::from_env().unwrap_err().to_string();
             assert!(
                 err.contains("crabbit-research") && err.contains("libcrabbit_research.so"),
                 "{err}"
@@ -281,7 +310,9 @@ mod tests {
             .unwrap();
             // Passes has no Debug: destructure instead of unwrap_err.
             match engine.machine_pipeline(backend) {
-                Err(message) => assert_eq!(message, "factory ran"),
+                Err(error) => {
+                    assert!(error.to_string().contains("factory ran"), "{error}")
+                }
                 Ok(_) => panic!("factory error must propagate"),
             }
         });
@@ -293,7 +324,7 @@ mod tests {
             assert_eq!(RegallocEngine::from_env().unwrap(), RegallocEngine::Linear);
         });
         with_env(&[("CRABBIT_REGALLOC", "bogus")], || {
-            let err = RegallocEngine::from_env().unwrap_err();
+            let err = RegallocEngine::from_env().unwrap_err().to_string();
             assert!(
                 err.contains("CRABBIT_REGALLOC") && err.contains("linear, eregalloc"),
                 "{err}"
