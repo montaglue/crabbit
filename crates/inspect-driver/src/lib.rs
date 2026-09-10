@@ -22,6 +22,12 @@ pub struct CrabbitHooks {
     passes: Vec<std::cell::RefCell<Box<dyn Pass>>>,
 }
 
+impl Default for CrabbitHooks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrabbitHooks {
     pub fn new() -> Self {
         let passes: Vec<Box<dyn Pass>> = vec![
@@ -208,7 +214,6 @@ impl DriverHooks for ServeHooks {
                     func, &ctx,
                 )
                 .to_string();
-                drop(func_obj);
                 let mut table = Vec::new();
                 for block in region.deref(&ctx).iter(&ctx) {
                     for op in block.deref(&ctx).iter(&ctx) {

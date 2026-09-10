@@ -132,9 +132,7 @@ pub(crate) fn sign_extend(bits: u128, width: u32) -> i128 {
 }
 
 pub(crate) fn as_const_operand(ctx: &Context, value: Value) -> Option<ConstOperand> {
-    let Some(op) = value.defining_op().filter(|_| value.find_index(ctx) == 0) else {
-        return None;
-    };
+    let op = value.defining_op().filter(|_| value.find_index(ctx) == 0)?;
     if Operation::get_opid(op, ctx) != ConstantOp::get_opid_static() {
         return None;
     }
@@ -536,17 +534,15 @@ fn fold_int_cast(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
     };
 
     // trunc(zext(x)) -> x when the types round-trip exactly.
-    if *opid == TruncOp::get_opid_static() {
-        if let Some(input_op) = input.defining_op().filter(|_| input.find_index(ctx) == 0) {
-            if Operation::get_opid(input_op, ctx) == ZExtOp::get_opid_static() {
+    if *opid == TruncOp::get_opid_static()
+        && let Some(input_op) = input.defining_op().filter(|_| input.find_index(ctx) == 0)
+            && Operation::get_opid(input_op, ctx) == ZExtOp::get_opid_static() {
                 let source = input_op.deref(ctx).get_operand(0);
                 if source.get_type(ctx) == result_ty {
                     replace_op_with_value(ctx, op, source);
                     return true;
                 }
             }
-        }
-    }
 
     let Some(input) = as_const_operand(ctx, input) else {
         return false;

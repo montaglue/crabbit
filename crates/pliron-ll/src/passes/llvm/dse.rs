@@ -184,8 +184,8 @@ impl KeyTable {
         let alloca_root: Vec<bool> = roots.iter().map(|r| is_alloca(ctx, *r)).collect();
         let protected: Vec<bool> = roots.iter().map(|r| nonescaping.contains(r)).collect();
         let mut unknown_read = BitSet::new(n);
-        for k in 0..n {
-            if !protected[k] {
+        for (k, &is_protected) in protected.iter().enumerate() {
+            if !is_protected {
                 unknown_read.insert(k);
             }
         }

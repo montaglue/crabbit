@@ -139,9 +139,7 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
 /// When `cond` is `icmp eq/ne %c, <const i1>` with `%c` itself i1-typed,
 /// return `%c` and whether the comparison negates it.
 fn negated_i1_condition(ctx: &Context, cond: Value) -> Option<(Value, bool)> {
-    let Some(op) = cond.defining_op().filter(|_| cond.find_index(ctx) == 0) else {
-        return None;
-    };
+    let op = cond.defining_op().filter(|_| cond.find_index(ctx) == 0)?;
     if Operation::get_opid(op, ctx) != ICmpOp::get_opid_static() {
         return None;
     }

@@ -278,7 +278,10 @@ fn cse(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 }
                 None => {
                     let result = op.deref(ctx).get_result(0);
-                    scopes.last_mut().unwrap().insert(key, result);
+                    scopes
+                        .last_mut()
+                        .expect("one scope per dominator-preorder frame")
+                        .insert(key, result);
                 }
             }
         }

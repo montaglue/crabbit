@@ -132,7 +132,7 @@ pub(super) fn collect_object_parts(
             text.extend_from_slice(&encoded);
             let linkage = func.linkage(ctx);
             if matches!(linkage, LinkageAttr::External | LinkageAttr::Weak) {
-                let name = os.symbol_name(&func.get_symbol_name(ctx).to_string());
+                let name = os.symbol_name(func.get_symbol_name(ctx).as_ref());
                 if linkage == LinkageAttr::Weak {
                     weak_symbols.insert(name.clone());
                 }
@@ -146,7 +146,7 @@ pub(super) fn collect_object_parts(
         } else if let Some(global) = cast_operation::<LlvmGlobalOp>(ctx, op)
             && let Some(init) = crate::ll::global_data(ctx, &global)
         {
-            let name = os.symbol_name(&global.get_symbol_name(ctx).to_string());
+            let name = os.symbol_name(global.get_symbol_name(ctx).as_ref());
             let section = if crate::ll::global_is_thread_local(ctx, &global) {
                 // TLS template: all-zero pointer-free initializers need no
                 // file content (`.tbss`); anything else is `.tdata`.

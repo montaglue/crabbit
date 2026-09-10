@@ -192,7 +192,6 @@ pub fn collect_blockmap(
                 else {
                     continue;
                 };
-                drop(op_obj);
                 if bytes > 0 {
                     ops.push(OpRange {
                         index: op_index,
@@ -254,13 +253,12 @@ pub fn blockmap_json_from_ir(ctx: &Context, root: Ptr<Operation>) -> Option<Stri
         return None;
     }
     let mut top = serde_json::Map::new();
-    if let Some(midend) = super::opmap::midend_boundary_json(ctx, root) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&midend) {
+    if let Some(midend) = super::opmap::midend_boundary_json(ctx, root)
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&midend) {
             // Per-function fresh-id → source-parents table from the
             // RA-boundary pass; consumers must skip this non-function key.
             top.insert("__midend__".to_string(), parsed);
         }
-    }
     let value = serde_json::Value::Object(
         map.iter()
             .map(|(symbol, ranges)| {

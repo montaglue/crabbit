@@ -48,16 +48,16 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::AddOp::OPCODE,
-                lo.clone(),
-                lhs_lo.clone(),
-                rhs_lo.clone(),
+                lo,
+                lhs_lo,
+                rhs_lo,
             )
             .insert_at_back(entry, ctx);
-            aarch64_ops::cmp(ctx, lo.clone(), lhs_lo).insert_at_back(entry, ctx);
+            aarch64_ops::cmp(ctx, lo, lhs_lo).insert_at_back(entry, ctx);
             let carry = fresh_vreg(next_vreg);
             aarch64_ops::cset(
                 ctx,
-                carry.clone(),
+                carry,
                 condition_code(ICmpPredicateAttr::ULT),
             )
             .insert_at_back(entry, ctx);
@@ -65,41 +65,41 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::AddOp::OPCODE,
-                hi_sum.clone(),
+                hi_sum,
                 lhs_hi,
                 rhs_hi,
             )
             .insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, hi.clone(), hi_sum, carry)
+            aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, hi, hi_sum, carry)
                 .insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
         BinaryKind::Sub => {
             let (rhs_lo, rhs_hi) =
                 materialize_pair(ctx, entry, rhs, result_ty, next_vreg, "i128 rhs")?;
-            aarch64_ops::cmp(ctx, lhs_lo.clone(), rhs_lo.clone()).insert_at_back(entry, ctx);
+            aarch64_ops::cmp(ctx, lhs_lo, rhs_lo).insert_at_back(entry, ctx);
             let borrow = fresh_vreg(next_vreg);
             aarch64_ops::cset(
                 ctx,
-                borrow.clone(),
+                borrow,
                 condition_code(ICmpPredicateAttr::ULT),
             )
             .insert_at_back(entry, ctx);
             let lo = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::SubOp::OPCODE, lo.clone(), lhs_lo, rhs_lo)
+            aarch64_ops::binary(ctx, aarch64_ops::SubOp::OPCODE, lo, lhs_lo, rhs_lo)
                 .insert_at_back(entry, ctx);
             let hi_sub = fresh_vreg(next_vreg);
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::SubOp::OPCODE,
-                hi_sub.clone(),
+                hi_sub,
                 lhs_hi,
                 rhs_hi,
             )
             .insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::SubOp::OPCODE, hi.clone(), hi_sub, borrow)
+            aarch64_ops::binary(ctx, aarch64_ops::SubOp::OPCODE, hi, hi_sub, borrow)
                 .insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
@@ -110,25 +110,25 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::MulOp::OPCODE,
-                lo.clone(),
-                lhs_lo.clone(),
-                rhs_lo.clone(),
+                lo,
+                lhs_lo,
+                rhs_lo,
             )
             .insert_at_back(entry, ctx);
             let high_low = fresh_vreg(next_vreg);
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::UmulhOp::OPCODE,
-                high_low.clone(),
-                lhs_lo.clone(),
-                rhs_lo.clone(),
+                high_low,
+                lhs_lo,
+                rhs_lo,
             )
             .insert_at_back(entry, ctx);
             let cross_a = fresh_vreg(next_vreg);
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::MulOp::OPCODE,
-                cross_a.clone(),
+                cross_a,
                 lhs_hi,
                 rhs_lo,
             )
@@ -137,7 +137,7 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::MulOp::OPCODE,
-                cross_b.clone(),
+                cross_b,
                 lhs_lo,
                 rhs_hi,
             )
@@ -146,7 +146,7 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::AddOp::OPCODE,
-                hi_partial.clone(),
+                hi_partial,
                 high_low,
                 cross_a,
             )
@@ -155,7 +155,7 @@ pub(super) fn lower_binary_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::AddOp::OPCODE,
-                hi.clone(),
+                hi,
                 hi_partial,
                 cross_b,
             )
@@ -198,9 +198,9 @@ pub(super) fn lower_binary_128(
                 materialize_pair(ctx, entry, rhs, result_ty, next_vreg, "i128 rhs")?;
             let opcode = opcode(kind);
             let lo = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, opcode, lo.clone(), lhs_lo, rhs_lo).insert_at_back(entry, ctx);
+            aarch64_ops::binary(ctx, opcode, lo, lhs_lo, rhs_lo).insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, opcode, hi.clone(), lhs_hi, rhs_hi).insert_at_back(entry, ctx);
+            aarch64_ops::binary(ctx, opcode, hi, lhs_hi, rhs_hi).insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
         // Unreachable from the crabbit importer, which lowers 128-bit
@@ -243,7 +243,7 @@ pub(super) fn lower_compare_value(
     )?;
     aarch64_ops::cmp(ctx, lhs, rhs).insert_at_back(entry, ctx);
     let dst = fresh_vreg(next_vreg);
-    aarch64_ops::cset(ctx, dst.clone(), condition_code(compare.predicate))
+    aarch64_ops::cset(ctx, dst, condition_code(compare.predicate))
         .insert_at_back(entry, ctx);
     Ok(dst)
 }
@@ -321,8 +321,8 @@ fn lower_compare_128(
             let hi_cmp = emit_compare_bit(
                 ctx,
                 entry,
-                lhs_hi.clone(),
-                rhs_hi.clone(),
+                lhs_hi,
+                rhs_hi,
                 hi_pred,
                 next_vreg,
             );
@@ -359,7 +359,7 @@ fn emit_compare_bit(
 ) -> Register {
     aarch64_ops::cmp(ctx, lhs, rhs).insert_at_back(entry, ctx);
     let dst = fresh_vreg(next_vreg);
-    aarch64_ops::cset(ctx, dst.clone(), condition_code(predicate))
+    aarch64_ops::cset(ctx, dst, condition_code(predicate))
         .insert_at_back(entry, ctx);
     dst
 }
@@ -373,7 +373,7 @@ fn emit_logic_bit(
     next_vreg: &mut usize,
 ) -> STAIRResult<Register> {
     let dst = fresh_vreg(next_vreg);
-    aarch64_ops::binary(ctx, opcode, dst.clone(), lhs, rhs).insert_at_back(entry, ctx);
+    aarch64_ops::binary(ctx, opcode, dst, lhs, rhs).insert_at_back(entry, ctx);
     Ok(dst)
 }
 
@@ -401,7 +401,7 @@ fn lower_shift_right_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::LsrOp::OPCODE,
-            lo_part.clone(),
+            lo_part,
             lo,
             shift_reg,
         )
@@ -412,8 +412,8 @@ fn lower_shift_right_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::ShlOp::OPCODE,
-            hi_part.clone(),
-            hi.clone(),
+            hi_part,
+            hi,
             inv_shift,
         )
         .insert_at_back(entry, ctx);
@@ -421,24 +421,24 @@ fn lower_shift_right_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::OrOp::OPCODE,
-            new_lo.clone(),
+            new_lo,
             lo_part,
             hi_part,
         )
         .insert_at_back(entry, ctx);
         let new_hi = fresh_vreg(next_vreg);
         let shift_reg = fresh_shift(ctx, entry, shift, next_vreg)?;
-        aarch64_ops::binary(ctx, hi_shift_opcode, new_hi.clone(), hi, shift_reg)
+        aarch64_ops::binary(ctx, hi_shift_opcode, new_hi, hi, shift_reg)
             .insert_at_back(entry, ctx);
         Ok(LoweredValue::RegPair(new_lo, new_hi))
     } else {
         let new_lo = if shift == 64 {
-            hi.clone()
+            hi
         } else {
             let shift_reg = fresh_vreg(next_vreg);
             materialize_u64_immediate(ctx, entry, shift_reg, (shift - 64) as u64);
             let shifted = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, hi_shift_opcode, shifted.clone(), hi.clone(), shift_reg)
+            aarch64_ops::binary(ctx, hi_shift_opcode, shifted, hi, shift_reg)
                 .insert_at_back(entry, ctx);
             shifted
         };
@@ -446,12 +446,12 @@ fn lower_shift_right_128(
             // The high half becomes the sign extension of the old high half.
             let sixty_three = fresh_shift(ctx, entry, 63, next_vreg)?;
             let sign = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::AsrOp::OPCODE, sign.clone(), hi, sixty_three)
+            aarch64_ops::binary(ctx, aarch64_ops::AsrOp::OPCODE, sign, hi, sixty_three)
                 .insert_at_back(entry, ctx);
             sign
         } else {
             let zero = fresh_vreg(next_vreg);
-            materialize_u64_immediate(ctx, entry, zero.clone(), 0);
+            materialize_u64_immediate(ctx, entry, zero, 0);
             zero
         };
         Ok(LoweredValue::RegPair(new_lo, new_hi))
@@ -488,40 +488,40 @@ fn lower_dynamic_shift_128(
                        rhs: Register,
                        next_vreg: &mut usize| {
         let dst = fresh_vreg(next_vreg);
-        aarch64_ops::binary(ctx, opcode, dst.clone(), lhs, rhs).insert_at_back(entry, ctx);
+        aarch64_ops::binary(ctx, opcode, dst, lhs, rhs).insert_at_back(entry, ctx);
         dst
     };
     let constant = |ctx: &mut Context, value: u64, next_vreg: &mut usize| {
         let dst = fresh_vreg(next_vreg);
-        materialize_u64_immediate(ctx, entry, dst.clone(), value);
+        materialize_u64_immediate(ctx, entry, dst, value);
         dst
     };
     use aarch64_ops::{AndOp, AsrOp, LsrOp, OrOp, ShlOp, SubOp};
 
     // inv = 63 - (n & 63), the carry shift with the n == 0 case folded out.
     let c63 = constant(ctx, 63, next_vreg);
-    let n63 = emit_binary(ctx, AndOp::OPCODE, amount.clone(), c63.clone(), next_vreg);
-    let inv = emit_binary(ctx, SubOp::OPCODE, c63.clone(), n63, next_vreg);
+    let n63 = emit_binary(ctx, AndOp::OPCODE, amount, c63, next_vreg);
+    let inv = emit_binary(ctx, SubOp::OPCODE, c63, n63, next_vreg);
 
     // mask_lo = all-ones when n < 64, else zero; mask_hi is its complement.
     let c64 = constant(ctx, 64, next_vreg);
-    aarch64_ops::cmp(ctx, amount.clone(), c64).insert_at_back(entry, ctx);
+    aarch64_ops::cmp(ctx, amount, c64).insert_at_back(entry, ctx);
     let lt64 = fresh_vreg(next_vreg);
-    aarch64_ops::cset(ctx, lt64.clone(), condition_code(ICmpPredicateAttr::ULT))
+    aarch64_ops::cset(ctx, lt64, condition_code(ICmpPredicateAttr::ULT))
         .insert_at_back(entry, ctx);
     let ge64 = fresh_vreg(next_vreg);
-    aarch64_ops::cset(ctx, ge64.clone(), condition_code(ICmpPredicateAttr::UGE))
+    aarch64_ops::cset(ctx, ge64, condition_code(ICmpPredicateAttr::UGE))
         .insert_at_back(entry, ctx);
     let zero = constant(ctx, 0, next_vreg);
-    let mask_lo = emit_binary(ctx, SubOp::OPCODE, zero.clone(), lt64, next_vreg);
+    let mask_lo = emit_binary(ctx, SubOp::OPCODE, zero, lt64, next_vreg);
     let mask_hi = emit_binary(ctx, SubOp::OPCODE, zero, ge64, next_vreg);
 
     let select = |ctx: &mut Context,
                   low_case: Register,
                   high_case: Register,
                   next_vreg: &mut usize| {
-        let low = emit_binary(ctx, AndOp::OPCODE, low_case, mask_lo.clone(), next_vreg);
-        let high = emit_binary(ctx, AndOp::OPCODE, high_case, mask_hi.clone(), next_vreg);
+        let low = emit_binary(ctx, AndOp::OPCODE, low_case, mask_lo, next_vreg);
+        let high = emit_binary(ctx, AndOp::OPCODE, high_case, mask_hi, next_vreg);
         emit_binary(ctx, OrOp::OPCODE, low, high, next_vreg)
     };
 
@@ -529,13 +529,13 @@ fn lower_dynamic_shift_128(
         DynamicShift::Shl => {
             // shl_lo = lo << (n mod 64): the n < 64 low half, and (for
             // n >= 64) exactly lo << (n - 64), the high half.
-            let shl_lo = emit_binary(ctx, ShlOp::OPCODE, lo.clone(), amount.clone(), next_vreg);
+            let shl_lo = emit_binary(ctx, ShlOp::OPCODE, lo, amount, next_vreg);
             let shl_hi = emit_binary(ctx, ShlOp::OPCODE, hi, amount, next_vreg);
             let one = constant(ctx, 1, next_vreg);
             let lo_half = emit_binary(ctx, LsrOp::OPCODE, lo, one, next_vreg);
             let carry = emit_binary(ctx, LsrOp::OPCODE, lo_half, inv, next_vreg);
             let hi_low_case = emit_binary(ctx, OrOp::OPCODE, shl_hi, carry, next_vreg);
-            let new_lo = emit_binary(ctx, AndOp::OPCODE, shl_lo.clone(), mask_lo.clone(), next_vreg);
+            let new_lo = emit_binary(ctx, AndOp::OPCODE, shl_lo, mask_lo, next_vreg);
             let new_hi = select(ctx, hi_low_case, shl_lo, next_vreg);
             Ok(LoweredValue::RegPair(new_lo, new_hi))
         }
@@ -548,19 +548,19 @@ fn lower_dynamic_shift_128(
             // hi_shifted = hi >>(s) (n mod 64): the n < 64 high half, and
             // (for n >= 64) exactly hi >>(s) (n - 64), the low half.
             let hi_shifted =
-                emit_binary(ctx, hi_shift_opcode, hi.clone(), amount.clone(), next_vreg);
+                emit_binary(ctx, hi_shift_opcode, hi, amount, next_vreg);
             let lsr_lo = emit_binary(ctx, LsrOp::OPCODE, lo, amount, next_vreg);
             let one = constant(ctx, 1, next_vreg);
-            let hi_double = emit_binary(ctx, ShlOp::OPCODE, hi.clone(), one, next_vreg);
+            let hi_double = emit_binary(ctx, ShlOp::OPCODE, hi, one, next_vreg);
             let carry = emit_binary(ctx, ShlOp::OPCODE, hi_double, inv, next_vreg);
             let lo_low_case = emit_binary(ctx, OrOp::OPCODE, lsr_lo, carry, next_vreg);
-            let new_lo = select(ctx, lo_low_case, hi_shifted.clone(), next_vreg);
+            let new_lo = select(ctx, lo_low_case, hi_shifted, next_vreg);
             let new_hi = if kind == DynamicShift::Ashr {
                 let sixty_three = constant(ctx, 63, next_vreg);
                 let sign = emit_binary(ctx, AsrOp::OPCODE, hi, sixty_three, next_vreg);
                 select(ctx, hi_shifted, sign, next_vreg)
             } else {
-                emit_binary(ctx, AndOp::OPCODE, hi_shifted, mask_lo.clone(), next_vreg)
+                emit_binary(ctx, AndOp::OPCODE, hi_shifted, mask_lo, next_vreg)
             };
             Ok(LoweredValue::RegPair(new_lo, new_hi))
         }
@@ -584,8 +584,8 @@ fn lower_shift_left_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::ShlOp::OPCODE,
-            new_lo.clone(),
-            lo.clone(),
+            new_lo,
+            lo,
             shift_reg,
         )
         .insert_at_back(entry, ctx);
@@ -594,7 +594,7 @@ fn lower_shift_left_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::LsrOp::OPCODE,
-            carry.clone(),
+            carry,
             lo,
             inv_shift,
         )
@@ -604,7 +604,7 @@ fn lower_shift_left_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::ShlOp::OPCODE,
-            hi_part.clone(),
+            hi_part,
             hi,
             shift_reg,
         )
@@ -613,7 +613,7 @@ fn lower_shift_left_128(
         aarch64_ops::binary(
             ctx,
             aarch64_ops::OrOp::OPCODE,
-            new_hi.clone(),
+            new_hi,
             hi_part,
             carry,
         )
@@ -630,7 +630,7 @@ fn lower_shift_left_128(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::ShlOp::OPCODE,
-                shifted.clone(),
+                shifted,
                 lo,
                 shift_reg,
             )

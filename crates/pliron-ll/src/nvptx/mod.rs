@@ -408,7 +408,7 @@ fn classify(ctx: &Context, ty: TypeHandle) -> STAIRResult<RegClass> {
 fn width_of(ctx: &Context, ty: TypeHandle) -> STAIRResult<u32> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
-        return Ok(int_ty.width() as u32);
+        return Ok(int_ty.width());
     }
     if ty_ref.downcast_ref::<PointerType>().is_some() {
         return Ok(64);
@@ -1640,6 +1640,10 @@ enum BinaryIntKind {
     AShr,
 }
 
+// The variants deliberately keep LLVM's opcode names (fadd, fsub, ...);
+// stripping the shared F would leave names that collide conceptually with
+// the integer BinaryKind above.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BinaryFloatKind {
     FAdd,

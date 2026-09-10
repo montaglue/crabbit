@@ -201,11 +201,10 @@ fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> STAIRResult<()> {
             alloca.get_operation(),
         );
         insert_after = slot_alloca.get_operation();
-        if let Some(name) = &base_name {
-            if let Ok(slot_name) = Identifier::try_from(format!("{name}_f{idx}")) {
+        if let Some(name) = &base_name
+            && let Ok(slot_name) = Identifier::try_from(format!("{name}_f{idx}")) {
                 set_operation_result_name(ctx, slot_alloca.get_operation(), 0, Some(slot_name));
             }
-        }
         slot_allocas.push(slot_alloca.get_result(ctx));
     }
 
@@ -438,10 +437,7 @@ fn resolve_leaf(
 ) -> Value {
     let mut current = aggregate;
     let mut path = path.to_vec();
-    loop {
-        let Some(op) = current.defining_op().filter(|_| current.find_index(ctx) == 0) else {
-            break;
-        };
+    while let Some(op) = current.defining_op().filter(|_| current.find_index(ctx) == 0) {
         let opid = Operation::get_opid(op, ctx);
         if opid == UndefOp::get_opid_static() {
             let undef = UndefOp::new(ctx, leaf_ty);

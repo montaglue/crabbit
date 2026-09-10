@@ -119,11 +119,10 @@ impl Pass for LlvmToAarch64IselPass {
 
         for op_ptr in llvm_ops.iter().copied() {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
-            if let Some(llvm_func) = op_obj.downcast_ref::<LlvmFuncOp>() {
-                if !llvm_func.is_declaration(ctx) {
+            if let Some(llvm_func) = op_obj.downcast_ref::<LlvmFuncOp>()
+                && !llvm_func.is_declaration(ctx) {
                     lower_function(ctx, llvm_func, body, &globals, &data_globals, &tls_globals)?;
                 }
-            }
         }
 
         for op_ptr in llvm_ops {
@@ -167,7 +166,7 @@ impl MachineFunctionPlan {
     ) -> STAIRResult<Self> {
         let name = llvm_func.get_symbol_name(ctx);
         let abi = function_abi(ctx, llvm_func)?;
-        let linkage = validate_linkage(&name.to_string(), llvm_func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
+        let linkage = validate_linkage(name.as_ref(), llvm_func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
         let func = Aarch64FuncOp::new(ctx, name, linkage);
         func.get_operation().insert_at_back(module_body, ctx);
         let entry = func.entry_block(ctx);
@@ -378,14 +377,14 @@ fn lower_function(
             AbiLocation::Stack(offset) => {
                 if is_128_bit_integer(ctx, arg.get_type(ctx)) {
                     let lo = fresh_vreg(&mut next_vreg);
-                    aarch64_ops::ldr_stack_arg(ctx, lo.clone(), offset).insert_at_back(entry, ctx);
+                    aarch64_ops::ldr_stack_arg(ctx, lo, offset).insert_at_back(entry, ctx);
                     let hi = fresh_vreg(&mut next_vreg);
-                    aarch64_ops::ldr_stack_arg(ctx, hi.clone(), offset + 8)
+                    aarch64_ops::ldr_stack_arg(ctx, hi, offset + 8)
                         .insert_at_back(entry, ctx);
                     values.insert(arg, LoweredValue::RegPair(lo, hi));
                 } else {
                     let dst = fresh_vreg(&mut next_vreg);
-                    aarch64_ops::ldr_stack_arg(ctx, dst.clone(), offset).insert_at_back(entry, ctx);
+                    aarch64_ops::ldr_stack_arg(ctx, dst, offset).insert_at_back(entry, ctx);
                     values.insert(arg, LoweredValue::Reg(dst));
                 }
             }
@@ -556,7 +555,7 @@ fn lower_function(
                     // Not a byte global: take the address of a function
                     // defined in this module.
                     let dst = fresh_vreg(&mut next_vreg);
-                    aarch64_ops::adr_function(ctx, dst.clone(), symbol)
+                    aarch64_ops::adr_function(ctx, dst, symbol)
                         .insert_at_back(insert_block, ctx);
                     values.insert(addr.get_result(ctx), LoweredValue::Reg(dst));
                 }
@@ -631,7 +630,7 @@ fn lower_function(
                             let hi = sign_extend_high_half(
                                 ctx,
                                 insert_block,
-                                lo.clone(),
+                                lo,
                                 &mut next_vreg,
                             );
                             values.insert(result, LoweredValue::RegPair(lo, hi));
@@ -660,33 +659,33 @@ fn lower_function(
                                 "sext input",
                             )?;
                             let sign_reg = fresh_vreg(&mut next_vreg);
-                            materialize_u64_immediate(ctx, insert_block, sign_reg.clone(), sign_bit);
+                            materialize_u64_immediate(ctx, insert_block, sign_reg, sign_bit);
                             let flipped = fresh_vreg(&mut next_vreg);
                             aarch64_ops::binary(
                                 ctx,
                                 aarch64_ops::XorOp::OPCODE,
-                                flipped.clone(),
+                                flipped,
                                 src,
-                                sign_reg.clone(),
+                                sign_reg,
                             )
                             .insert_at_back(insert_block, ctx);
                             let extended = fresh_vreg(&mut next_vreg);
                             aarch64_ops::binary(
                                 ctx,
                                 aarch64_ops::SubOp::OPCODE,
-                                extended.clone(),
+                                extended,
                                 flipped,
                                 sign_reg,
                             )
                             .insert_at_back(insert_block, ctx);
                             if let Some(mask) = dst_mask {
                                 let mask_reg = fresh_vreg(&mut next_vreg);
-                                materialize_u64_immediate(ctx, insert_block, mask_reg.clone(), mask);
+                                materialize_u64_immediate(ctx, insert_block, mask_reg, mask);
                                 let dst = fresh_vreg(&mut next_vreg);
                                 aarch64_ops::binary(
                                     ctx,
                                     aarch64_ops::AndOp::OPCODE,
-                                    dst.clone(),
+                                    dst,
                                     extended,
                                     mask_reg,
                                 )
@@ -696,7 +695,7 @@ fn lower_function(
                                 let hi = sign_extend_high_half(
                                     ctx,
                                     insert_block,
-                                    extended.clone(),
+                                    extended,
                                     &mut next_vreg,
                                 );
                                 values.insert(result, LoweredValue::RegPair(extended, hi));
@@ -721,7 +720,7 @@ fn lower_function(
                         aarch64_ops::binary(
                             ctx,
                             aarch64_ops::AndOp::OPCODE,
-                            dst.clone(),
+                            dst,
                             src,
                             mask_reg,
                         )
@@ -831,12 +830,12 @@ fn lower_function(
                     match (intrinsic, operands.as_slice()) {
                         (FpMathIntrinsic::Unary(d, s), [src]) => {
                             let opcode = if fp == FpKind::F64 { d } else { s };
-                            aarch64_ops::unary(ctx, opcode, dst.clone(), src.clone())
+                            aarch64_ops::unary(ctx, opcode, dst, *src)
                                 .insert_at_back(insert_block, ctx);
                         }
                         (FpMathIntrinsic::Binary(d, s), [lhs, rhs]) => {
                             let opcode = if fp == FpKind::F64 { d } else { s };
-                            aarch64_ops::binary(ctx, opcode, dst.clone(), lhs.clone(), rhs.clone())
+                            aarch64_ops::binary(ctx, opcode, dst, *lhs, *rhs)
                                 .insert_at_back(insert_block, ctx);
                         }
                         _ => {
@@ -1241,24 +1240,24 @@ fn lower_function(
                     aarch64_ops::binary(
                         ctx,
                         div_opcode,
-                        quotient.clone(),
-                        lhs.clone(),
-                        rhs.clone(),
+                        quotient,
+                        lhs,
+                        rhs,
                     )
                     .insert_at_back(insert_block, ctx);
                     let product = fresh_vreg(&mut next_vreg);
                     aarch64_ops::binary(
                         ctx,
                         aarch64_ops::MulOp::OPCODE,
-                        product.clone(),
+                        product,
                         quotient,
                         rhs,
                     )
                     .insert_at_back(insert_block, ctx);
-                    aarch64_ops::binary(ctx, aarch64_ops::SubOp::OPCODE, dst.clone(), lhs, product)
+                    aarch64_ops::binary(ctx, aarch64_ops::SubOp::OPCODE, dst, lhs, product)
                         .insert_at_back(insert_block, ctx);
                 } else {
-                    aarch64_ops::binary(ctx, opcode(kind), dst.clone(), lhs, rhs)
+                    aarch64_ops::binary(ctx, opcode(kind), dst, lhs, rhs)
                         .insert_at_back(insert_block, ctx);
                 }
                 let dst = normalize_integer_reg(
@@ -1746,14 +1745,13 @@ pub(super) fn materialize_typed(
     // Reconcile packed-scalar and field-wise aggregate representations of
     // the value with the type the use site expects.
     let value = adapt_value_to_type(ctx, value, ty)?;
-    if let LoweredValue::Aggregate(fields) = &value {
-        if fields.len() > 1 {
+    if let LoweredValue::Aggregate(fields) = &value
+        && fields.len() > 1 {
             return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
                 "cannot materialize {context}: multi-field aggregate of type {}",
                 pliron::printable::Printable::disp(&ty, ctx)
             ))));
         }
-    }
     if is_128_bit_integer(ctx, ty) {
         let (lo, _) = materialize_pair(ctx, entry, value, ty, next_vreg, context)?;
         return Ok(lo);
@@ -1812,10 +1810,10 @@ pub(super) fn materialize_pair(
                 .map(|(_, signed)| signed)
                 .unwrap_or(false)
             {
-                sign_extend_high_half(ctx, entry, lo.clone(), next_vreg)
+                sign_extend_high_half(ctx, entry, lo, next_vreg)
             } else {
                 let hi = fresh_vreg(next_vreg);
-                materialize_u64_immediate(ctx, entry, hi.clone(), 0);
+                materialize_u64_immediate(ctx, entry, hi, 0);
                 hi
             };
             Ok((lo, hi))
@@ -1838,17 +1836,17 @@ fn sign_extend_high_half(
     next_vreg: &mut usize,
 ) -> Register {
     let sign = fresh_vreg(next_vreg);
-    materialize_u64_immediate(ctx, entry, sign.clone(), 63);
+    materialize_u64_immediate(ctx, entry, sign, 63);
     let hi = fresh_vreg(next_vreg);
-    aarch64_ops::binary(ctx, aarch64_ops::LsrOp::OPCODE, hi.clone(), lo, sign)
+    aarch64_ops::binary(ctx, aarch64_ops::LsrOp::OPCODE, hi, lo, sign)
         .insert_at_back(entry, ctx);
     let mask = fresh_vreg(next_vreg);
-    materialize_u64_immediate(ctx, entry, mask.clone(), 0u64.wrapping_sub(1));
+    materialize_u64_immediate(ctx, entry, mask, 0u64.wrapping_sub(1));
     aarch64_ops::binary(
         ctx,
         aarch64_ops::MulOp::OPCODE,
-        hi.clone(),
-        hi.clone(),
+        hi,
+        hi,
         mask,
     )
     .insert_at_back(entry, ctx);
@@ -1884,7 +1882,7 @@ pub(super) fn materialize(
         }
         LoweredValue::CStr { label, bytes, .. } => {
             let dst = fresh_vreg(next_vreg);
-            aarch64_ops::adr_literal(ctx, dst.clone(), label, bytes).insert_at_back(entry, ctx);
+            aarch64_ops::adr_literal(ctx, dst, label, bytes).insert_at_back(entry, ctx);
             Ok(dst)
         }
         LoweredValue::TaggedLen(len) => {
@@ -1902,7 +1900,7 @@ pub(super) fn materialize(
                 aarch64_ops::binary(
                     ctx,
                     aarch64_ops::AddOp::OPCODE,
-                    dst.clone(),
+                    dst,
                     base,
                     offset_reg,
                 )
@@ -1912,7 +1910,7 @@ pub(super) fn materialize(
         }
         LoweredValue::StackAddr(slot) => {
             let dst = fresh_vreg(next_vreg);
-            aarch64_ops::add_sp_offset(ctx, dst.clone(), slot.offset).insert_at_back(entry, ctx);
+            aarch64_ops::add_sp_offset(ctx, dst, slot.offset).insert_at_back(entry, ctx);
             Ok(dst)
         }
         LoweredValue::Compare(compare) => lower_compare_value(ctx, entry, compare, next_vreg),
@@ -2025,7 +2023,7 @@ pub(super) fn normalize_integer_reg(
     aarch64_ops::binary(
         ctx,
         aarch64_ops::AndOp::OPCODE,
-        masked.clone(),
+        masked,
         reg,
         mask_reg,
     )
@@ -2041,16 +2039,16 @@ pub(super) fn normalize_integer_reg(
     aarch64_ops::binary(
         ctx,
         aarch64_ops::XorOp::OPCODE,
-        flipped.clone(),
+        flipped,
         masked,
-        sign_bit_reg.clone(),
+        sign_bit_reg,
     )
     .insert_at_back(entry, ctx);
     let extended = fresh_vreg(next_vreg);
     aarch64_ops::binary(
         ctx,
         aarch64_ops::SubOp::OPCODE,
-        extended.clone(),
+        extended,
         flipped,
         sign_bit_reg,
     )
@@ -2177,10 +2175,10 @@ pub(super) fn block_arg_value(
 /// The registers backing a block argument's [LoweredValue], in leaf order.
 pub(super) fn block_arg_registers(value: &LoweredValue, out: &mut Vec<Register>) {
     match value {
-        LoweredValue::Reg(reg) => out.push(reg.clone()),
+        LoweredValue::Reg(reg) => out.push(*reg),
         LoweredValue::RegPair(lo, hi) => {
-            out.push(lo.clone());
-            out.push(hi.clone());
+            out.push(*lo);
+            out.push(*hi);
         }
         LoweredValue::Aggregate(fields) => {
             for field in fields.iter().flatten() {

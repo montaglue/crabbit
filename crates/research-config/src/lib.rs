@@ -158,6 +158,23 @@ impl RegallocEngine {
 /// section in a resident server runs under one lock. Only `CRABBIT_*`
 /// keys are accepted — the config channel must not become an arbitrary
 /// environment injector.
+/// Set or clear an environment variable under this crate's env-mutation
+/// discipline.
+///
+/// SAFETY argument, once for every call site in this crate: `set_var`/
+/// `remove_var` are unsafe because concurrent readers in other threads
+/// could observe a torn environment. Every mutation in this crate happens
+/// either while holding [`with_env_config`]'s process-wide lock (including
+/// the restore in its guard's `Drop`, which runs before the lock is
+/// released) or inside this crate's lock-serialized tests; no other thread
+/// reads the environment at those points.
+fn apply_env(key: &str, value: Option<&str>) {
+    match value {
+        Some(value) => unsafe { std::env::set_var(key, value) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+}
+
 pub fn with_env_config<R>(
     config: &std::collections::BTreeMap<String, String>,
     f: impl FnOnce() -> R,
@@ -173,10 +190,9 @@ pub fn with_env_config<R>(
     impl Drop for Restore {
         fn drop(&mut self) {
             for (key, value) in &self.0 {
-                match value {
-                    Some(value) => unsafe { std::env::set_var(key, value) },
-                    None => unsafe { std::env::remove_var(key) },
-                }
+                // Still under with_env_config's lock (the guard drops
+                // before the lock); see apply_env's SAFETY.
+                apply_env(key, value.as_deref());
             }
         }
     }
@@ -187,7 +203,7 @@ pub fn with_env_config<R>(
             .collect(),
     );
     for (key, value) in config {
-        unsafe { std::env::set_var(key, value) };
+        apply_env(key, Some(value));
     }
     Ok(f())
 }
@@ -216,14 +232,14 @@ mod tests {
             "CRABBIT_PROFILE",
             "CRABBIT_MEASURED_COSTS",
         ] {
-            unsafe { std::env::remove_var(var) };
+            apply_env(var, None);
         }
         for (k, v) in vars {
-            unsafe { std::env::set_var(k, v) };
+            apply_env(k, Some(v));
         }
         f();
         for (k, _) in vars {
-            unsafe { std::env::remove_var(k) };
+            apply_env(k, None);
         }
     }
 

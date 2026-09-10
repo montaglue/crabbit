@@ -301,7 +301,7 @@ fn import_function<'tcx>(
     is_kernel: bool,
     instance: Option<Instance<'tcx>>,
 ) -> Result<(), String> {
-    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+    if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return Ok(());
     }
 
@@ -530,7 +530,7 @@ fn declare_static_global<'tcx>(
     symbol: crate::identifier::Identifier,
     def_id: rustc_span::def_id::DefId,
 ) -> Result<(), String> {
-    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+    if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return Ok(());
     }
     // A local static is defined here from its evaluated initializer; a foreign
@@ -596,7 +596,7 @@ fn declare_thread_local_global<'tcx>(
     symbol: crate::identifier::Identifier,
     def_id: rustc_span::def_id::DefId,
 ) -> Result<(), String> {
-    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+    if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return Ok(());
     }
     if def_id.is_local()
@@ -635,7 +635,7 @@ fn emit_allocation_global<'tcx>(
     linkage: LinkageAttr,
     thread_local: bool,
 ) -> Result<(), String> {
-    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+    if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return Ok(());
     }
     let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
@@ -797,7 +797,7 @@ fn declare_anonymous_byte_global(
     };
     let mut legaliser = Legaliser::default();
     let symbol = legaliser.legalise(&format!("L_stair_bytes_{suffix}"));
-    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+    if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return symbol;
     }
 
@@ -3460,7 +3460,7 @@ fn import_upstream_instance<'tcx>(
 ) -> Result<(), String> {
     let mut legaliser = Legaliser::default();
     let symbol = legaliser.legalise(tcx.symbol_name(instance).name);
-    if symbol_exists(ctx, module_body, &symbol.to_string()) {
+    if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return Ok(());
     }
     let body = tcx.instance_mir(instance.def);
@@ -3688,7 +3688,7 @@ fn stair_ty_align(ctx: &Context, ty: TypeHandle) -> Result<u64, String> {
         return Ok(align);
     }
     drop(ty_ref);
-    Ok(stair_ty_size(ctx, ty)?.min(8).max(1))
+    Ok(stair_ty_size(ctx, ty)?.clamp(1, 8))
 }
 
 fn lower_abi_call_arg(
@@ -3978,6 +3978,9 @@ fn lower_float_to_i128_sat(
 /// Casts between 128-bit integers and floats, which bypass the generic
 /// `CastOp` path (no 128-bit fcvt exists; see [lower_i128_to_float] and
 /// [lower_float_to_i128_sat]). Returns `None` for every other cast.
+// Threads the importer's per-function lowering state; a parameter struct
+// would be packed and unpacked at every call site for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 fn lower_128_bit_float_cast<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,
@@ -5012,8 +5015,8 @@ fn import_rvalue<'tcx>(
                         value_ty_ref.disp(ctx)
                     ));
                 }
-                let result_ty = struct_ty.field_type(1);
-                result_ty
+                
+                struct_ty.field_type(1)
             };
             let extract = stair_mir::ops::ExtractValueOp::new(ctx, value, vec![1], result_ty);
             extract.get_operation().insert_at_back(insert_block, ctx);
@@ -5306,7 +5309,7 @@ fn emit_fn_ptr_thunk<'tcx>(
 ) -> Result<crate::identifier::Identifier, String> {
     let mut legaliser = Legaliser::default();
     let thunk_symbol = legaliser.legalise(&format!("{symbol}__stair_fnptr_thunk"));
-    if symbol_exists(ctx, module_body, &thunk_symbol.to_string()) {
+    if symbol_exists(ctx, module_body, thunk_symbol.as_ref()) {
         return Ok(thunk_symbol);
     }
 
@@ -5404,6 +5407,9 @@ fn import_transmute<'tcx>(
     load_value_from_real_layout(tcx, ctx, insert_block, dst_ty, slot)
 }
 
+// Threads the importer's per-function lowering state; a parameter struct
+// would be packed and unpacked at every call site for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 fn lower_pointer_unsize_cast<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,
@@ -6196,6 +6202,9 @@ fn load_value_from_real_layout<'tcx>(
     }
 }
 
+// Threads the importer's per-function lowering state; a parameter struct
+// would be packed and unpacked at every call site for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 fn import_enum_constant<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,
@@ -7170,10 +7179,10 @@ fn layout_align_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Result<u64, Stri
         rustc_middle::ty::TyKind::Char => Ok(4),
         rustc_middle::ty::TyKind::Str | rustc_middle::ty::TyKind::Dynamic(_, _) => Ok(1),
         rustc_middle::ty::TyKind::Int(kind) => {
-            Ok((int_width(*kind) as u64).div_ceil(8).min(8).max(1))
+            Ok((int_width(*kind) as u64).div_ceil(8).clamp(1, 8))
         }
         rustc_middle::ty::TyKind::Uint(kind) => {
-            Ok((uint_width(*kind) as u64).div_ceil(8).min(8).max(1))
+            Ok((uint_width(*kind) as u64).div_ceil(8).clamp(1, 8))
         }
         rustc_middle::ty::TyKind::Float(rustc_middle::ty::FloatTy::F32) => Ok(4),
         rustc_middle::ty::TyKind::Float(_) => Ok(8),

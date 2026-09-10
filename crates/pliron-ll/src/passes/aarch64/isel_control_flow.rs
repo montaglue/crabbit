@@ -23,6 +23,10 @@ use super::{
 
 /// Lowers CFG edges after instruction selection has assigned every LLVM block
 /// a machine block and every block argument a virtual register.
+// Threads the full isel lowering state (maps, region, destination and its
+// arguments); a parameter struct would be packed and unpacked at every call
+// site for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn branch_edge_target(
     ctx: &mut Context,
     region: Ptr<crate::ir::region::Region>,

@@ -51,6 +51,8 @@ fn load(path: &str) -> HashMap<String, Vec<f64>> {
     match parsed {
         Ok(map) => map,
         Err(error) => {
+            // eprintln! rather than log::warn!: this runs inside a rustc codegen
+            // dylib where no logger is installed; the warning must reach the user.
             eprintln!(
                 "crabbit: warning: {PROFILE_ENV} `{path}` is unusable ({error}); \
                  all functions fall back to uniform block frequencies"
@@ -102,10 +104,16 @@ mod tests {
     fn with_profile_env(value: Option<&str>, f: impl FnOnce()) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         match value {
+            // SAFETY: single-threaded here (test/serialized-by-lock env scope);
+            // no other thread reads the environment concurrently.
             Some(value) => unsafe { std::env::set_var(PROFILE_ENV, value) },
+            // SAFETY: single-threaded here (test/serialized-by-lock env scope);
+            // no other thread reads the environment concurrently.
             None => unsafe { std::env::remove_var(PROFILE_ENV) },
         }
         f();
+        // SAFETY: single-threaded here (test/serialized-by-lock env scope);
+        // no other thread reads the environment concurrently.
         unsafe { std::env::remove_var(PROFILE_ENV) };
     }
 

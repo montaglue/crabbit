@@ -55,13 +55,13 @@ pub(super) fn lower_gep(
                 let scale = fresh_vreg(next_vreg);
                 materialize_u64_immediate(ctx, entry, scale, element_size);
                 let scaled = fresh_vreg(next_vreg);
-                aarch64_ops::binary(ctx, aarch64_ops::MulOp::OPCODE, scaled.clone(), reg, scale)
+                aarch64_ops::binary(ctx, aarch64_ops::MulOp::OPCODE, scaled, reg, scale)
                     .insert_at_back(entry, ctx);
                 scaled
             };
             dynamic_offset = Some(if let Some(acc) = dynamic_offset {
                 let dst = fresh_vreg(next_vreg);
-                aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, dst.clone(), acc, scaled)
+                aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, dst, acc, scaled)
                     .insert_at_back(entry, ctx);
                 dst
             } else {
@@ -73,7 +73,7 @@ pub(super) fn lower_gep(
 
     let base = if let Some(offset) = dynamic_offset {
         let dst = fresh_vreg(next_vreg);
-        aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, dst.clone(), base, offset)
+        aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, dst, base, offset)
             .insert_at_back(entry, ctx);
         dst
     } else {
@@ -224,7 +224,7 @@ pub(super) fn emit_return_value(
                 ))
             })?;
             let dst = fresh_vreg(next_vreg);
-            aarch64_ops::ldr_sp_offset(ctx, dst.clone(), sret_result_slot.offset)
+            aarch64_ops::ldr_sp_offset(ctx, dst, sret_result_slot.offset)
                 .insert_at_back(entry, ctx);
             store_register_address_value(
                 ctx,
@@ -532,7 +532,7 @@ fn merge_packed_half(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::OrOp::OPCODE,
-                joined.clone(),
+                joined,
                 existing,
                 value,
             )
@@ -564,7 +564,7 @@ fn unpack_aggregate_from_reg(
             aarch64_ops::binary(
                 ctx,
                 aarch64_ops::LsrOp::OPCODE,
-                shifted.clone(),
+                shifted,
                 value,
                 shift,
             )
@@ -575,7 +575,7 @@ fn unpack_aggregate_from_reg(
             let mask = fresh_vreg(next_vreg);
             materialize_u64_immediate(ctx, entry, mask, (1u64 << (size * 8)) - 1);
             let masked = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::AndOp::OPCODE, masked.clone(), value, mask)
+            aarch64_ops::binary(ctx, aarch64_ops::AndOp::OPCODE, masked, value, mask)
                 .insert_at_back(entry, ctx);
             value = masked;
         }
@@ -617,7 +617,7 @@ fn pack_aggregate_to_reg(
             let bits = scalar_size_of(ctx, ty)? * 8;
             materialize_u64_immediate(ctx, entry, mask, (1u64 << bits) - 1);
             let masked = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::AndOp::OPCODE, masked.clone(), reg, mask)
+            aarch64_ops::binary(ctx, aarch64_ops::AndOp::OPCODE, masked, reg, mask)
                 .insert_at_back(entry, ctx);
             reg = masked;
         }
@@ -625,7 +625,7 @@ fn pack_aggregate_to_reg(
             let shift = fresh_vreg(next_vreg);
             materialize_u64_immediate(ctx, entry, shift, byte_offset * 8);
             let shifted = fresh_vreg(next_vreg);
-            aarch64_ops::binary(ctx, aarch64_ops::ShlOp::OPCODE, shifted.clone(), reg, shift)
+            aarch64_ops::binary(ctx, aarch64_ops::ShlOp::OPCODE, shifted, reg, shift)
                 .insert_at_back(entry, ctx);
             reg = shifted;
         }
@@ -658,7 +658,7 @@ fn pack_aggregate_to_reg(
                 aarch64_ops::binary(
                     ctx,
                     aarch64_ops::OrOp::OPCODE,
-                    joined.clone(),
+                    joined,
                     acc,
                     field_reg,
                 )
@@ -762,20 +762,20 @@ pub(super) fn load_stack_value(
             FpKind::F32 => aarch64_ops::LdrsSpOffsetOp::OPCODE,
         };
         let dst = fresh_fpr(next_vreg, kind);
-        aarch64_ops::ldr_sp_offset_sized(ctx, opcode, dst.clone(), offset)
+        aarch64_ops::ldr_sp_offset_sized(ctx, opcode, dst, offset)
             .insert_at_back(entry, ctx);
         return Ok(LoweredValue::Reg(dst));
     }
     if is_stack_scalar_ty(ctx, ty) {
         if is_128_bit_integer(ctx, ty) {
             let lo = fresh_vreg(next_vreg);
-            aarch64_ops::ldr_sp_offset(ctx, lo.clone(), offset).insert_at_back(entry, ctx);
+            aarch64_ops::ldr_sp_offset(ctx, lo, offset).insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            aarch64_ops::ldr_sp_offset(ctx, hi.clone(), offset + 8).insert_at_back(entry, ctx);
+            aarch64_ops::ldr_sp_offset(ctx, hi, offset + 8).insert_at_back(entry, ctx);
             return Ok(LoweredValue::RegPair(lo, hi));
         }
         let dst = fresh_vreg(next_vreg);
-        aarch64_ops::ldr_sp_offset_sized(ctx, load_sp_opcode(ctx, ty)?, dst.clone(), offset)
+        aarch64_ops::ldr_sp_offset_sized(ctx, load_sp_opcode(ctx, ty)?, dst, offset)
             .insert_at_back(entry, ctx);
         let dst = normalize_integer_reg(ctx, entry, dst, ty, next_vreg)?;
         return Ok(LoweredValue::Reg(dst));
@@ -926,7 +926,7 @@ fn load_register_address_value(
             FpKind::F32 => aarch64_ops::LdrsRegOffsetOp::OPCODE,
         };
         let dst = fresh_fpr(next_vreg, kind);
-        aarch64_ops::ldr_reg_offset_sized(ctx, opcode, dst.clone(), base, offset)
+        aarch64_ops::ldr_reg_offset_sized(ctx, opcode, dst, base, offset)
             .insert_at_back(entry, ctx);
         return Ok(LoweredValue::Reg(dst));
     }
@@ -936,7 +936,7 @@ fn load_register_address_value(
             aarch64_ops::ldr_reg_offset_sized(
                 ctx,
                 aarch64_ops::LdrRegOffsetOp::OPCODE,
-                lo.clone(),
+                lo,
                 base,
                 offset,
             )
@@ -945,7 +945,7 @@ fn load_register_address_value(
             aarch64_ops::ldr_reg_offset_sized(
                 ctx,
                 aarch64_ops::LdrRegOffsetOp::OPCODE,
-                hi.clone(),
+                hi,
                 base,
                 offset + 8,
             )
@@ -956,7 +956,7 @@ fn load_register_address_value(
         aarch64_ops::ldr_reg_offset_sized(
             ctx,
             load_reg_opcode(ctx, ty)?,
-            dst.clone(),
+            dst,
             base,
             offset,
         )
@@ -1200,7 +1200,7 @@ pub(super) fn stack_align_of(
         return Ok(1);
     }
     if is_stack_scalar_ty(ctx, ty) {
-        return Ok(scalar_size_of(ctx, ty)?.min(8).max(1));
+        return Ok(scalar_size_of(ctx, ty)?.clamp(1, 8));
     }
     let ty_ref = ty.deref(ctx);
     if let Some(array_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::ArrayType>() {

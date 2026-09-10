@@ -202,11 +202,10 @@ fn sink_in_region(
         {
             continue;
         }
-        if let Some((cfg, pdt)) = &no_new_control_dep {
-            if !pdt.postdominates(cfg.idx(target), cfg.idx(def_block)) {
+        if let Some((cfg, pdt)) = &no_new_control_dep
+            && !pdt.postdominates(cfg.idx(target), cfg.idx(def_block)) {
                 continue;
             }
-        }
         // Never into a loop the def is not already in.
         let target_loops = loops_of(target);
         let def_loops = loops_of(def_block);

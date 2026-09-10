@@ -217,10 +217,10 @@ fn iterative_idoms(n: usize, entry: usize, succs: &[Vec<usize>]) -> (Vec<Option<
     let intersect = |idom: &[Option<usize>], rpo: &[usize], mut a: usize, mut b: usize| {
         while a != b {
             while rpo[a] > rpo[b] {
-                a = idom[a].unwrap();
+                a = idom[a].expect("processed nodes always carry an idom");
             }
             while rpo[b] > rpo[a] {
-                b = idom[b].unwrap();
+                b = idom[b].expect("processed nodes always carry an idom");
             }
         }
         a

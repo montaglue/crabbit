@@ -95,6 +95,8 @@ impl Pass for Aarch64RegisterAllocatePass {
                     BlockFreqModel::Spectral => "spectral",
                     BlockFreqModel::Profile => "profile",
                 };
+                // eprintln! rather than log::warn!: this runs inside a rustc codegen
+                // dylib where no logger is installed; the warning must reach the user.
                 eprintln!(
                     "crabbit: note: CRABBIT_BLOCK_FREQ={source} has no effect under the linear \
                      allocator's default furthest-end policy; set CRABBIT_SPILL_POLICY=weighted \

@@ -40,7 +40,7 @@ pub fn x86_64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> STAIRResul
         text.extend_from_slice(&encoded);
         if func.linkage(ctx) == LinkageAttr::External {
             symbols.push(Symbol {
-                name: darwin_symbol(&func.get_symbol_name(ctx).to_string()),
+                name: darwin_symbol(func.get_symbol_name(ctx).as_ref()),
                 offset,
                 external: true,
                 defined: true,

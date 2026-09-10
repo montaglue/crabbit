@@ -135,7 +135,6 @@ pub fn assign_boundary_ids(
             func, ctx,
         )
         .to_string();
-        drop(op_obj);
         let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
         // Pass 1: which ids are preserved; the fresh range starts above.
         let mut preserved = std::collections::HashSet::new();
@@ -180,8 +179,8 @@ pub fn assign_boundary_ids(
                     let own = i64::from(op_id(ctx, op).unwrap());
                     let merged = derived_from_many(ctx, op)
                         .or_else(|| derived_from(ctx, op).map(|d| vec![d]));
-                    if let Some(sources) = merged {
-                        if sources != vec![own] {
+                    if let Some(sources) = merged
+                        && sources != vec![own] {
                             table.insert(
                                 own.to_string(),
                                 serde_json::Value::Array(
@@ -189,7 +188,6 @@ pub fn assign_boundary_ids(
                                 ),
                             );
                         }
-                    }
                     continue;
                 }
                 // Source parents BEFORE the fresh id overwrites op_id.
@@ -247,7 +245,6 @@ pub fn assign_op_ids(ctx: &mut Context, root: Ptr<Operation>) -> pliron::result:
         let Some(region) = func.get_region(ctx) else {
             continue;
         };
-        drop(op_obj);
         let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
         let mut next = 0u32;
         for block in blocks {

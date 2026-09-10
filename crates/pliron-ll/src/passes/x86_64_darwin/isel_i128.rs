@@ -48,16 +48,16 @@ pub(super) fn lower_binary_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::AddOp::OPCODE,
-                lo.clone(),
-                lhs_lo.clone(),
-                rhs_lo.clone(),
+                lo,
+                lhs_lo,
+                rhs_lo,
             )
             .insert_at_back(entry, ctx);
-            x86_64_ops::cmp(ctx, lo.clone(), lhs_lo).insert_at_back(entry, ctx);
+            x86_64_ops::cmp(ctx, lo, lhs_lo).insert_at_back(entry, ctx);
             let carry = fresh_vreg(next_vreg);
             x86_64_ops::cset(
                 ctx,
-                carry.clone(),
+                carry,
                 condition_code(ICmpPredicateAttr::ULT),
             )
             .insert_at_back(entry, ctx);
@@ -65,41 +65,41 @@ pub(super) fn lower_binary_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::AddOp::OPCODE,
-                hi_sum.clone(),
+                hi_sum,
                 lhs_hi,
                 rhs_hi,
             )
             .insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            x86_64_ops::binary(ctx, x86_64_ops::AddOp::OPCODE, hi.clone(), hi_sum, carry)
+            x86_64_ops::binary(ctx, x86_64_ops::AddOp::OPCODE, hi, hi_sum, carry)
                 .insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
         BinaryKind::Sub => {
             let (rhs_lo, rhs_hi) =
                 materialize_pair(ctx, entry, rhs, result_ty, next_vreg, "i128 rhs")?;
-            x86_64_ops::cmp(ctx, lhs_lo.clone(), rhs_lo.clone()).insert_at_back(entry, ctx);
+            x86_64_ops::cmp(ctx, lhs_lo, rhs_lo).insert_at_back(entry, ctx);
             let borrow = fresh_vreg(next_vreg);
             x86_64_ops::cset(
                 ctx,
-                borrow.clone(),
+                borrow,
                 condition_code(ICmpPredicateAttr::ULT),
             )
             .insert_at_back(entry, ctx);
             let lo = fresh_vreg(next_vreg);
-            x86_64_ops::binary(ctx, x86_64_ops::SubOp::OPCODE, lo.clone(), lhs_lo, rhs_lo)
+            x86_64_ops::binary(ctx, x86_64_ops::SubOp::OPCODE, lo, lhs_lo, rhs_lo)
                 .insert_at_back(entry, ctx);
             let hi_sub = fresh_vreg(next_vreg);
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::SubOp::OPCODE,
-                hi_sub.clone(),
+                hi_sub,
                 lhs_hi,
                 rhs_hi,
             )
             .insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            x86_64_ops::binary(ctx, x86_64_ops::SubOp::OPCODE, hi.clone(), hi_sub, borrow)
+            x86_64_ops::binary(ctx, x86_64_ops::SubOp::OPCODE, hi, hi_sub, borrow)
                 .insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
@@ -110,25 +110,25 @@ pub(super) fn lower_binary_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::MulOp::OPCODE,
-                lo.clone(),
-                lhs_lo.clone(),
-                rhs_lo.clone(),
+                lo,
+                lhs_lo,
+                rhs_lo,
             )
             .insert_at_back(entry, ctx);
             let high_low = fresh_vreg(next_vreg);
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::UmulhOp::OPCODE,
-                high_low.clone(),
-                lhs_lo.clone(),
-                rhs_lo.clone(),
+                high_low,
+                lhs_lo,
+                rhs_lo,
             )
             .insert_at_back(entry, ctx);
             let cross_a = fresh_vreg(next_vreg);
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::MulOp::OPCODE,
-                cross_a.clone(),
+                cross_a,
                 lhs_hi,
                 rhs_lo,
             )
@@ -137,7 +137,7 @@ pub(super) fn lower_binary_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::MulOp::OPCODE,
-                cross_b.clone(),
+                cross_b,
                 lhs_lo,
                 rhs_hi,
             )
@@ -146,7 +146,7 @@ pub(super) fn lower_binary_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::AddOp::OPCODE,
-                hi_partial.clone(),
+                hi_partial,
                 high_low,
                 cross_a,
             )
@@ -155,7 +155,7 @@ pub(super) fn lower_binary_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::AddOp::OPCODE,
-                hi.clone(),
+                hi,
                 hi_partial,
                 cross_b,
             )
@@ -183,9 +183,9 @@ pub(super) fn lower_binary_128(
                 materialize_pair(ctx, entry, rhs, result_ty, next_vreg, "i128 rhs")?;
             let opcode = opcode(kind);
             let lo = fresh_vreg(next_vreg);
-            x86_64_ops::binary(ctx, opcode, lo.clone(), lhs_lo, rhs_lo).insert_at_back(entry, ctx);
+            x86_64_ops::binary(ctx, opcode, lo, lhs_lo, rhs_lo).insert_at_back(entry, ctx);
             let hi = fresh_vreg(next_vreg);
-            x86_64_ops::binary(ctx, opcode, hi.clone(), lhs_hi, rhs_hi).insert_at_back(entry, ctx);
+            x86_64_ops::binary(ctx, opcode, hi, lhs_hi, rhs_hi).insert_at_back(entry, ctx);
             Ok(LoweredValue::RegPair(lo, hi))
         }
         BinaryKind::SDiv | BinaryKind::UDiv | BinaryKind::SRem | BinaryKind::URem => Err(
@@ -223,7 +223,7 @@ pub(super) fn lower_compare_value(
     )?;
     x86_64_ops::cmp(ctx, lhs, rhs).insert_at_back(entry, ctx);
     let dst = fresh_vreg(next_vreg);
-    x86_64_ops::cset(ctx, dst.clone(), condition_code(compare.predicate))
+    x86_64_ops::cset(ctx, dst, condition_code(compare.predicate))
         .insert_at_back(entry, ctx);
     Ok(dst)
 }
@@ -301,8 +301,8 @@ fn lower_compare_128(
             let hi_cmp = emit_compare_bit(
                 ctx,
                 entry,
-                lhs_hi.clone(),
-                rhs_hi.clone(),
+                lhs_hi,
+                rhs_hi,
                 hi_pred,
                 next_vreg,
             );
@@ -339,7 +339,7 @@ fn emit_compare_bit(
 ) -> Register {
     x86_64_ops::cmp(ctx, lhs, rhs).insert_at_back(entry, ctx);
     let dst = fresh_vreg(next_vreg);
-    x86_64_ops::cset(ctx, dst.clone(), condition_code(predicate))
+    x86_64_ops::cset(ctx, dst, condition_code(predicate))
         .insert_at_back(entry, ctx);
     dst
 }
@@ -353,7 +353,7 @@ fn emit_logic_bit(
     next_vreg: &mut usize,
 ) -> STAIRResult<Register> {
     let dst = fresh_vreg(next_vreg);
-    x86_64_ops::binary(ctx, opcode, dst.clone(), lhs, rhs).insert_at_back(entry, ctx);
+    x86_64_ops::binary(ctx, opcode, dst, lhs, rhs).insert_at_back(entry, ctx);
     Ok(dst)
 }
 
@@ -375,7 +375,7 @@ fn lower_shift_right_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::LsrOp::OPCODE,
-            lo_part.clone(),
+            lo_part,
             lo,
             shift_reg,
         )
@@ -386,8 +386,8 @@ fn lower_shift_right_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::ShlOp::OPCODE,
-            hi_part.clone(),
-            hi.clone(),
+            hi_part,
+            hi,
             inv_shift,
         )
         .insert_at_back(entry, ctx);
@@ -395,7 +395,7 @@ fn lower_shift_right_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::OrOp::OPCODE,
-            new_lo.clone(),
+            new_lo,
             lo_part,
             hi_part,
         )
@@ -405,7 +405,7 @@ fn lower_shift_right_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::LsrOp::OPCODE,
-            new_hi.clone(),
+            new_hi,
             hi,
             shift_reg,
         )
@@ -421,7 +421,7 @@ fn lower_shift_right_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::LsrOp::OPCODE,
-                shifted.clone(),
+                shifted,
                 hi,
                 shift_reg,
             )
@@ -451,8 +451,8 @@ fn lower_shift_left_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::ShlOp::OPCODE,
-            new_lo.clone(),
-            lo.clone(),
+            new_lo,
+            lo,
             shift_reg,
         )
         .insert_at_back(entry, ctx);
@@ -461,7 +461,7 @@ fn lower_shift_left_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::LsrOp::OPCODE,
-            carry.clone(),
+            carry,
             lo,
             inv_shift,
         )
@@ -471,7 +471,7 @@ fn lower_shift_left_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::ShlOp::OPCODE,
-            hi_part.clone(),
+            hi_part,
             hi,
             shift_reg,
         )
@@ -480,7 +480,7 @@ fn lower_shift_left_128(
         x86_64_ops::binary(
             ctx,
             x86_64_ops::OrOp::OPCODE,
-            new_hi.clone(),
+            new_hi,
             hi_part,
             carry,
         )
@@ -497,7 +497,7 @@ fn lower_shift_left_128(
             x86_64_ops::binary(
                 ctx,
                 x86_64_ops::ShlOp::OPCODE,
-                shifted.clone(),
+                shifted,
                 lo,
                 shift_reg,
             )

@@ -284,7 +284,7 @@ pub(super) fn assign_darwin_abi(
                 format!("integer result of {size} bytes in `{name}`")
             )));
         }
-        AbiClass::Aggregate { size, .. } if size == 0 => AbiLocation::Void,
+        AbiClass::Aggregate { size: 0, .. } => AbiLocation::Void,
         AbiClass::Aggregate { size, .. } if size <= 8 => AbiLocation::Gpr(RESULT_GPRS[0]),
         AbiClass::Aggregate { size, .. } if size <= 16 => {
             AbiLocation::GprPair(RESULT_GPRS[0], RESULT_GPRS[1])

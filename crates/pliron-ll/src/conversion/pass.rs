@@ -87,6 +87,11 @@ pub struct Passes {
     config: PMConfig,
 }
 
+/// Callback invoked after each pass in [Passes::run_observed]: receives the
+/// pass index, name, and the module it just ran on.
+pub type PassObserver<'a> =
+    dyn FnMut(usize, &str, &Context, Ptr<Operation>) -> PassControl + 'a;
+
 /// What [Passes::run_observed]'s observer returns: keep going or stop the
 /// pipeline cleanly after the current pass (used for cancellation and for
 /// "run the first k passes" replay).
@@ -130,7 +135,7 @@ impl Passes {
         op: Ptr<Operation>,
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
-        observer: &mut dyn FnMut(usize, &str, &Context, Ptr<Operation>) -> PassControl,
+        observer: &mut PassObserver<'_>,
     ) -> pliron::result::Result<PassResult> {
         let mut aggregate = changed();
         for (count, pass) in self.passes.iter_mut().enumerate() {

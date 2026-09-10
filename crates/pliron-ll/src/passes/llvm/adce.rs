@@ -86,11 +86,10 @@ fn adce_region(
                 .collect()
         };
         for operand in operands {
-            if let Some(def) = operand.defining_op() {
-                if marked.insert(def) {
+            if let Some(def) = operand.defining_op()
+                && marked.insert(def) {
                     worklist.push(def);
                 }
-            }
             // Block-argument operands need no action: the branches that
             // feed them are terminators, i.e. already roots.
         }

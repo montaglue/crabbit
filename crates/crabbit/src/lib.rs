@@ -260,10 +260,10 @@ fn emit_kernels(
         let dir = std::env::temp_dir().join(format!("stair-kernel-pass-dumps-{}", trace_version()));
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("failed to create kernel pass dump directory: {error}"))?;
-        let mut config = PMConfig::default();
-        config.print_after_all = true;
-        config.ir_printing_dir = Some(dir.clone());
-        pipeline.set_config(config);
+        pipeline.set_config(PMConfig {
+            print_after_all: true,
+            ir_printing_dir: Some(dir.clone()),
+        });
         dump_dir = Some(dir);
     }
     let run_result = pipeline.run(imported.kernel_module, &mut imported.ctx, &mut analyses);
@@ -400,10 +400,10 @@ fn emit_object(
         let dir = std::env::temp_dir().join(format!("stair-pass-dumps-{version}"));
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("failed to create pass dump directory: {error}"))?;
-        let mut config = PMConfig::default();
-        config.print_after_all = true;
-        config.ir_printing_dir = Some(dir.clone());
-        pipeline.set_config(config);
+        pipeline.set_config(PMConfig {
+            print_after_all: true,
+            ir_printing_dir: Some(dir.clone()),
+        });
         dump_dir = Some(dir);
     } else {
         initial_dump = None;

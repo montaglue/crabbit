@@ -94,7 +94,9 @@ pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
 fn measured_costs_for_symbol(symbol: &str) -> Option<eregalloc_passes::MeasuredCosts> {
     use std::sync::{Mutex, OnceLock};
     type Costs = std::collections::HashMap<String, eregalloc_passes::MeasuredCosts>;
-    static CACHE: OnceLock<Mutex<Option<(String, std::sync::Arc<Costs>)>>> = OnceLock::new();
+    /// The last-loaded costs file: (path it came from, parsed contents).
+    type CachedCosts = Option<(String, std::sync::Arc<Costs>)>;
+    static CACHE: OnceLock<Mutex<CachedCosts>> = OnceLock::new();
     let path = env("CRABBIT_MEASURED_COSTS")?;
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let mut cached = cache.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -123,6 +125,8 @@ fn measured_costs_for_symbol(symbol: &str) -> Option<eregalloc_passes::MeasuredC
                     )
                 })
                 .unwrap_or_else(|| {
+                    // eprintln! rather than log::warn!: this runs inside a rustc codegen
+                    // dylib where no logger is installed; the warning must reach the user.
                     eprintln!(
                         "crabbit: CRABBIT_MEASURED_COSTS={path} unreadable or not op_costs.json; using estimates"
                     );
@@ -149,6 +153,8 @@ mod tests {
     #[test]
     fn registered_eregalloc_constructs_an_allocator() {
         register_engines();
+        // SAFETY: single-threaded here (test/serialized-by-lock env scope);
+        // no other thread reads the environment concurrently.
         unsafe { std::env::set_var("CRABBIT_REGALLOC", "eregalloc") };
         let engine = research_config::RegallocEngine::from_env().unwrap();
         let backend = pliron_ll::targets::lookup(&pliron_ll::triple::Triple::parse(
@@ -156,6 +162,8 @@ mod tests {
         ))
         .unwrap();
         engine.machine_pipeline(backend).unwrap();
+        // SAFETY: single-threaded here (test/serialized-by-lock env scope);
+        // no other thread reads the environment concurrently.
         unsafe { std::env::remove_var("CRABBIT_REGALLOC") };
     }
 }

@@ -371,7 +371,7 @@ pub(super) fn assign_abi(
                 format!("integer result of {size} bytes in `{name}`")
             )));
         }
-        AbiClass::Aggregate { size, .. } if size == 0 => AbiLocation::Void,
+        AbiClass::Aggregate { size: 0, .. } => AbiLocation::Void,
         AbiClass::Aggregate { size, .. } if size <= 8 => AbiLocation::Gpr(Register::gpr(0)),
         AbiClass::Aggregate { size, .. } if size <= 16 => {
             AbiLocation::GprPair(Register::gpr(0), Register::gpr(1))
