@@ -25,10 +25,16 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: System deps (triskel C++ bindings need libfmt + modern g++)
+      - name: System deps (triskel C++ bindings need fmt>=10 + modern g++)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q g++-14 libfmt-dev libffi-dev
+          sudo apt-get install -y -q g++-14 libffi-dev cmake
+          # apt's libfmt is v9; triskel relies on fmt>=10 (format_as).
+          # Build fmt 11 into /usr/local, matching the dev machines.
+          curl -sL https://github.com/fmtlib/fmt/archive/refs/tags/11.0.2.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/fmt-11.0.2 -B /tmp/fmt-build -DFMT_TEST=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+          cmake --build /tmp/fmt-build -j >/dev/null
+          sudo cmake --install /tmp/fmt-build >/dev/null
           echo "CXX=g++-14" >> "$GITHUB_ENV"
 
 
@@ -64,10 +70,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: System deps (triskel C++ bindings need libfmt + modern g++)
+      - name: System deps (triskel C++ bindings need fmt>=10 + modern g++)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q g++-14 libfmt-dev libffi-dev
+          sudo apt-get install -y -q g++-14 libffi-dev cmake
+          # apt's libfmt is v9; triskel relies on fmt>=10 (format_as).
+          # Build fmt 11 into /usr/local, matching the dev machines.
+          curl -sL https://github.com/fmtlib/fmt/archive/refs/tags/11.0.2.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/fmt-11.0.2 -B /tmp/fmt-build -DFMT_TEST=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+          cmake --build /tmp/fmt-build -j >/dev/null
+          sudo cmake --install /tmp/fmt-build >/dev/null
           echo "CXX=g++-14" >> "$GITHUB_ENV"
 
 

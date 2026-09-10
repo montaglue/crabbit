@@ -108,9 +108,10 @@ the server command and the data path above are live today.)
 
 - Rust **nightly-2026-04-03** with `rustc-dev` + `rust-src` (installed
   automatically via `rust-toolchain.toml`).
-- A C++ toolchain with libfmt for the CFG-layout bindings the inspect
-  driver links (`triskel`): `apt install g++-14 libfmt-dev libffi-dev`
-  (or any g++ ≥ 13 with fmt headers on the include path).
+- A C++ toolchain for the CFG-layout bindings the inspect driver links
+  (`triskel`): g++ ≥ 13 (C++23), libffi-dev, and **fmt ≥ 10** — distro
+  packages are often v9; build fmt 11 into /usr/local (the CI workflow
+  shows the exact recipe).
 
 ## Platform matrix
 
