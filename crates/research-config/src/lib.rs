@@ -2,7 +2,7 @@
 //!
 //! | variable | values | default | effect |
 //! |---|---|---|---|
-//! | `CRABBIT_REGALLOC` | `linear`, `eregalloc` | `linear` | `linear` keeps the backend's own allocator; `eregalloc` swaps in `EregallocRegisterAllocatePass` |
+//! | `CRABBIT_REGALLOC` | `linear`, or a linked engine (`eregalloc`) | `linear` | `linear` keeps the backend's own allocator; other names resolve through the [engine registry](register_engine) — the public backend links no engines, `libcrabbit_research.so` registers `eregalloc` |
 //! | `CRABBIT_REGALLOC_ORACLE` | `c0`, `c2` | `c0` | `c0` → syntactic oracle, `c2` → saturated e-graph oracle; only read under `eregalloc` |
 //! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile` | `uniform` | under `eregalloc`: the pass's frequency source (`spectral` is the fallthrough-aware machine-CFG Perron computation; `profile` reads measured frequencies from the `CRABBIT_PROFILE` JSON via a [BlockFreqSource::Provider], with per-function uniform fallback — see docs/PROFILE-FEEDBACK-PLAN.md) |
 //!
@@ -16,27 +16,20 @@
 //! pliron-ll — package cycle) and the rustc_private-tainted `crabbit`
 //! crate, so the resident driver/server can share it.
 //!
-//! `cmt_spectral_cfg::block_frequencies` is the region-level CMT analysis
-//! and matches `BlockFreqSource::Provider` exactly; it is kept reachable
-//! ([cmt_block_frequencies]) for explicit-edge CFGs, but the pre-placement
-//! machine CFG at the RA position uses implicit fallthrough, which a
-//! `block.succs` analysis cannot see — so `spectral` routes to
-//! `BlockFreqSource::Spectral` (same math over the allocator's own
-//! successor lists) as the contract prescribes.
+//! Engine availability is a LINK-TIME property, not a feature: the
+//! research engines live in private sibling repositories, and cargo
+//! resolves even optional dependencies into the lockfile, so the public
+//! workspace cannot reference them at all. Instead the workspace-excluded
+//! `crates/crabbit-research` composition dylib registers its engines here
+//! ([register_engine]) before delegating to the ordinary backend; the
+//! `eregalloc`/`cmt` cargo features remain declared (default-off) only so
+//! existing `--features` invocations stay valid — they are no-ops.
 
-#[cfg(feature = "eregalloc")]
-use eregalloc_passes::{BlockFreqSource, EregallocRegisterAllocatePass, OracleKind};
 use pliron::{context::Context, context::Ptr, region::Region};
-use pliron_ll::{conversion::pass::Passes, targets::TargetBackend};
-
-/// CMT's region-level spectral block frequencies, in the exact shape of
-/// `BlockFreqSource::Provider`. Selected by `CRABBIT_BLOCK_FREQ=cmt-provider`
-/// (an explicitly experimental value: see the module docs for why it
-/// under-connects the machine CFG at the RA position).
-#[cfg(feature = "cmt")]
-pub fn cmt_block_frequencies(ctx: &Context, region: Ptr<Region>) -> Vec<f64> {
-    cmt_spectral_cfg::block_frequencies(ctx, region)
-}
+use pliron_ll::{
+    conversion::pass::{DynPass, Passes},
+    targets::TargetBackend,
+};
 
 /// Measured block frequencies from the `CRABBIT_PROFILE` JSON, in the
 /// exact shape of [BlockFreqSource::Provider]. Called once per machine
@@ -62,101 +55,95 @@ pub fn profile_block_frequencies(ctx: &Context, region: Ptr<Region>) -> Vec<f64>
     pliron_ll::passes::profile_freq::frequencies_for(&symbol, blocks).unwrap_or_else(uniform)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A factory for an externally linked register-allocation engine: reads
+/// its own `CRABBIT_*` configuration from the environment (it runs at the
+/// same point [RegallocEngine::from_env] does) and returns the allocator
+/// pass to substitute at the backend's swappable-allocator slot.
+pub type EngineFactory = fn() -> Result<DynPass, String>;
+
+fn engine_registry() -> &'static std::sync::Mutex<std::collections::BTreeMap<&'static str, EngineFactory>>
+{
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<&'static str, EngineFactory>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Register an engine under the name `CRABBIT_REGALLOC` selects it by.
+/// Called by a composition dylib (crates/crabbit-research) at backend
+/// load, before any compilation consults [RegallocEngine::from_env].
+/// Re-registering a name replaces the factory (idempotent loads).
+pub fn register_engine(name: &'static str, factory: EngineFactory) {
+    engine_registry()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(name, factory);
+}
+
+fn engine_factory(name: &str) -> Option<(&'static str, EngineFactory)> {
+    engine_registry()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get_key_value(name)
+        .map(|(n, f)| (*n, *f))
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum RegallocEngine {
     Linear,
-    #[cfg(feature = "eregalloc")]
-    Eregalloc { oracle: OracleKind, freq: FreqChoice },
+    /// An engine resolved through the registry; carries its registered
+    /// name (diagnostics) and factory.
+    External {
+        name: &'static str,
+        factory: EngineFactory,
+    },
 }
 
-/// The message for a config value whose engine was compiled out.
-#[cfg(not(all(feature = "eregalloc", feature = "cmt")))]
-fn feature_missing(feature: &str) -> String {
-    format!("crabbit was built without the `{feature}` feature")
+/// Compared by identity/name only: factories are `fn` pointers, whose
+/// address comparison the compiler rightly flags as meaningless.
+impl PartialEq for RegallocEngine {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RegallocEngine::Linear, RegallocEngine::Linear) => true,
+            (
+                RegallocEngine::External { name: a, .. },
+                RegallocEngine::External { name: b, .. },
+            ) => a == b,
+            _ => false,
+        }
+    }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FreqChoice {
-    Uniform,
-    Spectral,
-    Profile,
-    #[cfg(feature = "cmt")]
-    CmtProvider,
-}
+impl Eq for RegallocEngine {}
 
 impl RegallocEngine {
     pub fn from_env() -> Result<Self, String> {
         let engine = env("CRABBIT_REGALLOC");
         match engine.as_deref() {
             None | Some("linear") => Ok(RegallocEngine::Linear),
-            #[cfg(not(feature = "eregalloc"))]
-            Some("eregalloc") => Err(feature_missing("eregalloc")),
-            #[cfg(feature = "eregalloc")]
-            Some("eregalloc") => {
-                let oracle = match env("CRABBIT_REGALLOC_ORACLE").as_deref() {
-                    None | Some("c0") => OracleKind::Syntactic,
-                    Some("c2") => OracleKind::EGraph,
-                    Some(other) => return Err(unknown("CRABBIT_REGALLOC_ORACLE", other, "c0, c2")),
-                };
-                let freq = match env("CRABBIT_BLOCK_FREQ").as_deref() {
-                    None | Some("uniform") => FreqChoice::Uniform,
-                    Some("spectral") => FreqChoice::Spectral,
-                    Some("profile") => FreqChoice::Profile,
-                    #[cfg(feature = "cmt")]
-                    Some("cmt-provider") => FreqChoice::CmtProvider,
-                    #[cfg(not(feature = "cmt"))]
-                    Some("cmt-provider") => return Err(feature_missing("cmt")),
-                    Some(other) => {
-                        return Err(unknown(
-                            "CRABBIT_BLOCK_FREQ",
-                            other,
-                            "uniform, spectral, profile, cmt-provider",
-                        ));
-                    }
-                };
-                Ok(RegallocEngine::Eregalloc { oracle, freq })
-            }
-            Some(other) => Err(unknown("CRABBIT_REGALLOC", other, "linear, eregalloc")),
-        }
-    }
-
-    /// The allocator pass to substitute, or `None` for the backend default.
-    #[cfg(feature = "eregalloc")]
-    pub fn allocator(self) -> Option<EregallocRegisterAllocatePass> {
-        match self {
-            RegallocEngine::Linear => None,
-            RegallocEngine::Eregalloc { oracle, freq } => {
-                let source = match freq {
-                    FreqChoice::Uniform => BlockFreqSource::Uniform,
-                    FreqChoice::Spectral => BlockFreqSource::Spectral,
-                    FreqChoice::Profile => BlockFreqSource::Provider(profile_block_frequencies),
-                    #[cfg(feature = "cmt")]
-                    FreqChoice::CmtProvider => BlockFreqSource::Provider(cmt_block_frequencies),
-                };
-                let mut pass = EregallocRegisterAllocatePass::new(oracle, source);
-                if env("CRABBIT_MEASURED_COSTS").is_some() {
-                    pass = pass.with_measured_costs_provider(measured_costs_for_symbol);
-                }
-                Some(pass)
-            }
+            Some(name) => match engine_factory(name) {
+                Some((name, factory)) => Ok(RegallocEngine::External { name, factory }),
+                None if name == "eregalloc" => Err(
+                    "the `eregalloc` engine is not linked into this backend: it lives in \
+                     crates/crabbit-research (which needs the private research checkouts); \
+                     build that crate and point -Zcodegen-backend at libcrabbit_research.so"
+                        .to_string(),
+                ),
+                None => Err(unknown("CRABBIT_REGALLOC", name, "linear, eregalloc")),
+            },
         }
     }
 
     /// The machine pipeline for `target` under this engine — the one place
     /// that knows which allocator the engine substitutes, so callers (the
-    /// rustc backend and the resident server) never name engine types and
-    /// feature gating stays local to this crate.
+    /// rustc backend and the resident server) never name engine types.
     pub fn machine_pipeline(self, target: &TargetBackend) -> Result<Passes, String> {
         match self {
             RegallocEngine::Linear => Ok(target.pipeline()),
-            #[cfg(feature = "eregalloc")]
-            engine @ RegallocEngine::Eregalloc { .. } => {
-                let allocator = engine
-                    .allocator()
-                    .expect("Eregalloc engine always substitutes an allocator");
+            RegallocEngine::External { name, factory } => {
+                let allocator = factory()?;
                 target.pipeline_with_allocator(allocator).ok_or_else(|| {
                     format!(
-                        "CRABBIT_REGALLOC=eregalloc is not supported by the `{}` backend (no swappable allocator)",
+                        "CRABBIT_REGALLOC={name} is not supported by the `{}` backend (no swappable allocator)",
                         target.name
                     )
                 })
@@ -165,7 +152,7 @@ impl RegallocEngine {
     }
 }
 
-/// Run `f` with the given `CRABBIT_*` environment configuration set,
+/// Run `f` with the given/// Run `f` with the given `CRABBIT_*` environment configuration set,
 /// restoring the previous values afterwards (also on panic). Process
 /// environment is global, so this serializes: every configured pipeline
 /// section in a resident server runs under one lock. Only `CRABBIT_*`
@@ -209,59 +196,6 @@ fn unknown(var: &str, value: &str, expected: &str) -> String {
     format!("unknown value `{value}` for {var}; expected one of: {expected}")
 }
 
-/// Per-symbol measured restore costs from the `CRABBIT_MEASURED_COSTS`
-/// op_costs.json (docs/PROFILE-FEEDBACK-BACKWARD.md, experiment E1): the
-/// `lifted` section's integer keys are RA-boundary attribution ids — the
-/// same ids the eregalloc allocator reads off machine defs'
-/// `ll.derived_from`. Missing/unreadable file, missing symbol, or
-/// non-integer keys never error: the allocator falls back to estimates.
-/// Path-keyed lazy cache, mirroring [profile_block_frequencies]'s.
-#[cfg(feature = "eregalloc")]
-fn measured_costs_for_symbol(symbol: &str) -> Option<eregalloc_passes::MeasuredCosts> {
-    use std::sync::{Mutex, OnceLock};
-    type Costs = std::collections::HashMap<String, eregalloc_passes::MeasuredCosts>;
-    static CACHE: OnceLock<Mutex<Option<(String, std::sync::Arc<Costs>)>>> = OnceLock::new();
-    let path = env("CRABBIT_MEASURED_COSTS")?;
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let mut cached = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-    let costs = match cached.as_ref() {
-        Some((cached_path, costs)) if *cached_path == path => costs.clone(),
-        _ => {
-            let loaded: Costs = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .and_then(|value| {
-                    let object = value.as_object()?;
-                    Some(
-                        object
-                            .iter()
-                            .filter_map(|(symbol, kinds)| {
-                                let lifted = kinds.get("lifted")?.as_object()?;
-                                let map: eregalloc_passes::MeasuredCosts = lifted
-                                    .iter()
-                                    .filter_map(|(key, count)| {
-                                        Some((key.parse::<i64>().ok()?, count.as_u64()?))
-                                    })
-                                    .collect();
-                                Some((symbol.clone(), map))
-                            })
-                            .collect(),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "crabbit: CRABBIT_MEASURED_COSTS={path} unreadable or not op_costs.json; using estimates"
-                    );
-                    Costs::default()
-                });
-            let costs = std::sync::Arc::new(loaded);
-            *cached = Some((path, costs.clone()));
-            costs
-        }
-    };
-    costs.get(symbol).cloned().filter(|map| !map.is_empty())
-}
-
 fn env(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|value| !value.is_empty())
 }
@@ -297,55 +231,62 @@ mod tests {
     fn defaults_to_linear() {
         with_env(&[], || {
             assert_eq!(RegallocEngine::from_env().unwrap(), RegallocEngine::Linear);
-            #[cfg(feature = "eregalloc")]
-            assert!(RegallocEngine::Linear.allocator().is_none());
         });
     }
 
-    #[cfg(feature = "eregalloc")]
     #[test]
-    fn eregalloc_variants_parse() {
+    fn unlinked_eregalloc_reports_the_composition_dylib() {
         with_env(&[("CRABBIT_REGALLOC", "eregalloc")], || {
-            assert_eq!(
-                RegallocEngine::from_env().unwrap(),
-                RegallocEngine::Eregalloc { oracle: OracleKind::Syntactic, freq: FreqChoice::Uniform }
+            // No engine registered in this crate's own tests: the message
+            // must point at the composition dylib, not at a cargo feature.
+            let err = RegallocEngine::from_env().unwrap_err();
+            assert!(
+                err.contains("crabbit-research") && err.contains("libcrabbit_research.so"),
+                "{err}"
             );
         });
-        with_env(
-            &[("CRABBIT_REGALLOC", "eregalloc"), ("CRABBIT_REGALLOC_ORACLE", "c2"), ("CRABBIT_BLOCK_FREQ", "spectral")],
-            || {
-                let engine = RegallocEngine::from_env().unwrap();
-                assert_eq!(
-                    engine,
-                    RegallocEngine::Eregalloc { oracle: OracleKind::EGraph, freq: FreqChoice::Spectral }
-                );
-                assert!(engine.allocator().is_some());
-            },
-        );
     }
 
-    #[cfg(feature = "eregalloc")]
     #[test]
-    fn profile_freq_choice_parses_and_uses_the_provider() {
-        with_env(
-            &[("CRABBIT_REGALLOC", "eregalloc"), ("CRABBIT_BLOCK_FREQ", "profile")],
-            || {
-                let engine = RegallocEngine::from_env().unwrap();
-                assert_eq!(
-                    engine,
-                    RegallocEngine::Eregalloc {
-                        oracle: OracleKind::Syntactic,
-                        freq: FreqChoice::Profile
-                    }
-                );
-                assert!(engine.allocator().is_some());
-            },
-        );
+    fn registered_engines_resolve_and_their_factory_errors_surface() {
+        fn failing_factory() -> Result<DynPass, String> {
+            Err("factory ran".to_string())
+        }
+        register_engine("test-engine", failing_factory);
+        with_env(&[("CRABBIT_REGALLOC", "test-engine")], || {
+            let engine = RegallocEngine::from_env().unwrap();
+            assert!(matches!(
+                engine,
+                RegallocEngine::External { name: "test-engine", .. }
+            ));
+            let backend = pliron_ll::targets::lookup(&pliron_ll::triple::Triple::parse(
+                "aarch64-unknown-linux-gnu",
+            ))
+            .unwrap();
+            // Passes has no Debug: destructure instead of unwrap_err.
+            match engine.machine_pipeline(backend) {
+                Err(message) => assert_eq!(message, "factory ran"),
+                Ok(_) => panic!("factory error must propagate"),
+            }
+        });
+    }
+
+    #[test]
+    fn oracle_is_ignored_under_linear_and_unknown_values_error() {
+        with_env(&[("CRABBIT_REGALLOC_ORACLE", "bogus")], || {
+            assert_eq!(RegallocEngine::from_env().unwrap(), RegallocEngine::Linear);
+        });
+        with_env(&[("CRABBIT_REGALLOC", "bogus")], || {
+            let err = RegallocEngine::from_env().unwrap_err();
+            assert!(
+                err.contains("CRABBIT_REGALLOC") && err.contains("linear, eregalloc"),
+                "{err}"
+            );
+        });
     }
 
     /// The provider must fall back to uniform — never error — on a stale
     /// or missing profile (docs/PROFILE-FEEDBACK-PLAN.md).
-    #[cfg(feature = "eregalloc")]
     #[test]
     fn profile_provider_falls_back_to_uniform_without_a_usable_profile() {
         use pliron::builtin::op_interfaces::OneRegionInterface;
@@ -365,65 +306,16 @@ mod tests {
         });
     }
 
-    #[cfg(not(feature = "eregalloc"))]
     #[test]
-    fn disabled_eregalloc_feature_reports_clearly() {
-        with_env(&[("CRABBIT_REGALLOC", "eregalloc")], || {
-            assert_eq!(
-                RegallocEngine::from_env().unwrap_err(),
-                "crabbit was built without the `eregalloc` feature"
-            );
-        });
-    }
-
-    #[cfg(all(feature = "eregalloc", not(feature = "cmt")))]
-    #[test]
-    fn disabled_cmt_feature_reports_clearly() {
-        with_env(
-            &[("CRABBIT_REGALLOC", "eregalloc"), ("CRABBIT_BLOCK_FREQ", "cmt-provider")],
-            || {
-                assert_eq!(
-                    RegallocEngine::from_env().unwrap_err(),
-                    "crabbit was built without the `cmt` feature"
-                );
-            },
-        );
-    }
-
-    #[test]
-    fn oracle_is_ignored_under_linear_and_unknown_values_error() {
-        with_env(&[("CRABBIT_REGALLOC_ORACLE", "bogus")], || {
-            assert_eq!(RegallocEngine::from_env().unwrap(), RegallocEngine::Linear);
-        });
-        with_env(&[("CRABBIT_REGALLOC", "bogus")], || {
-            let err = RegallocEngine::from_env().unwrap_err();
-            assert!(err.contains("CRABBIT_REGALLOC") && err.contains("linear, eregalloc"), "{err}");
-        });
-        #[cfg(feature = "eregalloc")]
-        with_env(&[("CRABBIT_REGALLOC", "eregalloc"), ("CRABBIT_REGALLOC_ORACLE", "c1")], || {
-            assert!(RegallocEngine::from_env().unwrap_err().contains("c0, c2"));
-        });
-    }
-    #[cfg(feature = "eregalloc")]
-    #[test]
-    fn measured_costs_loads_lifted_ints_per_symbol() {
-        let dir = std::env::temp_dir().join(format!("rc-mcosts-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("op_costs.json");
-        std::fs::write(
-            &path,
-            r#"{"f": {"machine": {"0": 3}, "lifted": {"2": 5, "7": 1, "isel:abi": 4}},
-                "g": {"lifted": {}}}"#,
-        )
+    fn with_env_config_rejects_non_crabbit_keys_and_restores() {
+        let mut config = std::collections::BTreeMap::new();
+        config.insert("PATH".to_string(), "hijack".to_string());
+        assert!(with_env_config(&config, || ()).is_err());
+        let mut config = std::collections::BTreeMap::new();
+        config.insert("CRABBIT_REGALLOC".to_string(), "linear".to_string());
+        with_env_config(&config, || {
+            assert_eq!(std::env::var("CRABBIT_REGALLOC").unwrap(), "linear");
+        })
         .unwrap();
-        with_env(&[("CRABBIT_MEASURED_COSTS", path.to_str().unwrap())], || {
-            let f = measured_costs_for_symbol("f").expect("f has costs");
-            assert_eq!(f.get(&2), Some(&5));
-            assert_eq!(f.get(&7), Some(&1));
-            assert_eq!(f.len(), 2, "root keys are skipped: {f:?}");
-            assert!(measured_costs_for_symbol("g").is_none(), "empty map -> None");
-            assert!(measured_costs_for_symbol("missing").is_none());
-        });
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

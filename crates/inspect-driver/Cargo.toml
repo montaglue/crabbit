@@ -38,6 +38,9 @@ serde_json.workspace = true
 pliron-inspect-protocol.workspace = true
 
 [features]
-default = ["eregalloc", "cmt"]
+# Compat no-ops (see crates/research-config): the public analysisd links
+# no research engines; a research analysisd would be composed the same
+# way crates/crabbit-research composes the backend dylib.
+default = []
 eregalloc = ["research-config/eregalloc"]
 cmt = ["research-config/cmt"]

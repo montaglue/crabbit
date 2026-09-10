@@ -3,17 +3,6 @@
 version = 4
 
 [[package]]
-name = "ahash"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891477e0c6a8957309ee5c45a6368af3ae14bb510732d2684ffa19af310920f9"
-dependencies = [
- "getrandom 0.2.17",
- "once_cell",
- "version_check",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,12 +78,6 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
-name = "autocfg"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "awint"
@@ -192,24 +175,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "boolean-dataflow"
-version = "0.1.0"
-dependencies = [
- "cmt-support",
- "pliron",
-]
-
-[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -274,14 +243,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "cmt-support"
-version = "0.1.0"
-dependencies = [
- "pliron",
- "pliron-llvm",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -327,6 +288,13 @@ dependencies = [
 name = "crabbit"
 version = "0.1.0"
 dependencies = [
+ "crabbit-core",
+]
+
+[[package]]
+name = "crabbit-core"
+version = "0.1.0"
+dependencies = [
  "anyhow",
  "awint",
  "combine",
@@ -342,7 +310,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -376,7 +344,7 @@ dependencies = [
  "pliron-ll",
  "pliron-llvm",
  "rustc-hash",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -417,7 +385,7 @@ checksum = "e3184a94384c663718698311a78a51ac00c484c10b4eeac06fb0a068c5f64fa2"
 dependencies = [
  "cc",
  "codespan-reporting",
- "indexmap 2.14.0",
+ "indexmap",
  "proc-macro2",
  "quote",
  "scratch",
@@ -432,7 +400,7 @@ checksum = "0148d8fd1199329ddf1d157a5e134e51ceff37c6a7ddd38615c399d81cb05d8d"
 dependencies = [
  "clap",
  "codespan-reporting",
- "indexmap 2.14.0",
+ "indexmap",
  "proc-macro2",
  "quote",
  "syn 3.0.2",
@@ -450,7 +418,7 @@ version = "1.0.198"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c77c856545d886c9bd5215409ebb63b925e262135248b50c79e5a5f194ee47c"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap",
  "proc-macro2",
  "quote",
  "syn 3.0.2",
@@ -466,7 +434,7 @@ dependencies = [
  "once_cell",
  "pliron",
  "pliron-derive",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -480,7 +448,7 @@ dependencies = [
  "linkme",
  "pliron",
  "pliron-derive",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -513,47 +481,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "egg"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96beaf9d35dbc4686bc86a4ecb851fd6a406f0bf32d9f646b1225a5c5cf5b5d7"
-dependencies = [
- "env_logger",
- "fxhash",
- "hashbrown 0.12.3",
- "indexmap 1.9.3",
- "instant",
- "log",
- "smallvec",
- "symbol_table",
- "symbolic_expressions",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a12e6657c4c97ebab115a42dcee77225f7f482cdd841cf7088c657a42e9e00e7"
-dependencies = [
- "log",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
-
-[[package]]
-name = "eregalloc-passes"
-version = "0.1.0"
-dependencies = [
- "pliron",
- "pliron-ll",
- "regalloc-egraphs",
- "thiserror 2.0.19",
-]
 
 [[package]]
 name = "errno"
@@ -625,26 +556,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxhash"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
-name = "getrandom"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
-dependencies = [
- "cfg-if",
- "libc",
- "wasi",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -653,15 +564,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
-]
-
-[[package]]
-name = "hashbrown"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
-dependencies = [
- "ahash",
 ]
 
 [[package]]
@@ -805,31 +707,12 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
-dependencies = [
- "autocfg",
- "hashbrown 0.12.3",
-]
-
-[[package]]
-name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "instant"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -915,7 +798,7 @@ dependencies = [
  "pliron-llvm",
  "reserved-oxide-symbols",
  "rustc-hash",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -978,7 +861,7 @@ dependencies = [
  "pliron-derive",
  "reserved-oxide-symbols",
  "rustc-hash",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -1013,7 +896,7 @@ checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
 dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
- "indexmap 2.14.0",
+ "indexmap",
  "serde",
 ]
 
@@ -1029,7 +912,7 @@ dependencies = [
  "dyn-clone",
  "hashbrown 0.17.1",
  "hi_sparse_bitset",
- "indexmap 2.14.0",
+ "indexmap",
  "inventory",
  "linkme",
  "log",
@@ -1041,7 +924,7 @@ dependencies = [
  "slotmap",
  "smallvec",
  "spin",
- "thiserror 2.0.19",
+ "thiserror",
  "utf8-chars",
 ]
 
@@ -1053,7 +936,7 @@ checksum = "f878ccd6bfd39a9373175774b96785daab296dc1870bc72ff7d285151f613a56"
 dependencies = [
  "combine",
  "convert_case",
- "indexmap 2.14.0",
+ "indexmap",
  "proc-macro2",
  "quote",
  "rustc-hash",
@@ -1063,7 +946,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-driver"
 version = "0.1.0"
-source = "git+https://github.com/montaglue/pliron-inspect.git?rev=be551ab37a2f2f3a05d980d76a1652066a11fa14#be551ab37a2f2f3a05d980d76a1652066a11fa14"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=dd5cbbe8511c9d02cae4e74dba56fd77d170793d#dd5cbbe8511c9d02cae4e74dba56fd77d170793d"
 dependencies = [
  "anyhow",
  "clap",
@@ -1080,7 +963,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-lsp"
 version = "0.1.0"
-source = "git+https://github.com/montaglue/pliron-inspect.git?rev=be551ab37a2f2f3a05d980d76a1652066a11fa14#be551ab37a2f2f3a05d980d76a1652066a11fa14"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=dd5cbbe8511c9d02cae4e74dba56fd77d170793d#dd5cbbe8511c9d02cae4e74dba56fd77d170793d"
 dependencies = [
  "anyhow",
  "lsp-server",
@@ -1093,7 +976,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-protocol"
 version = "0.1.0"
-source = "git+https://github.com/montaglue/pliron-inspect.git?rev=be551ab37a2f2f3a05d980d76a1652066a11fa14#be551ab37a2f2f3a05d980d76a1652066a11fa14"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=dd5cbbe8511c9d02cae4e74dba56fd77d170793d#dd5cbbe8511c9d02cae4e74dba56fd77d170793d"
 dependencies = [
  "anyhow",
  "serde",
@@ -1105,8 +988,6 @@ name = "pliron-ll"
 version = "0.1.0"
 dependencies = [
  "awint",
- "boolean-dataflow",
- "cmt-support",
  "combine",
  "expect-test",
  "log",
@@ -1115,7 +996,7 @@ dependencies = [
  "rustc-hash",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -1127,7 +1008,7 @@ dependencies = [
  "bitflags 2.13.1",
  "log",
  "pliron",
- "thiserror 2.0.19",
+ "thiserror",
 ]
 
 [[package]]
@@ -1137,15 +1018,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
  "zerovec",
-]
-
-[[package]]
-name = "ppv-lite86"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
-dependencies = [
- "zerocopy",
 ]
 
 [[package]]
@@ -1173,50 +1045,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rand"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
-dependencies = [
- "libc",
- "rand_chacha",
- "rand_core",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
-dependencies = [
- "ppv-lite86",
- "rand_core",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
-dependencies = [
- "getrandom 0.2.17",
-]
-
-[[package]]
 name = "recasting"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70aeee1a07922bfe7c79e148553dee262248d2493d9778eee7551b9b5d7cc651"
-
-[[package]]
-name = "regalloc-egraphs"
-version = "0.1.0"
-dependencies = [
- "awint",
- "egg",
- "pliron",
- "rand",
-]
 
 [[package]]
 name = "regex"
@@ -1251,11 +1083,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "research-config"
 version = "0.1.0"
 dependencies = [
- "eregalloc-passes",
  "pliron",
  "pliron-ll",
  "serde_json",
- "spectral-cfg",
 ]
 
 [[package]]
@@ -1395,14 +1225,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
-name = "spectral-cfg"
-version = "0.1.0"
-dependencies = [
- "cmt-support",
- "pliron",
-]
-
-[[package]]
 name = "spin"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1422,22 +1244,6 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "symbol_table"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32bf088d1d7df2b2b6711b06da3471bc86677383c57b27251e18c56df8deac14"
-dependencies = [
- "ahash",
- "hashbrown 0.12.3",
-]
-
-[[package]]
-name = "symbolic_expressions"
-version = "5.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c68d531d83ec6c531150584c42a4290911964d5f0d79132b193b67252a23b71"
 
 [[package]]
 name = "syn"
@@ -1479,7 +1285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -1496,31 +1302,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
 dependencies = [
- "thiserror-impl 2.0.19",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -1623,12 +1409,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "wasi"
-version = "0.11.1+wasi-snapshot-preview1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
-
-[[package]]
 name = "wide"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1689,26 +1469,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
-]
-
-[[package]]
-name = "zerocopy"
-version = "0.8.56"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
-dependencies = [
- "zerocopy-derive",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.8.56"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]

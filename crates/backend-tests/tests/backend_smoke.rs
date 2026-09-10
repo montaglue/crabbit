@@ -22,6 +22,15 @@ fn fixture_manifest(root: &Path, fixture: &str) -> PathBuf {
 }
 
 fn backend_path(root: &std::path::Path) -> PathBuf {
+    // CRABBIT_TEST_BACKEND points the whole suite at an alternative
+    // backend dylib — e.g. crates/crabbit-research/target/debug/
+    // libcrabbit_research.so, whose linked engines make the
+    // CRABBIT_REGALLOC=eregalloc run of this suite meaningful.
+    if let Ok(path) = std::env::var("CRABBIT_TEST_BACKEND") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     let file_name = if cfg!(target_os = "macos") {
         "libcrabbit.dylib"
     } else if cfg!(target_os = "windows") {

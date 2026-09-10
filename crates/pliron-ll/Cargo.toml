@@ -24,7 +24,7 @@ serde_json.workspace = true
 [dev-dependencies]
 expect-test.workspace = true
 tempfile.workspace = true
-# Differential oracle for the dominator analysis (dev-only: a path dep in
-# [dependencies] would break `cargo publish`; dev-deps are stripped).
-cmt-boolean-dataflow = { path = "../../../combinatorial-matrix-theory/compilers/crates/boolean-dataflow", package = "boolean-dataflow" }
-cmt-support = { path = "../../../combinatorial-matrix-theory/compilers/crates/cmt-support", package = "cmt-support" }
+# The differential dominator/post-dominator tests against combinatorial-
+# matrix-theory's boolean-dataflow oracle live in the workspace-excluded
+# crates/crabbit-research (private research checkouts; even dev path deps
+# on them would break a fresh public checkout at resolution time).

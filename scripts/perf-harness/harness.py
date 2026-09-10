@@ -412,6 +412,20 @@ def check_run(proc_out, case, baseline_stdout):
 
 
 def build_backend():
+    # Research dylib first: the engine axes (CRABBIT_REGALLOC=eregalloc,
+    # cmt-provider frequencies) only exist in the composition build, which
+    # needs the private sibling checkouts (crates/crabbit-research).
+    research = REPO / "crates" / "crabbit-research"
+    if (research / "Cargo.toml").exists():
+        log("building research backend (crates/crabbit-research)...")
+        proc = run_cmd(["cargo", "build"], env=base_env(), cwd=str(research),
+                       timeout=3600)
+        backend = research / "target" / "debug" / "libcrabbit_research.so"
+        if proc.returncode == 0 and backend.exists():
+            return backend
+        log("WARNING: crabbit-research build failed (missing private "
+            "research checkouts?); falling back to the engine-less "
+            "libcrabbit.so -- eregalloc/cmt configs will error")
     log("building crabbit backend (cargo build -p crabbit)...")
     proc = run_cmd(["cargo", "build", "-p", "crabbit"], env=base_env(),
                    cwd=str(REPO), timeout=3600)

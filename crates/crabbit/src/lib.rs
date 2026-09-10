@@ -524,11 +524,17 @@ fn sanitize_trace_name(name: &str) -> String {
     }
 }
 
-// SAFETY: rustc loads custom codegen backends by looking up this exact exported symbol.
-#[unsafe(no_mangle)]
-pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
+/// The backend object, separated from the exported entry point so the
+/// research composition dylib (crates/crabbit-research) can register its
+/// engines first and then delegate here.
+pub fn create_backend() -> Box<dyn CodegenBackend> {
     Box::new(StairBackend)
 }
+
+// The #[no_mangle] __rustc_codegen_backend entry lives in the thin dylib
+// wrappers (crates/crabbit-backend, crates/crabbit-research), never here:
+// an exported entry in the rlib would collide when a wrapper defines its
+// own.
 
 pub mod trace;
 

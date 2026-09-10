@@ -1,0 +1,34 @@
+# The loadable public backend: a thin dylib over crabbit-core's rlib. This
+# package owns the `crabbit` name so `cargo build -p crabbit` and the
+# target/debug/libcrabbit.so artifact stay exactly what every script,
+# test, and doc says they are.
+[package]
+name = "crabbit"
+description = "rustc codegen backend emitting native code through pliron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["rustc", "codegen-backend", "compiler", "pliron", "llvm"]
+categories = ["compilers"]
+
+[lib]
+name = "crabbit"
+crate-type = ["dylib"]
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+# Uses `#![feature(rustc_private)]` against the `rustc-dev` component, which
+# docs.rs does not provide, so a docs.rs build can never succeed here.
+[package.metadata.docs.rs]
+targets = []
+
+[dependencies]
+crabbit-core.workspace = true
+
+[features]
+# Compat forwards; no-ops (engines are linked, not feature-gated).
+eregalloc = ["crabbit-core/eregalloc"]
+cmt = ["crabbit-core/cmt"]

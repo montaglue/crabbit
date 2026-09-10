@@ -10,13 +10,14 @@ repository.workspace = true
 pliron.workspace = true
 pliron-ll.workspace = true
 serde_json.workspace = true
-eregalloc-passes = { workspace = true, optional = true }
-cmt-spectral-cfg = { workspace = true, optional = true }
 
 [features]
-# Both research engines are on by default so every existing workflow,
-# harness invocation, and test keeps working unchanged; each can be
-# dropped to build without the corresponding sibling checkout.
-default = ["eregalloc", "cmt"]
-eregalloc = ["dep:eregalloc-passes"]
-cmt = ["dep:cmt-spectral-cfg"]
+# Engine availability is a link-time property (see the crate docs and
+# crates/crabbit-research): the private research repositories cannot be
+# referenced from this public workspace, even optionally — cargo resolves
+# optional dependencies into the lockfile regardless of features. These
+# feature names remain declared, default-off and empty, only so existing
+# `--features eregalloc,cmt` invocations keep building.
+default = []
+eregalloc = []
+cmt = []

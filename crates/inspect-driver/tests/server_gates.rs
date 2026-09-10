@@ -177,9 +177,14 @@ fn server_objects_match_the_rustc_path_and_runs_report_and_cancel() {
     let root = repo_root();
     let backend = build_backend(&root);
     let baseline = BTreeMap::new();
-    let eregalloc: BTreeMap<String, String> = [
-        ("CRABBIT_REGALLOC", "eregalloc"),
-        ("CRABBIT_REGALLOC_ORACLE", "c2"),
+    // The second config exercises the env-config plumbing with the linear
+    // engine's research axes: the eregalloc engine itself is not linked
+    // into the public backend (it lives in the workspace-excluded
+    // crates/crabbit-research), so engine-level equivalence is covered by
+    // the research build, not this public gate.
+    let weighted: BTreeMap<String, String> = [
+        ("CRABBIT_SPILL_POLICY", "weighted"),
+        ("CRABBIT_RESTORE_ESTIMATE", "remat"),
         ("CRABBIT_BLOCK_FREQ", "spectral"),
     ]
     .into_iter()
@@ -197,7 +202,7 @@ fn server_objects_match_the_rustc_path_and_runs_report_and_cancel() {
 
     // --- Equivalence: two fixtures × two configs -------------------------
     for fixture in ["hello-world-aarch64", "pure-rust-aarch64"] {
-        for (tag, config) in [("baseline", &baseline), ("eregalloc-c2-spectral", &eregalloc)] {
+        for (tag, config) in [("baseline", &baseline), ("weighted-remat-spectral", &weighted)] {
             let (text, rustc_object) = compile_fixture(&root, &backend, fixture, config, tag);
             let loaded = server.call(json!({
                 "cmd": "load_module", "name": format!("{fixture}-{tag}"), "text": text,

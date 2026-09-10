@@ -1,6 +1,6 @@
 [package]
-name = "crabbit"
-description = "rustc codegen backend emitting native code through pliron"
+name = "crabbit-core"
+description = "The crabbit rustc-backend implementation as an rlib; the thin `crabbit` package wraps it into the loadable dylib"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,13 @@ keywords = ["rustc", "codegen-backend", "compiler", "pliron", "llvm"]
 categories = ["compilers"]
 
 [lib]
-crate-type = ["dylib"]
+# rlib ONLY: every loadable backend is a thin dylib wrapper that links this
+# statically (crates/crabbit-backend for the public libcrabbit.so, the
+# workspace-excluded crates/crabbit-research for the research build).
+# Exactly one Rust dylib per rustc process — a second one reintroduces the
+# shared-generics/undefined-symbol hazards this layout exists to prevent.
+name = "crabbit_core"
+crate-type = ["rlib"]
 
 [package.metadata.rust-analyzer]
 rustc_private = true
@@ -41,6 +47,7 @@ expect-test.workspace = true
 tempfile.workspace = true
 
 [features]
-default = ["eregalloc", "cmt"]
+# Compat no-ops: engines are linked, not feature-gated (see
+# crates/research-config's docs).
 eregalloc = ["research-config/eregalloc"]
 cmt = ["research-config/cmt"]

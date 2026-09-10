@@ -1,0 +1,36 @@
+# Workspace-EXCLUDED composition crate (root Cargo.toml lists it under
+# `exclude`): the public crabbit backend linked together with the private
+# research engines. Building it requires the sibling research checkouts
+# (../../../eregalloc, ../../../combinatorial-matrix-theory); the public
+# workspace never resolves them.
+[workspace]
+
+[package]
+name = "crabbit-research"
+description = "crabbit + the private research engines (eregalloc availability-aware allocation, CMT spectral analyses) as one codegen-backend dylib"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[dependencies]
+# The core rlib, statically absorbed: this dylib is the only Rust dylib
+# in the process (see crabbit-core's [lib] comment).
+crabbit-core = { path = "../crabbit" }
+research-config = { path = "../research-config" }
+pliron-ll = { path = "../pliron-ll" }
+pliron = "0.17.0"
+serde_json = "1"
+eregalloc-passes = { path = "../../../eregalloc/eregalloc-passes" }
+cmt-spectral-cfg = { path = "../../../combinatorial-matrix-theory/compilers/crates/spectral-cfg", package = "spectral-cfg" }
+
+[dev-dependencies]
+cmt-boolean-dataflow = { path = "../../../combinatorial-matrix-theory/compilers/crates/boolean-dataflow", package = "boolean-dataflow" }
+cmt-support = { path = "../../../combinatorial-matrix-theory/compilers/crates/cmt-support", package = "cmt-support" }
+pliron-llvm = { version = "0.17.0", default-features = false }

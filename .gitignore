@@ -1,4 +1,6 @@
 /target
+crates/crabbit-research/target/
+crates/crabbit-research/Cargo.lock
 
 
 # fixture build artifacts
@@ -9,4 +11,3 @@ rustc-ice-*.txt
 __pycache__/
 *.pyc
 scripts/perf-harness/results/**/*.so
-.cargo/config.toml

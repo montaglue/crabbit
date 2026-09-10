@@ -435,85 +435,11 @@ mod tests {
         (ctx, region)
     }
 
-    /// Differential test: our dominator tree vs combinatorial-matrix-
-    /// theory's boolean-dataflow DomMatrix, on several tangled CFGs
-    /// (nested loops, shared exits, unreachable nodes).
-    #[test]
-    fn dominators_agree_with_cmt_boolean_dataflow() {
-        let shapes: &[&[&[usize]]] = &[
-            &[&[1], &[2, 3], &[1], &[]],
-            // nested loop: 0→1; 1→2|5; 2→3|4; 3→2 (inner latch); 4→1 (outer latch); 5 exit
-            &[&[1], &[2, 5], &[3, 4], &[2], &[1], &[]],
-            // diamond into loop with two exits and a shared join
-            &[&[1, 2], &[3], &[3], &[4, 5], &[3], &[6, 2], &[]],
-            // unreachable node 4
-            &[&[1], &[2, 3], &[], &[1], &[2]],
-        ];
-        for edges in shapes {
-            let (ctx, region) = build_cfg(edges);
-            let dom = dominator_tree(&ctx, region);
-            let (index, matrix) = cmt_boolean_dataflow::DomMatrix::compute(&ctx, region);
-            for a in dom.nodes() {
-                for b in dom.nodes() {
-                    assert_eq!(
-                        dom.dominates(&a, &b),
-                        matrix.dominates(index.idx(a), index.idx(b)),
-                        "dominates disagreement in shape {edges:?}"
-                    );
-                }
-                let ours = dom.idom(&a).map(|d| index.idx(d));
-                let theirs = matrix.idom(index.idx(a));
-                assert_eq!(ours, theirs, "idom disagreement in shape {edges:?}");
-            }
-        }
-    }
-
-    /// Differential: [PostDomTree] vs combinatorial-matrix-theory's
-    /// DomMatrix run on the REVERSED adjacency with a synthetic exit as
-    /// entry — post-dominance is dominance of the reversed graph, so the
-    /// two must agree exactly (including all-false rows for blocks that
-    /// never reach an exit).
-    #[test]
-    fn postdominators_agree_with_cmt_on_reversed_graph() {
-        let shapes: &[&[&[usize]]] = &[
-            &[&[1], &[2, 3], &[1], &[]],
-            &[&[1], &[2, 5], &[3, 4], &[2], &[1], &[]],
-            &[&[1, 2], &[3], &[3], &[4, 5], &[3], &[6, 2], &[]],
-            // two exits sharing nothing
-            &[&[1, 2], &[3], &[4], &[], &[]],
-            // an infinite loop (3↔4) that never reaches the exit
-            &[&[1, 3], &[2], &[], &[4], &[3]],
-        ];
-        for edges in shapes {
-            let (ctx, region) = build_cfg(edges);
-            let cfg = RegionCfg::new(&ctx, region);
-            let pdt = PostDomTree::compute(&cfg);
-            let n = cfg.blocks.len();
-            // Reversed adjacency, node 0 = synthetic exit, node i+1 = block i.
-            let mut adj = cmt_support::matrix::BoolMat::zero(n + 1);
-            for e in cfg.exit_indices() {
-                adj.set(0, e + 1, true);
-            }
-            for u in 0..n {
-                for &v in &cfg.succs[u] {
-                    adj.set(v + 1, u + 1, true);
-                }
-            }
-            let matrix = cmt_boolean_dataflow::DomMatrix::from_adjacency(&adj);
-            for a in 0..n {
-                for b in 0..n {
-                    assert_eq!(
-                        pdt.postdominates(a, b),
-                        matrix.dominates(a + 1, b + 1),
-                        "postdominates({a},{b}) disagreement in shape {edges:?}"
-                    );
-                }
-                let ours = pdt.ipdom(a).map(|i| i + 1);
-                let theirs = matrix.idom(a + 1).filter(|&i| i != 0);
-                assert_eq!(ours, theirs, "ipdom({a}) disagreement in shape {edges:?}");
-            }
-        }
-    }
+    // The differential tests against combinatorial-matrix-theory's
+    // boolean-dataflow oracle (dominators + post-dominators over these
+    // same CFG shapes) live in crates/crabbit-research/tests/
+    // cmt_differential.rs — the oracle is a private research checkout the
+    // public workspace must not resolve.
 
     /// Backward fixpoint sanity on a diamond: a bit gen'd in one arm is
     /// live-out of the entry but not of the other arm.

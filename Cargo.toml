@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["vendor"]
+exclude = ["vendor", "crates/crabbit-research"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,10 +22,9 @@ pliron = "0.17.0"
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
 pliron-llvm = { version = "0.17.0", default-features = false }
 # Our own sibling repo (github.com/montaglue/pliron-inspect), pinned by
-# rev. Day-to-day development against a local checkout goes through the
-# git-ignored .cargo/config.toml [patch] (see .cargo/config.toml.example).
-pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "be551ab37a2f2f3a05d980d76a1652066a11fa14" }
-pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "be551ab37a2f2f3a05d980d76a1652066a11fa14" }
+# rev; bump the pin after pushing changes there.
+pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "dd5cbbe8511c9d02cae4e74dba56fd77d170793d" }
+pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "dd5cbbe8511c9d02cae4e74dba56fd77d170793d" }
 # cuda-oxide's MIR-on-pliron port, consumed from the sibling clone's
 # `crabbit-patches` branch: NVlabs upstream rev b099f64c plus a minimal,
 # upstreamable patch series (see that branch's log; discipline: every patch
@@ -45,15 +44,13 @@ llvm-export = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }
-# Research engines, consumed as sibling path deps (the cuda-oxide pattern;
-# see eregalloc/INTEGRATION-CONTRACT.md). Only the `crabbit` root crate may
-# depend on them: eregalloc-passes itself depends on pliron-ll, so a
-# pliron-ll → eregalloc-passes edge would be a package cycle. The CMT crates
-# keep their upstream package names; the `package =` rename gives the
-# `cmt_*` idents.
-eregalloc-passes = { path = "../eregalloc/eregalloc-passes" }
-cmt-spectral-cfg = { path = "../combinatorial-matrix-theory/compilers/crates/spectral-cfg", package = "spectral-cfg" }
-crabbit = { path = "crates/crabbit", version = "0.1.0" }
+# The research engines (eregalloc, combinatorial-matrix-theory) are NOT
+# dependencies of this workspace: they live in private repositories, and
+# cargo resolves even optional dependencies into the lockfile, so any
+# reference here would break a fresh public checkout. They are composed
+# into a research build by the workspace-excluded crates/crabbit-research
+# dylib (path deps on the sibling checkouts; engines registered at load).
+crabbit-core = { path = "crates/crabbit", version = "0.1.0" }
 research-config = { path = "crates/research-config", version = "0.1.0", default-features = false }
 crabbit-mir = { path = "crates/mir", version = "0.1.0" }
 awint = "0"
