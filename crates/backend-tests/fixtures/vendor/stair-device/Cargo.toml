@@ -1,0 +1,8 @@
+[package]
+name = "stair-device"
+version = "0.1.0"
+edition = "2024"
+description = "VENDORED copy of kernel-corpus/crates/stair-device (keep link_names identical!): Minimal device-intrinsics shim for crabbit kernels: NVVM intrinsics as foreign declarations under their real LLVM names"
+
+[lib]
+crate-type = ["rlib"]

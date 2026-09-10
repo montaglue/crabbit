@@ -8,7 +8,9 @@ publish = false
 crate-type = ["lib"]
 
 [dependencies]
-stair-device = { path = "../../../../../kernel-corpus/crates/stair-device" }
+# Vendored so the repo is self-contained (CI/fresh clones have no
+# kernel-corpus sibling); must stay link_name-identical to the corpus copy.
+stair-device = { path = "../vendor/stair-device" }
 
 [profile.dev]
 overflow-checks = false
