@@ -15,7 +15,7 @@ extern crate rustc_driver;
 // The MIR importer targeting cuda-oxide's dialect-mir. The legacy cmir
 // importer and dialect are retired; their sources are detached from the
 // build pending deletion.
-#[path = "importer_oxide.rs"]
+#[path = "importer_oxide/mod.rs"]
 pub mod importer;
 pub mod regalloc_engine;
 pub mod kernel_llvm_export;
