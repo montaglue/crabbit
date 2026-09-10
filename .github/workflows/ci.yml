@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Full build + test on the primary target. The test suite compiles and runs
+  # fixture crates through the codegen backend dylib, so it must run on
+  # aarch64-linux. `ubuntu-24.04-arm` is GitHub's free arm64 runner for
+  # public repos.
+  build-test-aarch64:
+    name: build + test (aarch64-linux)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The arm64 runner image has ~14GB free on /. The workspace pulls a
+      # large nightly toolchain (rustc-dev + rust-src) and two git deps; if
+      # disk becomes tight, uncomment the standard bloat-removal step below.
+      # - name: Free disk space
+      #   run: |
+      #     sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+      #                 /usr/local/.ghcup /usr/local/share/boost \
+      #                 "$AGENT_TOOLSDIRECTORY"
+      #     df -h /
+
+      # rustup on the hosted runners honors rust-toolchain.toml (channel and
+      # components, incl. rustc-dev/rust-src). `rustup show` in the repo root
+      # triggers install of the pinned nightly-2026-04-03 toolchain.
+      - name: Install pinned toolchain (via rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+  # Fast signal on x86_64: type-check the target-independent crates only.
+  # Does not build the backend dylib or run fixtures.
+  check-x86_64:
+    name: check target-independent crates (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (via rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check -p pliron-ll -p research-config -p crabbit-mir --locked

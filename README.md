@@ -1,31 +1,48 @@
 # crabbit
 
-A [rustc codegen backend](https://rustc-dev-guide.rust-lang.org/backend/backend-agnostic.html)
-written entirely in Rust: MIR is imported into
-[`pliron`](https://github.com/pliron-org/pliron) (an MLIR-style IR framework)
-dialects and lowered — mid-end optimizations, instruction selection, register
-allocation, encoding — down to native **aarch64 ELF** and **Mach-O** objects,
-with **zero LLVM in the binary path**. The same dialect stack also emits
-**native NVPTX**: `#[no_mangle] __stair_kernel_*` functions become PTX that
-runs on real GPUs, again without LLVM or NVVM.
+**An LLVM-free Rust compiler backend — pure Rust from MIR to machine code —
+that compiles real crates: all four `apache/arrow-rs` core crates build
+through it today.**
 
-Around the compiler sits a toolchain built for *studying* compilation as much
-as performing it:
+`crabbit` is a [rustc codegen backend](https://rustc-dev-guide.rust-lang.org/backend/backend-agnostic.html):
+`cargo rustc -- -Zcodegen-backend=libcrabbit.so` and your crate is compiled
+by ~40 passes of hand-written Rust — MIR imported into
+[`pliron`](https://github.com/pliron-org/pliron) (an MLIR-style IR
+framework) dialects, then mid-end optimization, instruction selection,
+linear-scan register allocation, encoding — down to native **aarch64 ELF**
+(and Mach-O) objects. **No LLVM anywhere in the binary path.**
+
+```text
+   MIR ──► mir dialect ──► llvm dialect ──► aarch64 dialect ──► ELF/Mach-O
+                │  gvn · licm · div-magic         │
+                │  dse · adce · sink              └──► (registers, frames,
+                │                                       encodings: all ours)
+                └────────► native NVPTX ──► PTX ──► runs on real GPUs
+```
+
+The same dialect stack emits **native NVPTX**: `#[no_mangle]
+__stair_kernel_*` Rust functions become PTX — no LLVM, no NVVM — measured at
+geomean **1.13× nvcc** across a 14-kernel corpus, 10/14 within 3%.
+
+And underneath sits the research it was built to carry — **backward PGO**:
+every emitted instruction carries provenance through every lowering level,
+so `perf` samples and Nsight stalls flow *backward through the same pipeline
+the program flowed forward through*, each pass interpreting measured cost
+across its own transformation, all the way to the source op — and the
+optimization decision — that produced the code. We believe this framing of
+profile-guided optimization is new. → [docs/BACKWARD-PGO.md](docs/BACKWARD-PGO.md)
+
+Around the compiler:
 
 - **`crabbit-analysisd`** — a resident analysis server: load printed IR, run
   the pipeline under different configurations on a worker pool, fetch the IR
-  after any pass, get hover/def/references answers about it, download the
-  object — over stdio or loopback HTTP, with a web UI in the sibling
+  after any pass, ask hover/definition/references questions about it — over
+  stdio or loopback HTTP, with a web UI in the sibling
   [`pliron-inspect`](https://github.com/montaglue/pliron-inspect) project.
-- **Backward profile attribution** — every emitted instruction carries
-  provenance through all lowering levels, so `perf` samples (CPU) and Nsight
-  Compute stalls (GPU) are lifted *back through the pipeline* to the source
-  op — and to the optimization decision — that produced the code. See
-  [docs/BACKWARD-PGO.md](docs/BACKWARD-PGO.md); we believe this framing of
-  PGO is new.
-- **Swappable research register allocators** (cargo features `eregalloc`,
-  `cmt`) and an A/B perf harness, so allocation policies are compared on
-  real programs, not synthetic corpora.
+- **Swappable research register allocators** (an availability-aware e-graph
+  oracle among them), composed by the workspace-excluded
+  [`crates/crabbit-research`](crates/crabbit-research) dylib, and an A/B
+  perf harness — policies compared on real programs, not synthetic corpora.
 
 > **Status: research project.** Correctness is enforced by an executable
 > fixture suite and a 14-kernel CPU/GPU corpus with checksum gates, not by a
@@ -60,20 +77,32 @@ as performing it:
   (E1: `kernel-corpus/results/cpu-feedback/20260831/E1-ANALYSIS.md`,
   E4: `kernel-corpus/results/cpu-feedback/20260831/E4-ANALYSIS.md`).
 
-[SCREENSHOT: arrow-schema module IR loaded in the pliron-inspect UI]
-<!-- capture: CRABBIT_EMIT_IR=/tmp/ir cargo rustc -p arrow-schema (in an
-     arrow-rs checkout, with -Zcodegen-backend), then crabbit-analysisd
-     --http 127.0.0.1:8177 & pliron-inspect --server 127.0.0.1:8177; paste
-     the .plir into the module panel; screenshot the IR view. -->
+![arrow-schema IR at the llvm-gvn boundary in the pliron-inspect UI: the
+24 MB module compiled by crabbit, replayed per pass, browsable with
+position→op hover/definition/references](docs/images/analysisd-arrow-gvn-ir.png)
 
-[SCREENSHOT: per-pass pipeline run with live progress in the UI]
-<!-- capture: same session; start a run (target aarch64-linux, config
-     CRABBIT_REGALLOC=eregalloc); screenshot the pass list mid-run. -->
+![arrow-schema running through the 43-pass pipeline on crabbit-analysisd,
+live progress in the UI](docs/images/analysisd-arrow-run.png)
 
-[SCREENSHOT: run_costs heat view — real perf samples attributed per source op]
-<!-- capture: profile a corpus binary per scripts/perf-harness/README.md
-     ("Profile feedback" section), POST run_costs with the op_costs.json,
-     screenshot the per-op cost table / IR panel. -->
+Real measured attribution, end to end (perf samples on the running
+binary, lifted through the machine and mid-end adjoints to source-level
+op ids — `elementwise_chain`, Cortex-X925, 2 kHz cycle sampling):
+
+```text
+$ python3 scripts/perf-harness/profile_ingest.py --perf-script samples.txt \
+    --blockmap elementwise_chain.blockmap.json -o profile.json
+profile_ingest: 8948 samples attributed across 1 functions
+$ jq '.["..._elementwise_chain_cpu6kernel"].source' profile.op_costs.json \
+    | sort -rn -k2 | head -5        # top source ops by measured cycles
+"200": 1888        # the hot chain's multiply
+"174": 1055
+"208": 1043
+"186": 821
+"166": 796
+```
+
+(The UI's heat-map rendering over `run_costs` is tracked follow-up work;
+the server command and the data path above are live today.)
 
 ## Platform matrix
 
@@ -91,12 +120,13 @@ as performing it:
 **Toolchain**: pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
 (nightly + `rustc-dev`); rustup picks it up automatically.
 
-> **TODO(deps):** two dialect crates (`dialect-mir`, `mir-lower`) and the
-> inspect driver library currently resolve from sibling checkouts
-> (`../cuda-oxide`, `../pliron-inspect`); the research engines
-> (`../eregalloc`, `../combinatorial-matrix-theory`) sit behind the
-> `eregalloc`/`cmt` features. Relocation to pinned git dependencies is in
-> progress — until it lands, clone those siblings next to this repo.
+> **Dependencies:** everything a plain `cargo build` needs resolves from
+> crates.io and pinned public git revisions (our
+> [cuda-oxide fork](https://github.com/montaglue/cuda-oxide)'s
+> `crabbit-patches` branch and
+> [pliron-inspect](https://github.com/montaglue/pliron-inspect)) — no
+> sibling checkouts. The research *engines* are private and live outside
+> this workspace entirely: see **Research build** below.
 
 ### Mode 1 — codegen backend
 
@@ -164,10 +194,12 @@ metrics.
 
 | Crate | Kind | Description |
 | --- | --- | --- |
-| [`crabbit`](crates/crabbit) | `dylib`+`rlib` | The rustc backend: MIR import, pipeline driving, object + PTX + IR emission. |
+| [`crabbit-core`](crates/crabbit) | rlib | The rustc backend: MIR import, pipeline driving, object + PTX + IR emission. |
+| [`crabbit`](crates/crabbit-backend) | `dylib` | Thin loadable wrapper over `crabbit-core`: `cargo build -p crabbit` → `target/debug/libcrabbit.so`. |
 | [`crabbit-mir`](crates/mir) | lib | The `mir` dialect and its lowering into the `llvm` dialect. |
 | [`pliron-ll`](crates/pliron-ll) | lib | The heart: LLVM-dialect mid-end (GVN, LICM, DSE, ADCE, sink, div strength reduction, `TargetProfile`), aarch64/x86_64 machine dialects and pipelines, ELF/Mach-O writers, native NVPTX emission, profile/blockmap infrastructure. |
-| [`research-config`](crates/research-config) | lib | Engine/flag parsing shared by the backend and the server (features `eregalloc`, `cmt`). |
+| [`research-config`](crates/research-config) | lib | Engine/flag parsing + the engine registry, shared by the backend and the server. |
+| [`crabbit-research`](crates/crabbit-research) | `dylib`, excluded | The backend + the private research engines (eregalloc, CMT) in one `libcrabbit_research.so`; needs the sibling research checkouts. |
 | [`crabbit-inspect-driver`](crates/inspect-driver) | bins | `crabbit-inspect-driver` (one-shot pipeline CLI) and `crabbit-analysisd` (resident server). |
 | [`backend-tests`](crates/backend-tests) | tests | Builds the dylib and compiles+**runs** fixture crates through it; round-trip, kernel-on-GPU, and server-equivalence gates. |
 
@@ -186,8 +218,25 @@ internal symbols and trace strings still carry that name.
 
 ```sh
 cargo test --workspace          # ~230 tests
-CRABBIT_REGALLOC=eregalloc cargo test -p backend-tests   # fixtures under the research allocator
+# fixtures under the research allocator (research build, see below):
+CRABBIT_TEST_BACKEND=$PWD/crates/crabbit-research/target/debug/libcrabbit_research.so \
+  CRABBIT_REGALLOC=eregalloc cargo test -p backend-tests --test backend_smoke
 ```
+
+### Research build
+
+The research engines live in private repositories, composed in by the
+workspace-excluded `crates/crabbit-research` (path-deps on
+`../eregalloc` and `../combinatorial-matrix-theory` checkouts):
+
+```sh
+cd crates/crabbit-research && cargo build   # -> target/debug/libcrabbit_research.so
+```
+
+Point `-Zcodegen-backend` (or the perf harness, which prefers it
+automatically) at that dylib and the `CRABBIT_REGALLOC=eregalloc` /
+`CRABBIT_BLOCK_FREQ=cmt-provider` axes come alive; the public
+`libcrabbit.so` reports them as not linked.
 
 Every fixture executes and is output-checked; the kernel corpus adds
 checksum gates for both CPU and GPU artifacts.
