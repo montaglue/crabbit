@@ -946,7 +946,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-driver"
 version = "0.1.0"
-source = "git+https://github.com/montaglue/pliron-inspect.git?rev=dd5cbbe8511c9d02cae4e74dba56fd77d170793d#dd5cbbe8511c9d02cae4e74dba56fd77d170793d"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=934b52b7c36a2802edfd7673e59f216d0d2baf74#934b52b7c36a2802edfd7673e59f216d0d2baf74"
 dependencies = [
  "anyhow",
  "clap",
@@ -963,7 +963,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-lsp"
 version = "0.1.0"
-source = "git+https://github.com/montaglue/pliron-inspect.git?rev=dd5cbbe8511c9d02cae4e74dba56fd77d170793d#dd5cbbe8511c9d02cae4e74dba56fd77d170793d"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=934b52b7c36a2802edfd7673e59f216d0d2baf74#934b52b7c36a2802edfd7673e59f216d0d2baf74"
 dependencies = [
  "anyhow",
  "lsp-server",
@@ -976,7 +976,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-protocol"
 version = "0.1.0"
-source = "git+https://github.com/montaglue/pliron-inspect.git?rev=dd5cbbe8511c9d02cae4e74dba56fd77d170793d#dd5cbbe8511c9d02cae4e74dba56fd77d170793d"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=934b52b7c36a2802edfd7673e59f216d0d2baf74#934b52b7c36a2802edfd7673e59f216d0d2baf74"
 dependencies = [
  "anyhow",
  "serde",

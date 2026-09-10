@@ -20,6 +20,12 @@ linear-scan register allocation, encoding — down to native **aarch64 ELF**
                 └────────► native NVPTX ──► PTX ──► runs on real GPUs
 ```
 
+![A compiled function's control-flow graph in pliron-inspect's CFG view:
+per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
+
+![mem2reg before/after in the IR-diff view: allocas and stores deleted
+(red), SSA values taking their place (green)](docs/images/inspect-ir-diff.png)
+
 The same dialect stack emits **native NVPTX**: `#[no_mangle]
 __stair_kernel_*` Rust functions become PTX — no LLVM, no NVVM — measured at
 geomean **1.13× nvcc** across a 14-kernel corpus, 10/14 within 3%.

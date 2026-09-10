@@ -23,8 +23,8 @@ pliron = "0.17.0"
 pliron-llvm = { version = "0.17.0", default-features = false }
 # Our own sibling repo (github.com/montaglue/pliron-inspect), pinned by
 # rev; bump the pin after pushing changes there.
-pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "dd5cbbe8511c9d02cae4e74dba56fd77d170793d" }
-pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "dd5cbbe8511c9d02cae4e74dba56fd77d170793d" }
+pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "934b52b7c36a2802edfd7673e59f216d0d2baf74" }
+pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "934b52b7c36a2802edfd7673e59f216d0d2baf74" }
 # cuda-oxide's MIR-on-pliron port, consumed from the sibling clone's
 # `crabbit-patches` branch: NVlabs upstream rev b099f64c plus a minimal,
 # upstreamable patch series (see that branch's log; discipline: every patch
