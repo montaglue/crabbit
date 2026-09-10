@@ -5561,17 +5561,6 @@ enum UnsizeMetadata<'tcx> {
     ReuseSource,
 }
 
-fn unsized_slice_len<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    source_ty: Ty<'tcx>,
-    target_ty: Ty<'tcx>,
-) -> Result<Option<u64>, String> {
-    match unsize_metadata(tcx, source_ty, target_ty)? {
-        Some(UnsizeMetadata::SliceLen(len)) => Ok(Some(len)),
-        _ => Ok(None),
-    }
-}
-
 fn unsize_metadata<'tcx>(
     tcx: TyCtxt<'tcx>,
     source_ty: Ty<'tcx>,
@@ -7357,7 +7346,7 @@ fn block_for<'tcx>(
         .blocks
         .get(block.index())
         .copied()
-        .ok_or_else(|| format!("missing STAIR block for MIR block {block:?}"))
+        .ok_or_else(|| format!("missing crabbit block for MIR block {block:?}"))
 }
 
 fn usize_ty(ctx: &mut Context) -> TypedHandle<IntegerType> {
@@ -8136,10 +8125,6 @@ mod ox {
     use crate::linked_list::ContainsLinkedList;
     use crate::op::Op;
     use crate::region::Region;
-
-    pub fn byte_ptr_unit_key() -> Identifier {
-        "ptr_offset_unit".try_into().unwrap()
-    }
 
     pub fn func_linkage_key() -> Identifier {
         "mir_func_linkage".try_into().unwrap()

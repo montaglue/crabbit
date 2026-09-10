@@ -1,7 +1,9 @@
 [package]
 name = "backend-tests"
+description = "End-to-end tests that compile and run fixture crates through the crabbit backend dylib"
 version = "0.0.0"
 edition = "2024"
+license.workspace = true
 publish = false
 
 [dev-dependencies]

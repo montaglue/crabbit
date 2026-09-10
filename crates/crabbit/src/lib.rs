@@ -49,7 +49,7 @@ struct StairBackend;
 
 impl CodegenBackend for StairBackend {
     fn name(&self) -> &'static str {
-        "stair"
+        "crabbit"
     }
 
     fn target_cpu(&self, sess: &Session) -> String {

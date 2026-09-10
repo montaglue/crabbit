@@ -4398,7 +4398,7 @@ fn block_for<'tcx>(
         .blocks
         .get(block.index())
         .copied()
-        .ok_or_else(|| format!("missing STAIR block for MIR block {block:?}"))
+        .ok_or_else(|| format!("missing crabbit block for MIR block {block:?}"))
 }
 
 fn usize_ty(ctx: &mut Context) -> TypedHandle<IntegerType> {

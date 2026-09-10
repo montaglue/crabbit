@@ -9,7 +9,6 @@
 //! semantically a no-op, but an opaque (non-promotable) use of the slot that
 //! keeps mem2reg away from it.
 
-use crate::dialects::builtin::ops::ConstantOp;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, OneResultInterface as _};
 use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 

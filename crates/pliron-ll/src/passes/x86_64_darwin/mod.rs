@@ -21,11 +21,10 @@ mod macho;
 mod util;
 pub mod verify_llvm_for_x86_64_darwin;
 
-use crate::dialects::builtin::ops::ConstantOp;
 use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
-    conversion::pass::{AnalysisManager, Pass, Passes},
+    conversion::pass::{AnalysisManager, Passes},
     result::STAIRResult,
 };
 
@@ -83,6 +82,8 @@ pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> ST
 
 #[cfg(test)]
 mod tests {
+    use crate::dialects::builtin::ops::ConstantOp;
+    use crate::conversion::pass::Pass;
     #[allow(unused_imports)]
     use pliron::builtin::op_interfaces::{
         AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,

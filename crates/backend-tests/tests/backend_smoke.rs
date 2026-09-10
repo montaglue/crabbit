@@ -654,7 +654,7 @@ fn sudoku_solver_crate_solves_puzzles_from_arguments_with_codegen_dylib() {
 }
 
 #[test]
-#[ignore = "AMDGPU kernel path is not supported by the AArch64 Darwin STAIR object backend yet"]
+#[ignore = "AMDGPU kernel path is not supported by the AArch64 Darwin crabbit object backend yet"]
 fn backend_smoke_crate_compiles_with_codegen_dylib() {
     let root = repo_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -768,7 +768,7 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
 }
 
 #[test]
-#[ignore = "AMDGPU kernel path is not supported by the AArch64 Darwin STAIR object backend yet"]
+#[ignore = "AMDGPU kernel path is not supported by the AArch64 Darwin crabbit object backend yet"]
 fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
     let root = repo_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
