@@ -20,8 +20,9 @@ pub mod importer;
 pub mod regalloc_engine;
 pub mod kernel_llvm_export;
 
+use rustc_codegen_ssa::target_features::cfg_target_feature;
 use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo};
+use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, TargetConfig};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
@@ -61,9 +62,33 @@ impl CodegenBackend for StairBackend {
     /// the ABI-required features are on and warns on every compile that
     /// `neon` "must be enabled to ensure that the ABI of the current target
     /// can be implemented correctly".
+    fn target_config(&self, sess: &Session) -> TargetConfig {
+        let abi_required = sess.target.abi_required_features();
+        let (target_features, unstable_target_features) = cfg_target_feature::<0>(
+            sess,
+            |_feature| Default::default(),
+            |feature| abi_required.required.contains(&feature),
+        );
+        TargetConfig {
+            target_features,
+            unstable_target_features,
+            // The backend has no verified f16/f128 support; report them
+            // unreliable so `cfg(target_has_reliable_f16)`-style gates stay
+            // honest for code compiled through it.
+            has_reliable_f16: false,
+            has_reliable_f16_math: false,
+            has_reliable_f128: false,
+            has_reliable_f128_math: false,
+        }
+    }
 
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>, _crate_info: &CrateInfo) -> Box<dyn Any> {
-        Box::new(importer::import_crate(tcx))
+        // The importer names symbols via `def_path_str`, which outside this
+        // guard consults the diagnostic path-trimming machinery: names could
+        // come out trimmed, and computing `trimmed_def_paths` on a
+        // warning-free compile is an ICE ("diagnostics were expected but
+        // none were emitted"). Force full, stable paths instead.
+        rustc_middle::ty::print::with_no_trimmed_paths!(Box::new(importer::import_crate(tcx)))
     }
 
     fn join_codegen(
