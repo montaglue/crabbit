@@ -12,7 +12,10 @@
 //!
 //! One `f64` per machine block in RA-time region order, normalized the way
 //! [spectral_frequencies](crate::passes::spectral_freq::spectral_frequencies)
-//! normalizes: `freq[b] = samples[b] / samples[entry]`, entry = 1.0.
+//! normalizes with additive smoothing (a sampled zero is a resolution
+//! floor, not "never executes") and rescales so `freq[entry] == 1.0`
+//! exactly — the same unit the spectral model guarantees, so cross-model
+//! comparisons stay on one scale.
 //! Determinism of the pipeline makes the RA-time CFG (and so the indices)
 //! identical between the profiled build and the rebuild as long as
 //! compiler, flags, and sources match.

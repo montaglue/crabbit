@@ -25,7 +25,8 @@ def run_ingest(argv):
 
 
 class IngestFixtureTest(unittest.TestCase):
-    def ingest(self, perf_scripts, blockmaps=None, want_op_costs=False):
+    def ingest(self, perf_scripts, blockmaps=None, want_op_costs=False,
+               extra_argv=None):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "profile.json")
             argv = []
@@ -34,6 +35,7 @@ class IngestFixtureTest(unittest.TestCase):
             for script in perf_scripts:
                 argv += ["--perf-script", script]
             argv += ["-o", out]
+            argv += extra_argv or []
             self.assertEqual(run_ingest(argv), 0)
             with open(out) as handle:
                 profile = json.load(handle)
@@ -80,11 +82,36 @@ class IngestFixtureTest(unittest.TestCase):
                 # Samples only in the loop body: the unsampled entry is
                 # forced to one sample; smoothing floors the unsampled
                 # blocks at the detection threshold instead of 0.0 (a
-                # literal zero marks uses there as free to spill — see
-                # normalize()).
+                # literal zero marks uses there as free to spill), and the
+                # vector is rescaled so freq[entry] == 1.0 exactly — the
+                # contract shared with the spectral model (see normalize()).
                 handle.write("\t1000 hot_loop+0x10\n" * 5)
             profile = self.ingest([script])
-        self.assertEqual(profile["hot_loop"], [0.5, 0.5, 3.0])
+        self.assertEqual(profile["hot_loop"], [1.0, 1.0, 6.0])
+
+    def test_smooth_zero_restores_raw_counts(self):
+        # `--smooth 0` is the documented A/B switch back to unsmoothed
+        # frequencies (entry forced to >= 1 sample, unsampled blocks 0.0).
+        profile = self.ingest([PERF_SCRIPT], extra_argv=["--smooth", "0"])
+        self.assertEqual(profile["hot_loop"], [1.0, 0.5, 4.0])
+        self.assertEqual(profile["helper"], [1.0])
+
+    def test_root_names_cover_rust_roots(self):
+        # Keep ROOT_NAMES in sync with `pub mod roots` in
+        # crates/pliron-ll/src/passes/aarch64/opmap.rs (ISEL_ABI..MIDEND).
+        self.assertEqual(
+            profile_ingest.ROOT_NAMES,
+            {
+                -1: "isel:abi",
+                -2: "regalloc",
+                -3: "frame",
+                -4: "placement",
+                -5: "unattributed",
+                -6: "midend",
+            },
+        )
+        for root in range(-6, 0):
+            self.assertNotIn("root:", profile_ingest.lifted_key(root))
 
     def test_unsampled_symbols_are_omitted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,9 +143,9 @@ class IngestFixtureTest(unittest.TestCase):
                 handle.write("\t1000 second_obj_fn+0x10\n")
                 handle.write("\t1000 hot_loop+0x10\n")
             profile = self.ingest([script], blockmaps=[BLOCKMAP, other])
-        self.assertEqual(profile["second_obj_fn"], [0.5, 1.5])
+        self.assertEqual(profile["second_obj_fn"], [1.0, 3.0])
         # hot_loop kept the fixture's 3-block shape (offset 0x10 = id 2).
-        self.assertEqual(profile["hot_loop"], [0.5, 0.5, 1.0])
+        self.assertEqual(profile["hot_loop"], [1.0, 1.0, 2.0])
 
     def test_demangled_symbols_with_spaces_still_parse(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -105,7 +105,12 @@ impl Pass for LLVMGvnPass {
 /// are part of the key. Constants are left to the folder.
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum ExprKey {
-    Bin(OpId, Value, Value, TypeHandle),
+    /// The `(nsw, nuw)` pair is part of a binary op's identity: merging a
+    /// wrapping op into a dominating nsw/nuw op (or vice versa) would give
+    /// overflowing inputs poison semantics they never had. Conservative:
+    /// ops CSE only when their flags are identical (LLVM's GVN intersects
+    /// flags on merge instead; equality is the safe subset).
+    Bin(OpId, Value, Value, TypeHandle, (bool, bool)),
     Cast(OpId, Value, TypeHandle),
     ICmp(ICmpPredicateAttr, Value, Value),
     Gep(TypeHandle, Value, Vec<IdxKey>),
@@ -155,11 +160,19 @@ fn expr_key(
     let opid = Operation::get_opid(op, ctx);
     let operation = op.deref(ctx);
     if bins.contains(&opid) {
+        let flags = operation
+            .attributes
+            .get::<pliron_llvm::attributes::IntegerOverflowFlagsAttr>(
+                &pliron_llvm::op_interfaces::ATTR_KEY_INTEGER_OVERFLOW_FLAGS,
+            )
+            .map(|flag| (flag.nsw, flag.nuw))
+            .unwrap_or((false, false));
         return Some(ExprKey::Bin(
             opid,
             operation.get_operand(0),
             operation.get_operand(1),
             operation.get_result(0).get_type(ctx),
+            flags,
         ));
     }
     if casts.contains(&opid) {
@@ -494,6 +507,35 @@ mod tests {
 
         let text = run_gvn(&mut ctx, func);
         assert_eq!(text.matches("llvm.add").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn cse_respects_overflow_flags() {
+        use pliron_llvm::attributes::IntegerOverflowFlagsAttr;
+        let mut ctx = Context::new();
+        let (func, entry, a, _p) = scaffold(&mut ctx);
+
+        // nsw add dominating a plain wrapping add: MUST NOT merge (the
+        // wrapping op would inherit poison-on-overflow semantics).
+        let nsw = IntegerOverflowFlagsAttr { nsw: true, nuw: false };
+        let add_nsw = AddOp::new_with_overflow_flag(&mut ctx, a, a, nsw.clone());
+        add_nsw.get_operation().insert_at_back(entry, &ctx);
+        let add_plain = AddOp::new_with_overflow_flag(&mut ctx, a, a, Default::default());
+        add_plain.get_operation().insert_at_back(entry, &ctx);
+        // Two identical nsw adds: MUST merge.
+        let add_nsw2 = AddOp::new_with_overflow_flag(&mut ctx, a, a, nsw);
+        add_nsw2.get_operation().insert_at_back(entry, &ctx);
+        let ret_v = add_nsw2.get_result(&ctx);
+        ReturnOp::new(&mut ctx, Some(ret_v))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        let text = run_gvn(&mut ctx, func);
+        assert_eq!(
+            text.matches("llvm.add").count(),
+            2,
+            "nsw+plain must stay distinct, nsw+nsw must merge:\n{text}"
+        );
     }
 
     #[test]

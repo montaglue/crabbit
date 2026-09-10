@@ -128,3 +128,20 @@ Follow-up: target-aware sink policy — kernel pipeline forbids sinking
 that adds control dependence (or requires warp-uniform guards); host
 pipeline keeps the aggressive form. Until then the recorded axis
 (CRABBIT_MIDEND_DISABLE=sink) is the control.
+
+## Tracked: consolidate the op-safety classification (review finding, 2026-09-10)
+
+Five hand-maintained OpId sets encode op safety across peer passes —
+simplify's `pure_op_ids`, licm's `hoistable_op_ids`, sink's
+`sinkable_op_ids`, gvn's `bin_op_ids`/`cast_op_ids`/`benign_op_ids`, and
+dse's reuse of gvn's — and all of them omit FP arithmetic
+(FAdd/FSub/FMul/FDiv/FNeg), `SelectOp`, and the FP casts the pipeline
+demonstrably carries. Consequence: every FP op is conservatively treated
+as an unknown-effect op (GVN kills load-forwarding windows across an
+`fadd`; ADCE roots dead FP math; LICM/sink skip it) — silent, divergent
+per pass, and every new dialect op must be remembered in up to five lists
+in four files. Plan: one shared classification table (op → {pure,
+speculatable, memory effects}) in `passes/llvm/analysis.rs` that every
+pass derives its set from, with the FP ops classified; a missed op then
+fails in ONE place. Not done in the review-fix round: touching the safety
+sets changes what every pass may do and deserves its own measured commit.

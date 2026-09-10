@@ -313,26 +313,35 @@ def render_op_costs(op_counts, midend_tables=None):
 def normalize(blockmaps, counts, smooth=1.0):
     """{symbol: [freq per RA-order block index]} for sampled symbols.
 
-    Additive (Laplace) smoothing, default alpha=1: freq[b] =
-    (samples[b] + alpha) / (samples[entry] + alpha). A sampled count of
-    zero means "below the sampler's resolution", NOT "never executes" —
-    a block can run tens of thousands of times too cheaply to catch a
-    2 kHz sample. Feeding literal 0.0 into a frequency-weighted spill
-    score marks every value used in such blocks as free to evict and
-    invites unlimited spill traffic there (measured on gemm_tiled:
-    kfn_ldr_sp 115→136 and −3.5% runtime before smoothing). The floor is
-    one sample: the detection threshold. `--smooth 0` restores the old
-    behavior for comparison."""
+    Additive (Laplace) smoothing, default alpha=1: counts are floored by
+    alpha before normalizing. A sampled count of zero means "below the
+    sampler's resolution", NOT "never executes" — a block can run tens of
+    thousands of times too cheaply to catch a 2 kHz sample. Feeding
+    literal 0.0 into a frequency-weighted spill score marks every value
+    used in such blocks as free to evict and invites unlimited spill
+    traffic there (measured on gemm_tiled: kfn_ldr_sp 115→136 and −3.5%
+    runtime before smoothing). The floor is one sample: the detection
+    threshold. `--smooth 0` restores the old behavior for comparison.
+
+    The vector is then rescaled so freq[entry] == 1.0 EXACTLY — the
+    normalization contract shared with the spectral model
+    (crates/pliron-ll/src/passes/{profile_freq,spectral_freq}.rs): entry
+    is the unit, and cross-model or cross-function comparisons rely on
+    it. Smoothing must not halve the scale of a function whose entry sat
+    below the sampler's resolution."""
     profile = {}
     for symbol, block_counts in counts.items():
         if not block_counts:
             continue
         blocks = blockmaps[symbol]["blocks"]
-        entry_samples = max(block_counts.get(0, 0), 1) + smooth
-        profile[symbol] = [
+        entry_samples = float(max(block_counts.get(0, 0), 1) + smooth)
+        vector = [
             (block_counts.get(block, 0) + smooth) / entry_samples
             for block in range(blocks)
         ]
+        # Rescale so the entry block is exactly 1.0 (see docstring).
+        entry = vector[0] if vector and vector[0] > 0 else 1.0
+        profile[symbol] = [value / entry for value in vector]
     return profile
 
 
