@@ -1,0 +1,10 @@
+# Copy to .cargo/config.toml (git-ignored) to develop against local sibling
+# checkouts instead of the pinned git revisions.
+[patch."https://github.com/montaglue/cuda-oxide.git"]
+dialect-mir = { path = "../cuda-oxide/crates/dialect-mir" }
+mir-lower = { path = "../cuda-oxide/crates/mir-lower" }
+llvm-export = { path = "../cuda-oxide/crates/llvm-export" }
+
+[patch."https://github.com/montaglue/pliron-inspect.git"]
+pliron-inspect-driver = { path = "../pliron-inspect/crates/driver" }
+pliron-inspect-protocol = { path = "../pliron-inspect/crates/protocol" }

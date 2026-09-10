@@ -21,10 +21,11 @@ pliron = "0.17.0"
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
 pliron-llvm = { version = "0.17.0", default-features = false }
-# Our own sibling repo (montaglue/pliron-inspect), consumed by path while
-# both projects move together; NOT yet published to crates.io.
-pliron-inspect-driver = { path = "../pliron-inspect/crates/driver", version = "0.1.0" }
-pliron-inspect-protocol = { path = "../pliron-inspect/crates/protocol", version = "0.1.0" }
+# Our own sibling repo (github.com/montaglue/pliron-inspect), pinned by
+# rev. Day-to-day development against a local checkout goes through the
+# git-ignored .cargo/config.toml [patch] (see .cargo/config.toml.example).
+pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "be551ab37a2f2f3a05d980d76a1652066a11fa14" }
+pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "be551ab37a2f2f3a05d980d76a1652066a11fa14" }
 # cuda-oxide's MIR-on-pliron port, consumed from the sibling clone's
 # `crabbit-patches` branch: NVlabs upstream rev b099f64c plus a minimal,
 # upstreamable patch series (see that branch's log; discipline: every patch
@@ -32,11 +33,15 @@ pliron-inspect-protocol = { path = "../pliron-inspect/crates/protocol", version 
 # pliron pin must stay identical to ours or types do not unify. Their
 # dialect also registers as `mir`, so a Context can hold either this
 # dialect or crabbit's own `cmir`, never both.
-dialect-mir = { path = "../cuda-oxide/crates/dialect-mir", version = "0.2.1" }
-mir-lower = { path = "../cuda-oxide/crates/mir-lower", version = "0.2.1" }
+# The crabbit-patches branch of our fork of NVlabs/cuda-oxide: upstream
+# rev b099f64c plus two patches (function-linkage propagation through the
+# lowering; port to crates.io pliron 0.17). Both written to be
+# upstreamable; drop the fork when they land there.
+dialect-mir = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad357fffa26cd5801f110cea286d4a5c92a032" }
+mir-lower = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad357fffa26cd5801f110cea286d4a5c92a032" }
 # cuda-oxide's textual LLVM IR exporter: the bridge from crabbit's kernel
 # module to the LLVM NVPTX toolchain (the "rust-llvm" comparison arm).
-llvm-export = { path = "../cuda-oxide/crates/llvm-export", version = "0.2.1" }
+llvm-export = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad357fffa26cd5801f110cea286d4a5c92a032" }
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }

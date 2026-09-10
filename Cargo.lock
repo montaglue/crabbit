@@ -459,6 +459,7 @@ dependencies = [
 [[package]]
 name = "dialect-mir"
 version = "0.2.1"
+source = "git+https://github.com/montaglue/cuda-oxide.git?rev=c8ad357fffa26cd5801f110cea286d4a5c92a032#c8ad357fffa26cd5801f110cea286d4a5c92a032"
 dependencies = [
  "combine",
  "linkme",
@@ -471,6 +472,7 @@ dependencies = [
 [[package]]
 name = "dialect-nvvm"
 version = "0.2.1"
+source = "git+https://github.com/montaglue/cuda-oxide.git?rev=c8ad357fffa26cd5801f110cea286d4a5c92a032#c8ad357fffa26cd5801f110cea286d4a5c92a032"
 dependencies = [
  "combine",
  "dialect-mir",
@@ -901,6 +903,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "llvm-export"
 version = "0.2.1"
+source = "git+https://github.com/montaglue/cuda-oxide.git?rev=c8ad357fffa26cd5801f110cea286d4a5c92a032#c8ad357fffa26cd5801f110cea286d4a5c92a032"
 dependencies = [
  "bitflags 2.13.1",
  "combine",
@@ -965,6 +968,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mir-lower"
 version = "0.2.1"
+source = "git+https://github.com/montaglue/cuda-oxide.git?rev=c8ad357fffa26cd5801f110cea286d4a5c92a032#c8ad357fffa26cd5801f110cea286d4a5c92a032"
 dependencies = [
  "anyhow",
  "dialect-mir",
@@ -1059,6 +1063,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-driver"
 version = "0.1.0"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=be551ab37a2f2f3a05d980d76a1652066a11fa14#be551ab37a2f2f3a05d980d76a1652066a11fa14"
 dependencies = [
  "anyhow",
  "clap",
@@ -1075,6 +1080,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-lsp"
 version = "0.1.0"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=be551ab37a2f2f3a05d980d76a1652066a11fa14#be551ab37a2f2f3a05d980d76a1652066a11fa14"
 dependencies = [
  "anyhow",
  "lsp-server",
@@ -1087,6 +1093,7 @@ dependencies = [
 [[package]]
 name = "pliron-inspect-protocol"
 version = "0.1.0"
+source = "git+https://github.com/montaglue/pliron-inspect.git?rev=be551ab37a2f2f3a05d980d76a1652066a11fa14#be551ab37a2f2f3a05d980d76a1652066a11fa14"
 dependencies = [
  "anyhow",
  "serde",
@@ -1254,6 +1261,7 @@ dependencies = [
 [[package]]
 name = "reserved-oxide-symbols"
 version = "0.2.1"
+source = "git+https://github.com/montaglue/cuda-oxide.git?rev=c8ad357fffa26cd5801f110cea286d4a5c92a032#c8ad357fffa26cd5801f110cea286d4a5c92a032"
 
 [[package]]
 name = "rustc-hash"

@@ -9,3 +9,4 @@ rustc-ice-*.txt
 __pycache__/
 *.pyc
 scripts/perf-harness/results/**/*.so
+.cargo/config.toml
