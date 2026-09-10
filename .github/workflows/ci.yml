@@ -25,6 +25,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: System deps (triskel C++ bindings need libfmt + modern g++)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-14 libfmt-dev libffi-dev
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
 
       # The arm64 runner image has ~14GB free on /. The workspace pulls a
       # large nightly toolchain (rustc-dev + rust-src) and two git deps; if
@@ -58,6 +64,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: System deps (triskel C++ bindings need libfmt + modern g++)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-14 libfmt-dev libffi-dev
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
 
       - name: Install pinned toolchain (via rust-toolchain.toml)
         run: rustup show

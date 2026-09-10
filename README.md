@@ -104,6 +104,14 @@ $ jq '.["..._elementwise_chain_cpu6kernel"].source' profile.op_costs.json \
 (The UI's heat-map rendering over `run_costs` is tracked follow-up work;
 the server command and the data path above are live today.)
 
+## Prerequisites
+
+- Rust **nightly-2026-04-03** with `rustc-dev` + `rust-src` (installed
+  automatically via `rust-toolchain.toml`).
+- A C++ toolchain with libfmt for the CFG-layout bindings the inspect
+  driver links (`triskel`): `apt install g++-14 libfmt-dev libffi-dev`
+  (or any g++ ≥ 13 with fmt headers on the include path).
+
 ## Platform matrix
 
 | Component | Where it runs |
