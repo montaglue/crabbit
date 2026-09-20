@@ -9,10 +9,11 @@
 //!   structured Rust code have one.
 //! - Only non-trapping pure ops are hoisted (no udiv/sdiv/urem/srem: a
 //!   hoisted trap would be speculation, since the preheader runs even
-//!   when the header exits before the body). Loads are never hoisted (no
-//!   dereferenceability model). Operand-less ops (constants, undef,
-//!   addressof, cstr) are left alone: they carry no computation and
-//!   hoisting them only extends live ranges — the RA experiments'
+//!   when the header exits before the body; FP ops never trap — the
+//!   dialect models no FP exceptions — so they hoist). Loads are never
+//!   hoisted (no dereferenceability model). Operand-less ops (constants,
+//!   undef, addressof, cstr) are left alone: they carry no computation
+//!   and hoisting them only extends live ranges — the RA experiments'
 //!   independent variable.
 //! - Loops are processed innermost first, so invariants chain outward
 //!   one level per fixpoint iteration.
@@ -23,16 +24,10 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     context::{Context, Ptr},
-    dialects::llvm::{
-        op_interfaces::IsDeclaration,
-        ops::{
-            AddOp, AndOp, BitcastOp, ExtractValueOp, GetElementPtrOp, ICmpOp, IntToPtrOp,
-            LShrOp, MulOp, OrOp, PtrToIntOp, SExtOp, ShlOp, SubOp, TruncOp, XorOp, ZExtOp,
-        },
-    },
+    dialects::llvm::op_interfaces::IsDeclaration,
     ir::{
         basic_block::BasicBlock,
-        op::{Op, OpId},
+        op::OpId,
         operation::Operation,
         region::Region,
         value::{DefiningEntity, Value},
@@ -42,7 +37,7 @@ use crate::{
 };
 
 use super::{
-    analysis::{dominator_tree, natural_loops},
+    analysis::{OpEffect, dominator_tree, natural_loops, op_ids_in},
     inline::collect_functions,
     midend_gate::midend_disabled,
 };
@@ -86,27 +81,11 @@ impl Pass for LLVMLicmPass {
     }
 }
 
-/// Pure AND non-trapping AND with at least one operand (see module docs).
+/// Pure AND non-trapping (see module docs): the shared table's `Pure`
+/// class exactly. The at-least-one-operand condition stays a runtime
+/// check in [hoist_in_region] (operand-less ops are a separate class).
 pub(crate) fn hoistable_op_ids() -> FxHashSet<OpId> {
-    let mut ids = FxHashSet::default();
-    ids.insert(AddOp::get_opid_static());
-    ids.insert(SubOp::get_opid_static());
-    ids.insert(MulOp::get_opid_static());
-    ids.insert(AndOp::get_opid_static());
-    ids.insert(OrOp::get_opid_static());
-    ids.insert(XorOp::get_opid_static());
-    ids.insert(ShlOp::get_opid_static());
-    ids.insert(LShrOp::get_opid_static());
-    ids.insert(ICmpOp::get_opid_static());
-    ids.insert(ZExtOp::get_opid_static());
-    ids.insert(SExtOp::get_opid_static());
-    ids.insert(TruncOp::get_opid_static());
-    ids.insert(BitcastOp::get_opid_static());
-    ids.insert(IntToPtrOp::get_opid_static());
-    ids.insert(PtrToIntOp::get_opid_static());
-    ids.insert(GetElementPtrOp::get_opid_static());
-    ids.insert(ExtractValueOp::get_opid_static());
-    ids
+    op_ids_in(&[OpEffect::Pure])
 }
 
 fn defined_in(ctx: &Context, value: Value, body: &FxHashSet<Ptr<BasicBlock>>) -> bool {
@@ -185,13 +164,16 @@ mod tests {
             llvm::{
                 attributes::LinkageAttr,
                 ops::{
-                    BrOp, CondBrOp, FuncOp, GepIndex, LoadOp, ReturnOp, SDivOp, StoreOp,
-                    UndefOp,
+                    AddOp, BrOp, CondBrOp, FuncOp, GepIndex, GetElementPtrOp, LoadOp, ReturnOp,
+                    SDivOp, StoreOp, UndefOp,
                 },
                 types::{FuncType, PointerType},
             },
         },
-        ir::r#type::{TypeHandle, TypedHandle},
+        ir::{
+            op::Op,
+            r#type::{TypeHandle, TypedHandle},
+        },
         printable::Printable,
     };
 
@@ -282,6 +264,43 @@ mod tests {
         assert!(entry_text.contains("llvm.gep"), "{entry_text}");
         assert!(!body_text.contains("llvm.add"), "{body_text}");
         assert!(!body_text.contains("llvm.gep"), "{body_text}");
+        assert!(body_text.contains("llvm.store"), "{body_text}");
+    }
+
+    #[test]
+    fn hoists_invariant_fp_chain_to_preheader() {
+        use pliron_llvm::attributes::FastmathFlagsAttr;
+        use pliron_llvm::op_interfaces::{
+            CastOpInterface as _, FloatBinArithOpWithFastMathFlags as _,
+        };
+        use crate::dialects::builtin::types::FP32Type;
+        use crate::dialects::llvm::ops::{FMulOp, SIToFPOp};
+        let mut ctx = Context::new();
+        let (func, entry, _header, body, _exit, a, p) = loop_scaffold(&mut ctx);
+        let f32_ty: TypeHandle = FP32Type::get(&ctx).into();
+
+        // Invariant FP chain in the body: t = sitofp a; m = fmul t, t;
+        // plus a store of m (not hoistable) so the loop isn't empty.
+        // Neither op was hoistable before the shared classification.
+        let cast = SIToFPOp::new(&mut ctx, a, f32_ty);
+        let cast_v = cast.get_result(&ctx);
+        let mul = FMulOp::new_with_fast_math_flags(&mut ctx, cast_v, cast_v, FastmathFlagsAttr::default());
+        let mul_v = mul.get_result(&ctx);
+        let store = StoreOp::new(&mut ctx, mul_v, p);
+        let terminator = body.deref(&ctx).get_terminator(&ctx).unwrap();
+        cast.get_operation().insert_before(&ctx, terminator);
+        mul.get_operation().insert_before(&ctx, terminator);
+        store.get_operation().insert_before(&ctx, terminator);
+
+        LLVMLicmPass
+            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+        let entry_text = block_ops_text(&ctx, entry);
+        let body_text = block_ops_text(&ctx, body);
+        assert!(entry_text.contains("llvm.sitofp"), "{entry_text}");
+        assert!(entry_text.contains("llvm.fmul"), "{entry_text}");
+        assert!(!body_text.contains("llvm.sitofp"), "{body_text}");
+        assert!(!body_text.contains("llvm.fmul"), "{body_text}");
         assert!(body_text.contains("llvm.store"), "{body_text}");
     }
 

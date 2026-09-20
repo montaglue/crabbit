@@ -29,7 +29,7 @@ use crate::{
     context::{Context, Ptr},
     dialects::llvm::{
         op_interfaces::IsDeclaration,
-        ops::{SDivOp, SRemOp, UDivOp, URemOp},
+        ops::AddressOfOp,
     },
     ir::{
         basic_block::BasicBlock,
@@ -42,14 +42,15 @@ use crate::{
 };
 
 use super::{
-    analysis::{PostDomTree, RegionCfg, dominator_tree, natural_loops, nearest_common_dominator},
+    analysis::{
+        OpEffect, PostDomTree, RegionCfg, dominator_tree, natural_loops,
+        nearest_common_dominator, op_ids_in,
+    },
     inline::collect_functions,
-    licm::hoistable_op_ids,
     midend_gate::midend_disabled,
 };
 use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
-use crate::dialects::builtin::ops::ConstantOp;
-use crate::dialects::llvm::ops::{PoisonOp, UndefOp};
+use crate::ll::ops::CStrOp;
 
 const MAX_ITERATIONS: usize = 4;
 
@@ -116,19 +117,18 @@ impl Pass for LLVMSinkPass {
     }
 }
 
-/// licm's hoistable set (pure, single result) plus div/rem — safe to sink,
-/// see module docs — plus the operand-less constants, whose live ranges
-/// only shrink by moving toward uses. Allocas, loads and address-carrying
-/// ops stay put.
+/// The shared table's pure ops, trapping included (div/rem — safe to
+/// sink, see module docs), plus the operand-less materializations, whose
+/// live ranges only shrink by moving toward uses. Allocas, loads and the
+/// address-carrying materializations (addressof, cstr) stay put.
 fn sinkable_op_ids() -> FxHashSet<OpId> {
-    let mut ids = hoistable_op_ids();
-    ids.insert(UDivOp::get_opid_static());
-    ids.insert(SDivOp::get_opid_static());
-    ids.insert(URemOp::get_opid_static());
-    ids.insert(SRemOp::get_opid_static());
-    ids.insert(ConstantOp::get_opid_static());
-    ids.insert(UndefOp::get_opid_static());
-    ids.insert(PoisonOp::get_opid_static());
+    let mut ids = op_ids_in(&[
+        OpEffect::Pure,
+        OpEffect::PureTrapping,
+        OpEffect::Materialize,
+    ]);
+    ids.remove(&AddressOfOp::get_opid_static());
+    ids.remove(&CStrOp::get_opid_static());
     ids
 }
 

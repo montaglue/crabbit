@@ -1,6 +1,6 @@
 //! Aggressive dead-code elimination (docs/MIDEND-PLAN.md item 8):
 //! mark-and-sweep over SSA. Roots are every block terminator and every op
-//! with side effects (anything outside simplify's pure set — stores,
+//! with side effects (anything outside the shared deletable set — stores,
 //! calls, ops with unknown effects); marking propagates backward through
 //! operands; unmarked ops are erased.
 //!
@@ -23,9 +23,9 @@ use crate::{
 };
 
 use super::{
+    analysis::deletable_op_ids,
     inline::collect_functions,
     midend_gate::midend_disabled,
-    simplify::pure_op_ids,
 };
 use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 
@@ -45,7 +45,7 @@ impl Pass for LLVMAdcePass {
         if midend_disabled("adce") {
             return Ok(unchanged());
         }
-        let pure = pure_op_ids();
+        let pure = deletable_op_ids();
         let mut any = false;
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
@@ -192,6 +192,40 @@ mod tests {
         let text = run_adce(&mut ctx, func);
         assert!(!text.contains("llvm.add"), "{text}");
         assert!(!text.contains("llvm.mul"), "{text}");
+    }
+
+    #[test]
+    fn removes_dead_fp_chain() {
+        use pliron_llvm::attributes::FastmathFlagsAttr;
+        use pliron_llvm::op_interfaces::{
+            CastOpInterface as _, FloatBinArithOpWithFastMathFlags as _,
+        };
+        use crate::dialects::builtin::types::FP32Type;
+        use crate::dialects::llvm::ops::{FAddOp, SIToFPOp};
+        let mut ctx = Context::new();
+        let (func, entry, a, _p) = scaffold(&mut ctx);
+        let f32_ty: TypeHandle = FP32Type::get(&ctx).into();
+
+        // Dead FP chain: sitofp feeding an unused fadd. Both were roots
+        // before the shared classification (outside the pure set) and
+        // survived adce; now the whole chain must go.
+        let cast = SIToFPOp::new(&mut ctx, a, f32_ty);
+        cast.get_operation().insert_at_back(entry, &ctx);
+        let cast_v = cast.get_result(&ctx);
+        let fadd = FAddOp::new_with_fast_math_flags(
+            &mut ctx,
+            cast_v,
+            cast_v,
+            FastmathFlagsAttr::default(),
+        );
+        fadd.get_operation().insert_at_back(entry, &ctx);
+        ReturnOp::new(&mut ctx, Some(a))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        let text = run_adce(&mut ctx, func);
+        assert!(!text.contains("llvm.fadd"), "{text}");
+        assert!(!text.contains("llvm.sitofp"), "{text}");
     }
 
     #[test]

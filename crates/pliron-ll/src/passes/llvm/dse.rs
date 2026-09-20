@@ -10,8 +10,8 @@
 //!   different allocas, or one is rooted at a non-escaping alloca and the
 //!   other at anything else (a never-escaping address cannot be reached
 //!   through an unrelated pointer).
-//! - Calls, returns and every op outside gvn's benign set read all keys
-//!   except those rooted at non-escaping allocas.
+//! - Calls and every op outside the shared memory-benign set read all
+//!   keys except those rooted at non-escaping allocas.
 //! - Kills are exact-key only; the function-exit boundary keeps every key
 //!   live except the non-escaping-alloca-rooted ones.
 //! - An alloca escapes if any value derived from it through GEP/bitcast is
@@ -39,8 +39,8 @@ use crate::{
 };
 
 use super::{
-    analysis::{BitSet, RegionCfg, backward_bitset_fixpoint},
-    gvn::{AddrKey, addr_key, benign_op_ids},
+    analysis::{BitSet, RegionCfg, backward_bitset_fixpoint, memory_benign_op_ids},
+    gvn::{AddrKey, addr_key},
     inline::collect_functions,
     midend_gate::midend_disabled,
 };
@@ -62,7 +62,7 @@ impl Pass for LLVMGlobalDsePass {
         if midend_disabled("dse") {
             return Ok(unchanged());
         }
-        let benign = benign_op_ids();
+        let benign = memory_benign_op_ids();
         let mut any = false;
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {

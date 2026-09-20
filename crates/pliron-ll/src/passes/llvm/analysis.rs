@@ -2,13 +2,30 @@
 //! dominators (pliron's Cooper–Harvey–Kennedy implementation, re-exported
 //! with region-CFG types fixed), natural-loop detection, post-dominators
 //! (the same iterative algorithm on the reversed CFG with a synthetic
-//! exit), and a generic backward bitset dataflow fixpoint.
+//! exit), a generic backward bitset dataflow fixpoint, and the op-effect
+//! classification every pass's op-safety set derives from.
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     context::{Context, Ptr},
-    ir::{basic_block::BasicBlock, region::Region},
+    dialects::{
+        builtin::ops::ConstantOp,
+        llvm::ops::{
+            AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CondBrOp,
+            ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp, FPToUIOp,
+            FPTruncOp, FRemOp, FSubOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
+            LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp, SExtOp,
+            SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp, UIToFPOp,
+            URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp,
+        },
+    },
+    ir::{
+        basic_block::BasicBlock,
+        op::{Op, OpId},
+        region::Region,
+    },
+    ll::ops::CStrOp,
 };
 
 pub use pliron::graph::dominance::{DomTree, compute_dominator_tree};
@@ -379,6 +396,144 @@ pub fn backward_bitset_fixpoint(
         }
     }
     (live_in, live_out)
+}
+
+// ============================================================================
+// Op-effect classification
+// ============================================================================
+
+/// Effect class of an llvm-dialect op kind. The single table ([op_effects])
+/// backs every mid-end op-safety set — simplify/adce deletability, gvn/dse
+/// memory benignity, licm hoistability, sink sinkability — so an op absent
+/// from the table has unknown effects and every derived set treats it
+/// conservatively: a missed dialect op fails in this ONE place
+/// (docs/MIDEND-PLAN.md "consolidate the op-safety classification").
+///
+/// FP arithmetic, fcmp, select and the FP casts are all `Pure`: the
+/// dialect models no FP exceptions or rounding-mode state, and no derived
+/// consumer reassociates — gvn merges only bit-identical ops, licm/sink
+/// move whole ops — so the classification is strict-FP-safe.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpEffect {
+    /// No memory effects, cannot trap: deletable when unused, CSE-able,
+    /// hoistable and sinkable.
+    Pure,
+    /// Pure but may trap (integer division by zero): deletable and
+    /// sinkable (execution counts only shrink on a downward move), never
+    /// hoisted — that would speculate the trap.
+    PureTrapping,
+    /// Operand-less value materialization (constants, undef, poison,
+    /// symbol/string addresses): deletable; code motion is per-pass
+    /// policy (no computation to save, only live-range effects).
+    Materialize,
+    /// Allocates a slot without reading or writing existing memory:
+    /// deletable when unused, never moved.
+    Alloc,
+    /// Reads memory (load): deletable when unused, never moved,
+    /// invalidates nothing.
+    Read,
+    /// Writes memory (store).
+    Write,
+    /// Control flow (branches, return, unreachable): no memory effects.
+    Control,
+}
+
+/// The classification table: OpId → [OpEffect]. Anything not listed —
+/// calls above all — is unknown-effect.
+pub(crate) fn op_effects() -> FxHashMap<OpId, OpEffect> {
+    use OpEffect::*;
+    [
+        // Integer arithmetic, logic and compares.
+        (AddOp::get_opid_static(), Pure),
+        (SubOp::get_opid_static(), Pure),
+        (MulOp::get_opid_static(), Pure),
+        (AndOp::get_opid_static(), Pure),
+        (OrOp::get_opid_static(), Pure),
+        (XorOp::get_opid_static(), Pure),
+        (ShlOp::get_opid_static(), Pure),
+        (LShrOp::get_opid_static(), Pure),
+        (AShrOp::get_opid_static(), Pure),
+        (ICmpOp::get_opid_static(), Pure),
+        (UDivOp::get_opid_static(), PureTrapping),
+        (SDivOp::get_opid_static(), PureTrapping),
+        (URemOp::get_opid_static(), PureTrapping),
+        (SRemOp::get_opid_static(), PureTrapping),
+        // FP arithmetic and compares (never trapping: no FP exceptions).
+        (FAddOp::get_opid_static(), Pure),
+        (FSubOp::get_opid_static(), Pure),
+        (FMulOp::get_opid_static(), Pure),
+        (FDivOp::get_opid_static(), Pure),
+        (FRemOp::get_opid_static(), Pure),
+        (FNegOp::get_opid_static(), Pure),
+        (FCmpOp::get_opid_static(), Pure),
+        (SelectOp::get_opid_static(), Pure),
+        // Casts, integer and FP.
+        (ZExtOp::get_opid_static(), Pure),
+        (SExtOp::get_opid_static(), Pure),
+        (TruncOp::get_opid_static(), Pure),
+        (BitcastOp::get_opid_static(), Pure),
+        (IntToPtrOp::get_opid_static(), Pure),
+        (PtrToIntOp::get_opid_static(), Pure),
+        (FPExtOp::get_opid_static(), Pure),
+        (FPTruncOp::get_opid_static(), Pure),
+        (SIToFPOp::get_opid_static(), Pure),
+        (UIToFPOp::get_opid_static(), Pure),
+        (FPToSIOp::get_opid_static(), Pure),
+        (FPToUIOp::get_opid_static(), Pure),
+        // Address arithmetic and aggregates.
+        (GetElementPtrOp::get_opid_static(), Pure),
+        (InsertValueOp::get_opid_static(), Pure),
+        (ExtractValueOp::get_opid_static(), Pure),
+        // Materializations.
+        (ConstantOp::get_opid_static(), Materialize),
+        (UndefOp::get_opid_static(), Materialize),
+        (PoisonOp::get_opid_static(), Materialize),
+        (AddressOfOp::get_opid_static(), Materialize),
+        (CStrOp::get_opid_static(), Materialize),
+        // Memory.
+        (AllocaOp::get_opid_static(), Alloc),
+        (LoadOp::get_opid_static(), Read),
+        (StoreOp::get_opid_static(), Write),
+        // Control flow.
+        (BrOp::get_opid_static(), Control),
+        (CondBrOp::get_opid_static(), Control),
+        (ReturnOp::get_opid_static(), Control),
+        (UnreachableOp::get_opid_static(), Control),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Op kinds classified into any of `classes`.
+pub(crate) fn op_ids_in(classes: &[OpEffect]) -> FxHashSet<OpId> {
+    op_effects()
+        .into_iter()
+        .filter(|(_, effect)| classes.contains(effect))
+        .map(|(opid, _)| opid)
+        .collect()
+}
+
+/// Ops erasable once no result is used: everything that neither writes
+/// memory nor transfers control nor has unknown effects (simplify's local
+/// DCE set; adce's non-roots).
+pub(crate) fn deletable_op_ids() -> FxHashSet<OpId> {
+    op_ids_in(&[
+        OpEffect::Pure,
+        OpEffect::PureTrapping,
+        OpEffect::Materialize,
+        OpEffect::Alloc,
+        OpEffect::Read,
+    ])
+}
+
+/// Ops that cannot invalidate a tracked memory value — no writes, no
+/// unknown effects (gvn load resolution, dse liveness). Loads and stores
+/// themselves are examined explicitly by those passes before this set
+/// applies.
+pub(crate) fn memory_benign_op_ids() -> FxHashSet<OpId> {
+    let mut ids = deletable_op_ids();
+    ids.extend(op_ids_in(&[OpEffect::Control]));
+    ids
 }
 
 #[cfg(test)]

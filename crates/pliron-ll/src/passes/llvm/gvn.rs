@@ -23,12 +23,14 @@ use crate::{
     context::{Context, Ptr},
     dialects::{
         llvm::{
-            attributes::ICmpPredicateAttr,
+            attributes::{FCmpPredicateAttr, FastmathFlags, FastmathFlagsAttr, ICmpPredicateAttr},
             op_interfaces::IsDeclaration,
             ops::{
-                AddOp, AndOp, BitcastOp, BrOp, CondBrOp, ExtractValueOp, GetElementPtrOp,
-                GepIndex, ICmpOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PtrToIntOp, SDivOp,
-                SExtOp, SRemOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, XorOp, ZExtOp,
+                AShrOp, AddOp, AndOp, BitcastOp, ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp,
+                FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp, FRemOp, FSubOp, GetElementPtrOp,
+                GepIndex, ICmpOp, InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp,
+                PtrToIntOp, SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp,
+                TruncOp, UDivOp, UIToFPOp, URemOp, XorOp, ZExtOp,
             },
         },
     },
@@ -46,10 +48,9 @@ use crate::{
 
 use crate::passes::aarch64::opmap;
 use super::{
-    analysis::dominator_tree,
+    analysis::{dominator_tree, memory_benign_op_ids},
     inline::collect_functions,
     midend_gate::midend_disabled,
-    simplify::pure_op_ids,
 };
 use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 
@@ -73,7 +74,7 @@ impl Pass for LLVMGvnPass {
         if midend_disabled("gvn") {
             return Ok(unchanged());
         }
-        let benign = benign_op_ids();
+        let benign = memory_benign_op_ids();
         let mut any = false;
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
@@ -111,8 +112,17 @@ enum ExprKey {
     /// ops CSE only when their flags are identical (LLVM's GVN intersects
     /// flags on merge instead; equality is the safe subset).
     Bin(OpId, Value, Value, TypeHandle, (bool, bool)),
+    /// FP identity carries the fast-math flags for the same reason the
+    /// integer key carries `(nsw, nuw)`: merging into an op with more
+    /// flags would grant its inputs poison semantics (nnan/ninf) they
+    /// never had. Only bit-identical ops merge — no reassociation, so
+    /// strict-FP-safe.
+    FBin(OpId, Value, Value, TypeHandle, FastmathFlags),
+    FNeg(Value, FastmathFlags),
     Cast(OpId, Value, TypeHandle),
     ICmp(ICmpPredicateAttr, Value, Value),
+    FCmp(FCmpPredicateAttr, Value, Value, FastmathFlags),
+    Select(Value, Value, Value, FastmathFlags),
     Gep(TypeHandle, Value, Vec<IdxKey>),
     Extract(Value, Vec<u32>),
 }
@@ -123,6 +133,9 @@ pub(crate) enum IdxKey {
     Val(Value),
 }
 
+/// The key-shape sets below say how to build an op kind's identity, not
+/// whether it is safe — safety is analysis.rs's table (everything here is
+/// `Pure` there). An op missing here merely never CSEs.
 fn bin_op_ids() -> FxHashSet<OpId> {
     let mut ids = FxHashSet::default();
     ids.insert(AddOp::get_opid_static());
@@ -133,10 +146,21 @@ fn bin_op_ids() -> FxHashSet<OpId> {
     ids.insert(XorOp::get_opid_static());
     ids.insert(ShlOp::get_opid_static());
     ids.insert(LShrOp::get_opid_static());
+    ids.insert(AShrOp::get_opid_static());
     ids.insert(UDivOp::get_opid_static());
     ids.insert(SDivOp::get_opid_static());
     ids.insert(URemOp::get_opid_static());
     ids.insert(SRemOp::get_opid_static());
+    ids
+}
+
+fn fbin_op_ids() -> FxHashSet<OpId> {
+    let mut ids = FxHashSet::default();
+    ids.insert(FAddOp::get_opid_static());
+    ids.insert(FSubOp::get_opid_static());
+    ids.insert(FMulOp::get_opid_static());
+    ids.insert(FDivOp::get_opid_static());
+    ids.insert(FRemOp::get_opid_static());
     ids
 }
 
@@ -148,13 +172,30 @@ fn cast_op_ids() -> FxHashSet<OpId> {
     ids.insert(BitcastOp::get_opid_static());
     ids.insert(IntToPtrOp::get_opid_static());
     ids.insert(PtrToIntOp::get_opid_static());
+    ids.insert(FPExtOp::get_opid_static());
+    ids.insert(FPTruncOp::get_opid_static());
+    ids.insert(SIToFPOp::get_opid_static());
+    ids.insert(UIToFPOp::get_opid_static());
+    ids.insert(FPToSIOp::get_opid_static());
+    ids.insert(FPToUIOp::get_opid_static());
     ids
+}
+
+/// The op's fast-math flags; empty when the attribute is absent (absent
+/// and empty both mean strict FP).
+fn fast_math_flags(ctx: &Context, op: Ptr<Operation>) -> FastmathFlags {
+    op.deref(ctx)
+        .attributes
+        .get::<FastmathFlagsAttr>(&pliron_llvm::op_interfaces::ATTR_KEY_FAST_MATH_FLAGS)
+        .map(|attr| attr.0)
+        .unwrap_or(FastmathFlags::empty())
 }
 
 fn expr_key(
     ctx: &Context,
     op: Ptr<Operation>,
     bins: &FxHashSet<OpId>,
+    fbins: &FxHashSet<OpId>,
     casts: &FxHashSet<OpId>,
 ) -> Option<ExprKey> {
     let opid = Operation::get_opid(op, ctx);
@@ -175,12 +216,44 @@ fn expr_key(
             flags,
         ));
     }
+    if fbins.contains(&opid) {
+        let lhs = operation.get_operand(0);
+        let rhs = operation.get_operand(1);
+        let ty = operation.get_result(0).get_type(ctx);
+        return Some(ExprKey::FBin(opid, lhs, rhs, ty, fast_math_flags(ctx, op)));
+    }
     if casts.contains(&opid) {
         return Some(ExprKey::Cast(
             opid,
             operation.get_operand(0),
             operation.get_result(0).get_type(ctx),
         ));
+    }
+    if opid == FNegOp::get_opid_static() {
+        let arg = operation.get_operand(0);
+        return Some(ExprKey::FNeg(arg, fast_math_flags(ctx, op)));
+    }
+    if opid == FCmpOp::get_opid_static() {
+        let lhs = operation.get_operand(0);
+        let rhs = operation.get_operand(1);
+        let fcmp = FCmpOp::from_operation(op);
+        return Some(ExprKey::FCmp(
+            fcmp.predicate(ctx),
+            lhs,
+            rhs,
+            fast_math_flags(ctx, op),
+        ));
+    }
+    if opid == SelectOp::get_opid_static() {
+        let cond = operation.get_operand(0);
+        let true_val = operation.get_operand(1);
+        let false_val = operation.get_operand(2);
+        // Select's fast-math flags live under their own attribute key.
+        let flags = SelectOp::from_operation(op)
+            .get_attr_llvm_select_fast_math_flags(ctx)
+            .map(|attr| attr.0)
+            .unwrap_or(FastmathFlags::empty());
+        return Some(ExprKey::Select(cond, true_val, false_val, flags));
     }
     if opid == ICmpOp::get_opid_static() {
         let icmp = ICmpOp::from_operation(op);
@@ -244,6 +317,7 @@ fn cse(ctx: &mut Context, region: Ptr<Region>) -> bool {
         return false;
     };
     let bins = bin_op_ids();
+    let fbins = fbin_op_ids();
     let casts = cast_op_ids();
     let mut scopes: Vec<FxHashMap<ExprKey, Value>> = Vec::new();
     let mut changed = false;
@@ -268,7 +342,7 @@ fn cse(ctx: &mut Context, region: Ptr<Region>) -> bool {
         }
         let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
         for op in ops {
-            let Some(key) = expr_key(ctx, op, &bins, &casts) else {
+            let Some(key) = expr_key(ctx, op, &bins, &fbins, &casts) else {
                 continue;
             };
             match scopes.iter().rev().find_map(|scope| scope.get(&key)) {
@@ -329,20 +403,16 @@ pub(crate) fn addr_key(ctx: &Context, addr: Value) -> AddrKey {
     AddrKey::Root(addr)
 }
 
-/// Ops that neither read nor write memory in a way that invalidates a
-/// tracked load: the pure set plus branches (crossed when scanning a
-/// predecessor) — loads are re-examined explicitly, stores handled by
-/// the caller.
-pub(crate) fn benign_op_ids() -> FxHashSet<OpId> {
-    let mut ids = pure_op_ids();
-    ids.insert(BrOp::get_opid_static());
-    ids.insert(CondBrOp::get_opid_static());
-    ids
-}
-
 /// What the backward scan found for one load.
 enum Resolution {
     Value(Value),
+    /// A dominating store to the same slot whose value has a *layout-
+    /// compatible but not identical* aggregate type (the importer emits
+    /// signedness-mismatched twins, e.g. `{ptr, ui64}` stored into a
+    /// `{ptr, i64}` slot — the exact shape pin_type_punned_slots pins away
+    /// from mem2reg). The whole value cannot replace the load (its type
+    /// differs), but each `extract_value` use can be forwarded per field.
+    Aggregate(Value),
     Killed,
     Unknown,
 }
@@ -364,6 +434,9 @@ fn eliminate_loads(ctx: &mut Context, region: Ptr<Region>, benign: &FxHashSet<Op
                 Resolution::Value(value) => {
                     replace_op_with_value(ctx, load, value);
                     changed = true;
+                }
+                Resolution::Aggregate(stored) => {
+                    changed |= forward_extracted_fields(ctx, load, stored);
                 }
                 Resolution::Killed | Resolution::Unknown => {}
             }
@@ -408,6 +481,9 @@ fn resolve_load(
                     if value.get_type(ctx) == want_ty {
                         return Resolution::Value(value);
                     }
+                    if layout_compatible(ctx, value.get_type(ctx), want_ty) {
+                        return Resolution::Aggregate(value);
+                    }
                     return Resolution::Killed; // same slot, other width
                 }
                 return Resolution::Killed; // may alias
@@ -438,11 +514,119 @@ fn resolve_load(
     Resolution::Unknown
 }
 
+/// Same in-memory layout: identical types, integers of equal width
+/// (signedness is a frontend annotation, not a layout property), or
+/// aggregates thereof with identical shape. Field offsets of two
+/// layout-compatible aggregates coincide, so a load at the mismatched
+/// type reads back exactly the stored fields.
+fn layout_compatible(ctx: &Context, a: TypeHandle, b: TypeHandle) -> bool {
+    use crate::dialects::builtin::types::IntegerType;
+    use crate::dialects::llvm::types::{ArrayType, StructType};
+    if a == b {
+        return true;
+    }
+    let (a_ref, b_ref) = (a.deref(ctx), b.deref(ctx));
+    if let (Some(a_int), Some(b_int)) = (
+        a_ref.downcast_ref::<IntegerType>(),
+        b_ref.downcast_ref::<IntegerType>(),
+    ) {
+        return a_int.width() == b_int.width();
+    }
+    if let (Some(a_struct), Some(b_struct)) = (
+        a_ref.downcast_ref::<StructType>(),
+        b_ref.downcast_ref::<StructType>(),
+    ) {
+        if a_struct.is_opaque()
+            || b_struct.is_opaque()
+            || a_struct.num_fields() != b_struct.num_fields()
+        {
+            return false;
+        }
+        let a_fields: Vec<_> = a_struct.fields().collect();
+        let b_fields: Vec<_> = b_struct.fields().collect();
+        drop(a_ref);
+        drop(b_ref);
+        return a_fields
+            .into_iter()
+            .zip(b_fields)
+            .all(|(a_field, b_field)| layout_compatible(ctx, a_field, b_field));
+    }
+    if let (Some(a_array), Some(b_array)) = (
+        a_ref.downcast_ref::<ArrayType>(),
+        b_ref.downcast_ref::<ArrayType>(),
+    ) {
+        if a_array.size() != b_array.size() {
+            return false;
+        }
+        let (a_elem, b_elem) = (a_array.elem_type(), b_array.elem_type());
+        drop(a_ref);
+        drop(b_ref);
+        return layout_compatible(ctx, a_elem, b_elem);
+    }
+    false
+}
+
+/// The value stored at field path `indices` of `aggregate`, recovered by
+/// walking its `insert_value` chain. Exact-path matches only; a partial
+/// overlap (one path prefixes the other) means the field's bytes were
+/// assembled from more than one insert, so give up.
+fn stored_field(ctx: &Context, mut aggregate: Value, indices: &[u32]) -> Option<Value> {
+    loop {
+        let def = aggregate.defining_op()?;
+        if Operation::get_opid(def, ctx) != InsertValueOp::get_opid_static() {
+            return None;
+        }
+        let insert = InsertValueOp::from_operation(def);
+        let insert_indices = insert.indices(ctx);
+        if insert_indices == indices {
+            return Some(def.deref(ctx).get_operand(1));
+        }
+        let min_len = indices.len().min(insert_indices.len());
+        if indices[..min_len] == insert_indices[..min_len] {
+            return None; // partial overlap
+        }
+        aggregate = def.deref(ctx).get_operand(0);
+    }
+}
+
+/// Forward a layout-compatible aggregate store through the load's
+/// `extract_value` uses: each extracted field is replaced by the exact SSA
+/// value inserted at that path (types must match exactly, so no signedness
+/// drift ever reaches the field's users). The load itself is erased once
+/// nothing uses it; the now-dead store/insert chain is left to dse/adce.
+fn forward_extracted_fields(ctx: &mut Context, load: Ptr<Operation>, stored: Value) -> bool {
+    let result = load.deref(ctx).get_result(0);
+    let users: Vec<Ptr<Operation>> = result
+        .uses(ctx)
+        .iter()
+        .map(|load_use| load_use.user_op())
+        .collect();
+    let mut changed = false;
+    for user in users {
+        if Operation::get_opid(user, ctx) != ExtractValueOp::get_opid_static() {
+            continue;
+        }
+        let indices = ExtractValueOp::from_operation(user).indices(ctx);
+        let Some(field) = stored_field(ctx, stored, &indices) else {
+            continue;
+        };
+        if field.get_type(ctx) != user.deref(ctx).get_result(0).get_type(ctx) {
+            continue;
+        }
+        replace_op_with_value(ctx, user, field);
+        changed = true;
+    }
+    if changed && load.deref(ctx).get_result(0).uses(ctx).is_empty() {
+        Operation::erase(load, ctx);
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pliron::builtin::op_interfaces::{OneResultInterface as _};
-    use pliron_llvm::op_interfaces::IntBinArithOpWithOverflowFlag as _;
+    use pliron_llvm::op_interfaces::{CastOpInterface as _, IntBinArithOpWithOverflowFlag as _};
     use crate::{
         dialects::{
             builtin::{
@@ -452,7 +636,7 @@ mod tests {
             },
             llvm::{
                 attributes::LinkageAttr,
-                ops::{BrOp, CallOp, FuncOp, ReturnOp},
+                ops::{BrOp, CallOp, CondBrOp, FuncOp, ReturnOp},
                 types::{FuncType, PointerType},
             },
         },
@@ -539,6 +723,92 @@ mod tests {
             2,
             "nsw+plain must stay distinct, nsw+nsw must merge:\n{text}"
         );
+    }
+
+    /// f32 g(f32 x, ptr p). Returns (func, entry, x, p).
+    fn fp_scaffold(ctx: &mut Context) -> (FuncOp, Ptr<BasicBlock>, Value, Value) {
+        let f32_ty: TypeHandle = crate::dialects::builtin::types::FP32Type::get(ctx).into();
+        let ptr_ty: TypeHandle = PointerType::get(ctx, 0).into();
+        let fn_ty = FuncType::get(ctx, f32_ty, vec![f32_ty, ptr_ty], false);
+        let func = FuncOp::new(ctx, "gf".try_into().unwrap(), fn_ty);
+        func.set_attr_llvm_function_linkage(ctx, LinkageAttr::ExternalLinkage);
+        func.get_or_create_entry_block(ctx);
+        let entry = func.get_entry_block(ctx).unwrap();
+        let x = entry.deref(ctx).get_argument(0);
+        let p = entry.deref(ctx).get_argument(1);
+        (func, entry, x, p)
+    }
+
+    #[test]
+    fn cse_unifies_identical_fadds_and_selects() {
+        use pliron_llvm::op_interfaces::FloatBinArithOpWithFastMathFlags as _;
+        let mut ctx = Context::new();
+        let (func, entry, x, _p) = fp_scaffold(&mut ctx);
+        let i1: TypeHandle = int_ty(&mut ctx, 1).into();
+
+        // Two bit-identical fadds must merge; one with different
+        // fast-math flags must stay (same conservatism as nsw/nuw).
+        let fadd1 = FAddOp::new_with_fast_math_flags(&mut ctx, x, x, FastmathFlagsAttr::default());
+        fadd1.get_operation().insert_at_back(entry, &ctx);
+        let fadd1_v = fadd1.get_result(&ctx);
+        let fadd2 = FAddOp::new_with_fast_math_flags(&mut ctx, x, x, FastmathFlagsAttr::default());
+        fadd2.get_operation().insert_at_back(entry, &ctx);
+        let fadd2_v = fadd2.get_result(&ctx);
+        let nnan = FAddOp::new_with_fast_math_flags(
+            &mut ctx,
+            x,
+            x,
+            FastmathFlagsAttr(FastmathFlags::NNAN),
+        );
+        nnan.get_operation().insert_at_back(entry, &ctx);
+        let nnan_v = nnan.get_result(&ctx);
+
+        // Identical selects over the merged fadds must merge too (the
+        // second's operand is rewritten to fadd1 before it is keyed).
+        let cond = crate::dialects::llvm::ops::UndefOp::new(&mut ctx, i1);
+        cond.get_operation().insert_at_back(entry, &ctx);
+        let cond_v = cond.get_result(&ctx);
+        let sel1 = SelectOp::new(&mut ctx, cond_v, fadd1_v, nnan_v);
+        sel1.get_operation().insert_at_back(entry, &ctx);
+        let sel2 = SelectOp::new(&mut ctx, cond_v, fadd2_v, nnan_v);
+        sel2.get_operation().insert_at_back(entry, &ctx);
+        let sel2_v = sel2.get_operation().deref(&ctx).get_result(0);
+        ReturnOp::new(&mut ctx, Some(sel2_v))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        let text = run_gvn(&mut ctx, func);
+        assert_eq!(
+            text.matches("llvm.fadd").count(),
+            2,
+            "identical fadds must merge, the nnan one must stay:\n{text}"
+        );
+        assert_eq!(text.matches("llvm.select").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn fadd_does_not_kill_store_to_load_forwarding() {
+        use pliron_llvm::op_interfaces::FloatBinArithOpWithFastMathFlags as _;
+        let mut ctx = Context::new();
+        let (func, entry, x, p) = fp_scaffold(&mut ctx);
+        let f32_ty: TypeHandle = crate::dialects::builtin::types::FP32Type::get(&mut ctx).into();
+
+        // store x -> p; fadd; load p — the pure fadd must not kill the
+        // forwarding window (it used to, as an unknown-effect op).
+        StoreOp::new(&mut ctx, x, p)
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+        let fadd = FAddOp::new_with_fast_math_flags(&mut ctx, x, x, FastmathFlagsAttr::default());
+        fadd.get_operation().insert_at_back(entry, &ctx);
+        let load = LoadOp::new(&mut ctx, p, f32_ty);
+        load.get_operation().insert_at_back(entry, &ctx);
+        let load_v = load.get_result(&ctx);
+        ReturnOp::new(&mut ctx, Some(load_v))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        let text = run_gvn(&mut ctx, func);
+        assert!(!text.contains("llvm.load"), "{text}");
     }
 
     #[test]
@@ -634,6 +904,174 @@ mod tests {
             .insert_at_back(entry, &ctx);
         let text = run_gvn(&mut ctx, func);
         assert_eq!(text.matches("llvm.load").count(), 2, "{text}");
+    }
+
+    /// Scaffold for the aggregate-forwarding tests: a `{ptr, i64}` slot
+    /// whose store goes through a pointer bitcast (the pin_type_punned_slots
+    /// shape) and carries a `{ptr, ui64}` value built by an insert chain
+    /// (field 0 = `p`, field 1 = an unsigned constant). Returns the ops the
+    /// callers place the load/extract after.
+    struct AggScaffold {
+        func: FuncOp,
+        entry: Ptr<BasicBlock>,
+        a: Value,
+        p: Value,
+        slot: Value,
+        stored_struct_ty: TypeHandle,
+        slot_struct_ty: TypeHandle,
+    }
+
+    fn agg_scaffold(ctx: &mut Context, store_field1_width: u32) -> AggScaffold {
+        use crate::dialects::llvm::ops::{AllocaOp, UndefOp};
+        use crate::dialects::llvm::types::StructType;
+        let (func, entry, a, p) = scaffold(ctx);
+        let ptr_ty: TypeHandle = PointerType::get(ctx, 0).into();
+        let i64_signed: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signed).into();
+        let field1_unsigned: TypeHandle =
+            IntegerType::get(ctx, store_field1_width, Signedness::Unsigned).into();
+        let slot_struct_ty: TypeHandle =
+            StructType::get_unnamed(ctx, vec![ptr_ty, i64_signed]).into();
+        let stored_struct_ty: TypeHandle =
+            StructType::get_unnamed(ctx, vec![ptr_ty, field1_unsigned]).into();
+
+        let i64_typed = int_ty(ctx, 64);
+        let one = ConstantOp::new(
+            ctx,
+            Box::new(IntegerAttr::new(
+                i64_typed,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
+        one.get_operation().insert_at_back(entry, ctx);
+        let one_v = one.get_result(ctx);
+        let alloca = AllocaOp::new(ctx, slot_struct_ty, one_v);
+        alloca.get_operation().insert_at_back(entry, ctx);
+        let slot = alloca.get_result(ctx);
+        // The pinned shape: the store's address is a bitcast of the slot.
+        let punned = BitcastOp::new(ctx, slot, ptr_ty);
+        punned.get_operation().insert_at_back(entry, ctx);
+        let punned_v = punned.get_result(ctx);
+        let undef = UndefOp::new(ctx, stored_struct_ty);
+        undef.get_operation().insert_at_back(entry, ctx);
+        let undef_v = undef.get_result(ctx);
+        let ins0 = InsertValueOp::new(ctx, undef_v, p, vec![0]);
+        ins0.get_operation().insert_at_back(entry, ctx);
+        let ins0_v = ins0.get_operation().deref(ctx).get_result(0);
+        let field1_typed = IntegerType::get(ctx, store_field1_width, Signedness::Unsigned);
+        let c32 = ConstantOp::new(
+            ctx,
+            Box::new(IntegerAttr::new(
+                field1_typed,
+                APInt::from_u64(32, NonZero::new(store_field1_width as usize).unwrap()),
+            )),
+        );
+        c32.get_operation().insert_at_back(entry, ctx);
+        let c32_v = c32.get_result(ctx);
+        let ins1 = InsertValueOp::new(ctx, ins0_v, c32_v, vec![1]);
+        ins1.get_operation().insert_at_back(entry, ctx);
+        let ins1_v = ins1.get_operation().deref(ctx).get_result(0);
+        StoreOp::new(ctx, ins1_v, punned_v)
+            .get_operation()
+            .insert_at_back(entry, ctx);
+        AggScaffold {
+            func,
+            entry,
+            a,
+            p,
+            slot,
+            stored_struct_ty,
+            slot_struct_ty,
+        }
+    }
+
+    /// Appends `load slot; extract [index]; store a -> extracted-ptr; ret a`
+    /// (the extract's result is used as a pointer so it stays live).
+    fn append_load_extract(ctx: &mut Context, s: &AggScaffold, index: u32) {
+        let load = LoadOp::new(ctx, s.slot, s.slot_struct_ty);
+        load.get_operation().insert_at_back(s.entry, ctx);
+        let load_v = load.get_result(ctx);
+        let extract = ExtractValueOp::new(ctx, load_v, vec![index])
+            .expect("field index in range");
+        extract.get_operation().insert_at_back(s.entry, ctx);
+        let extract_v = extract.get_operation().deref(ctx).get_result(0);
+        if index == 0 {
+            StoreOp::new(ctx, s.a, extract_v)
+                .get_operation()
+                .insert_at_back(s.entry, ctx);
+        }
+        ReturnOp::new(ctx, Some(s.a))
+            .get_operation()
+            .insert_at_back(s.entry, ctx);
+    }
+
+    #[test]
+    fn forwards_aggregate_store_through_extract_across_signedness_twins() {
+        // store {ptr, ui64} via bitcast; load {ptr, i64}; extract [0]:
+        // layout-compatible twins, so the extracted pointer must forward
+        // and the load must die.
+        let mut ctx = Context::new();
+        let s = agg_scaffold(&mut ctx, 64);
+        assert!(layout_compatible(&ctx, s.stored_struct_ty, s.slot_struct_ty));
+        append_load_extract(&mut ctx, &s, 0);
+        let text = run_gvn(&mut ctx, s.func);
+        assert!(!text.contains("llvm.extract_value"), "{text}");
+        assert!(!text.contains("llvm.load"), "{text}");
+    }
+
+    #[test]
+    fn aggregate_forwarding_bails_on_layout_mismatch() {
+        // Field 1 stored as ui32 into an i64 slot: widths differ, so the
+        // twins are NOT layout-compatible and nothing may forward.
+        let mut ctx = Context::new();
+        let s = agg_scaffold(&mut ctx, 32);
+        assert!(!layout_compatible(&ctx, s.stored_struct_ty, s.slot_struct_ty));
+        append_load_extract(&mut ctx, &s, 0);
+        let text = run_gvn(&mut ctx, s.func);
+        assert!(text.contains("llvm.extract_value"), "{text}");
+        assert!(text.contains("llvm.load"), "{text}");
+    }
+
+    #[test]
+    fn aggregate_forwarding_never_drifts_field_signedness() {
+        // Extract [1] wants i64 but the inserted field value is ui64: the
+        // exact-type guard must refuse (forwarding would retype every
+        // downstream user), keeping load + extract.
+        let mut ctx = Context::new();
+        let s = agg_scaffold(&mut ctx, 64);
+        append_load_extract(&mut ctx, &s, 1);
+        let text = run_gvn(&mut ctx, s.func);
+        assert!(text.contains("llvm.extract_value"), "{text}");
+        assert!(text.contains("llvm.load"), "{text}");
+    }
+
+    #[test]
+    fn aggregate_forwarding_killed_by_may_alias_store_and_call() {
+        // An intervening store through an unrelated pointer may clobber
+        // the slot under the syntactic alias model: no forwarding.
+        let mut ctx = Context::new();
+        let s = agg_scaffold(&mut ctx, 64);
+        StoreOp::new(&mut ctx, s.a, s.p)
+            .get_operation()
+            .insert_at_back(s.entry, &mut ctx);
+        append_load_extract(&mut ctx, &s, 0);
+        let text = run_gvn(&mut ctx, s.func);
+        assert!(text.contains("llvm.extract_value"), "{text}");
+
+        // An intervening call may write anything: no forwarding.
+        let mut ctx = Context::new();
+        let s = agg_scaffold(&mut ctx, 64);
+        let i64_ty: TypeHandle = int_ty(&mut ctx, 64).into();
+        let void_fn = FuncType::get(&mut ctx, i64_ty, vec![], false);
+        let call = CallOp::new(
+            &mut ctx,
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("opaque".try_into().unwrap()),
+            void_fn,
+            vec![],
+        );
+        call.get_operation().insert_at_back(s.entry, &mut ctx);
+        append_load_extract(&mut ctx, &s, 0);
+        let text = run_gvn(&mut ctx, s.func);
+        assert!(text.contains("llvm.extract_value"), "{text}");
     }
 
     #[test]

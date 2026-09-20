@@ -8,7 +8,6 @@ use pliron_llvm::op_interfaces::{
     CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
 };
 use pliron_llvm::ops::GepIndex;
-use crate::ll::ops::CStrOp;
 use std::num::NonZero;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -25,9 +24,9 @@ use crate::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, FCmpOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
-                LShrOp, LoadOp, MulOp, OrOp, PtrToIntOp, SDivOp, SExtOp, SRemOp, ShlOp,
-                PoisonOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
+                AShrOp, AddOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, GetElementPtrOp, ICmpOp, InsertValueOp,
+                LShrOp, LoadOp, MulOp, OrOp, SDivOp, SExtOp, SRemOp, ShlOp,
+                StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
             },
             types::PointerType,
         },
@@ -58,7 +57,7 @@ impl Pass for LLVMSimplifyPass {
     }
 
     fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
-        let pure_ops = pure_op_ids();
+        let pure_ops = super::analysis::deletable_op_ids();
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;
@@ -799,42 +798,6 @@ fn forward_single_entry_store(ctx: &mut Context, region: Ptr<Region>, alloca: Al
 // ============================================================================
 // Dead code elimination
 // ============================================================================
-
-pub(crate) fn pure_op_ids() -> FxHashSet<OpId> {
-    let mut ids = FxHashSet::default();
-    ids.insert(ConstantOp::get_opid_static());
-    ids.insert(UndefOp::get_opid_static());
-    ids.insert(ICmpOp::get_opid_static());
-    ids.insert(FCmpOp::get_opid_static());
-    ids.insert(AddOp::get_opid_static());
-    ids.insert(SubOp::get_opid_static());
-    ids.insert(MulOp::get_opid_static());
-    ids.insert(AndOp::get_opid_static());
-    ids.insert(OrOp::get_opid_static());
-    ids.insert(XorOp::get_opid_static());
-    ids.insert(ShlOp::get_opid_static());
-    ids.insert(LShrOp::get_opid_static());
-    ids.insert(AShrOp::get_opid_static());
-    ids.insert(UDivOp::get_opid_static());
-    ids.insert(SDivOp::get_opid_static());
-    ids.insert(URemOp::get_opid_static());
-    ids.insert(SRemOp::get_opid_static());
-    ids.insert(ZExtOp::get_opid_static());
-    ids.insert(SExtOp::get_opid_static());
-    ids.insert(TruncOp::get_opid_static());
-    ids.insert(BitcastOp::get_opid_static());
-    ids.insert(IntToPtrOp::get_opid_static());
-    ids.insert(PtrToIntOp::get_opid_static());
-    ids.insert(GetElementPtrOp::get_opid_static());
-    ids.insert(InsertValueOp::get_opid_static());
-    ids.insert(ExtractValueOp::get_opid_static());
-    ids.insert(PoisonOp::get_opid_static());
-    ids.insert(AllocaOp::get_opid_static());
-    ids.insert(LoadOp::get_opid_static());
-    ids.insert(AddressOfOp::get_opid_static());
-    ids.insert(CStrOp::get_opid_static());
-    ids
-}
 
 fn eliminate_dead_code(
     ctx: &mut Context,
