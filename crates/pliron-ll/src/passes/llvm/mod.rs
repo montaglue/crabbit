@@ -12,6 +12,7 @@ pub mod simplify;
 pub mod simplify_cfg;
 pub mod sink;
 pub mod sroa;
+pub mod unroll;
 
 use crate::conversion::pass::{Mem2RegPass, Passes};
 use crate::target_profile::TargetProfile;
@@ -19,7 +20,7 @@ use crate::target_profile::TargetProfile;
 /// The target-independent LLVM-dialect mid-end, starting from freshly
 /// lowered (post-`lower-dialect-mir`) IR: inlining, simplification, SROA +
 /// mem2reg (twice), then the research passes (gvn, div-strength-reduce,
-/// licm, gvn, then the backward-dataflow round: global-dse, adce, sink —
+/// licm, gvn, unroll, then the backward-dataflow round: global-dse, adce, sink —
 /// each self-disables via [midend_gate]) and a final clean-up round.
 /// Shared by crabbit's host and kernel pipelines and by the resident
 /// driver/server, so the pass list can never drift between them. The
@@ -51,6 +52,11 @@ pub fn add_llvm_midend_passes(passes: &mut Passes, profile: &TargetProfile) {
     passes.add_pass(div_strength_reduce::LLVMDivStrengthReducePass);
     passes.add_pass(licm::LLVMLicmPass);
     passes.add_pass(gvn::LLVMGvnPass);
+    // Full unroll AFTER gvn/licm (so invariants are already hoisted and
+    // the loop body is minimal) and BEFORE the backward round, whose
+    // adce/simplify erase the dead per-iteration iv/compare clones and
+    // constant-fold the per-iteration address math.
+    passes.add_pass(unroll::LLVMUnrollPass::new(profile));
     // Backward-dataflow round (docs/MIDEND-PLAN.md items 6–8): dead
     // stores first (they would anchor adce roots), then dead code, then
     // sinking on the cleaned function.
