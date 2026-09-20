@@ -535,7 +535,10 @@ pub(super) fn import_transmute<'tcx>(
                 || ty_ref.is::<FP64Type>()
         };
         if is_scalar(ctx, value.get_type(ctx)) && is_scalar(ctx, result_ty) {
-            let cast = mir_dialect::ops::CastOp::new(ctx, value, result_ty);
+            // Explicit Transmute kind: `CastOp::new` classifies the pair
+            // structurally, which would turn `f32::from_bits` (u32 -> f32)
+            // into an IntToFloat `uitofp` instead of a bit reinterpretation.
+            let cast = mir_dialect::ops::CastOp::transmute(ctx, value, result_ty);
             cast.get_operation().insert_at_back(insert_block, ctx);
             return Ok(cast.get_result(ctx));
         }

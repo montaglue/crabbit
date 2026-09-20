@@ -404,6 +404,25 @@ pub mod ops {
             dm_ops::MirCastOp::new(op).set_attr_cast_kind(ctx, kind);
             CastOp { op }
         }
+
+        /// A `CastKind::Transmute` between scalar representations: a bit
+        /// reinterpretation, never a numeric conversion. `new` would classify
+        /// the pair structurally (u32 -> f32 becomes IntToFloat = `uitofp`),
+        /// which is wrong for transmute (`f32::from_bits`); this constructor
+        /// pins the kind so mir-lower emits its Transmute path (`bitcast`
+        /// for equal-size scalars).
+        pub fn transmute(ctx: &mut Context, input: Value, result_type: TypeHandle) -> Self {
+            let op = Operation::new(
+                ctx,
+                dm_ops::MirCastOp::get_concrete_op_info(),
+                vec![result_type],
+                vec![input],
+                vec![],
+                0,
+            );
+            dm_ops::MirCastOp::new(op).set_attr_cast_kind(ctx, MirCastKindAttr::Transmute);
+            CastOp { op }
+        }
     }
     shim_common!(CastOp);
 

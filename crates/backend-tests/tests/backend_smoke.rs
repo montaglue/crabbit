@@ -182,6 +182,56 @@ fn executable_path(target_dir: &Path, profile: FixtureProfile, bin: &str) -> Pat
         .join(format!("{bin}{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// Runtime scalar transmutes (`f32::from_bits` etc.). Regression fixture
+/// for the structural-cast-classification miscompile the real-kernel
+/// corpus caught (Transmute imported as IntToFloat): the binary asserts
+/// the reinterpretations itself, so a regression fails the run.
+#[test]
+fn transmute_aarch64_crate_compiles_and_runs_with_codegen_dylib() {
+    let root = repo_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let backend = build_backend(&root, &cargo);
+
+    let fixture = fixture_manifest(&root, "transmute-aarch64");
+    for profile in FixtureProfile::ALL {
+        let target_dir = fixture_target_dir(&root, "transmute-aarch64", profile);
+        clear_target_dir(&target_dir, "transmute");
+
+        let fixture_status = compile_fixture(
+            &cargo,
+            &fixture,
+            "transmute-aarch64",
+            &backend,
+            &target_dir,
+            profile,
+            &[],
+        );
+        assert!(
+            fixture_status.success(),
+            "transmute fixture did not compile with crabbit dylib in {} mode",
+            profile.name()
+        );
+
+        let executable = executable_path(&target_dir, profile, "transmute-aarch64");
+        let output = Command::new(&executable)
+            .output()
+            .expect("failed to run transmute executable");
+        assert!(
+            output.status.success(),
+            "transmute executable failed in {} mode: {}\n{}",
+            profile.name(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "transmute ok",
+            "unexpected transmute fixture output in {} mode",
+            profile.name()
+        );
+    }
+}
+
 #[test]
 fn pure_rust_aarch64_crate_compiles_and_runs_with_codegen_dylib() {
     let root = repo_root();
