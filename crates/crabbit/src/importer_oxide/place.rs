@@ -294,7 +294,11 @@ pub(super) fn place_addr<'tcx>(
                 let index = load_place(tcx, ctx, state, insert_block, body, index_local.into())?;
                 let elem_size = indexed_elem_size(tcx, current_ty)?;
                 let byte_offset = scale_index(ctx, insert_block, index, elem_size)?;
-                let offset = mir_dialect::ops::PtrOffsetOp::new(ctx, addr, byte_offset);
+                // Indexing a slice place: the "address" is the fat
+                // `{ptr, len}` value the preceding Deref loaded — offset its
+                // data pointer, never the aggregate itself.
+                let base = fat_data_ptr(ctx, insert_block, addr);
+                let offset = mir_dialect::ops::PtrOffsetOp::new(ctx, base, byte_offset);
                 offset.get_operation().insert_at_back(insert_block, ctx);
                 addr = offset.get_result(ctx);
                 current_ty = mono_ty(tcx, state, indexed_elem_ty(current_ty)?);
@@ -312,8 +316,12 @@ pub(super) fn place_addr<'tcx>(
                 };
                 let elem_size = indexed_elem_size(tcx, current_ty)?;
                 let byte_offset = index * elem_size;
+                // Same fat-base rule as Index above.
+                let base = fat_data_ptr(ctx, insert_block, addr);
                 if byte_offset != 0 {
-                    addr = ptr_offset_const(ctx, insert_block, addr, byte_offset)?;
+                    addr = ptr_offset_const(ctx, insert_block, base, byte_offset)?;
+                } else {
+                    addr = base;
                 }
                 current_ty = mono_ty(tcx, state, indexed_elem_ty(current_ty)?);
                 current_variant = None;
@@ -408,6 +416,25 @@ pub(super) fn place_addr<'tcx>(
     }
 
     Ok(addr)
+}
+
+/// The byte-addressable base of a place: a fat `{ptr, meta}` value (the
+/// Deref of a pointer to a slice / unsized ADT loads one) contributes its
+/// leaf-0 data pointer; a thin base already is the address. Field
+/// projections handle their fat bases inline (they also need the metadata
+/// leaf); Index/ConstantIndex only ever need the data pointer.
+fn fat_data_ptr(ctx: &mut Context, insert_block: Ptr<BasicBlock>, addr: Value) -> Value {
+    if !addr
+        .get_type(ctx)
+        .deref(ctx)
+        .is::<llvm::types::StructType>()
+    {
+        return addr;
+    }
+    let ptr_ty = llvm_ptr_ty(ctx);
+    let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
+    data.get_operation().insert_at_back(insert_block, ctx);
+    data.get_result(ctx)
 }
 
 pub(super) fn ptr_offset_const(
