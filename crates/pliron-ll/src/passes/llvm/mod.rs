@@ -5,6 +5,7 @@ pub mod dse;
 pub mod gvn;
 pub mod inline;
 pub mod licm;
+pub mod loop_carried_fwd;
 pub mod midend_gate;
 pub mod op_ids;
 pub mod pin_type_punned_slots;
@@ -52,6 +53,10 @@ pub fn add_llvm_midend_passes(passes: &mut Passes, profile: &TargetProfile) {
     passes.add_pass(div_strength_reduce::LLVMDivStrengthReducePass);
     passes.add_pass(licm::LLVMLicmPass);
     passes.add_pass(gvn::LLVMGvnPass);
+    // Loop-carried store→load forwarding needs gvn's CSE of the shared
+    // index root and licm's hoisting; the dead address ops it strands are
+    // erased by the dse/adce round below.
+    passes.add_pass(loop_carried_fwd::LLVMLoopCarriedFwdPass);
     // Full unroll AFTER gvn/licm (so invariants are already hoisted and
     // the loop body is minimal) and BEFORE the backward round, whose
     // adce/simplify erase the dead per-iteration iv/compare clones and
