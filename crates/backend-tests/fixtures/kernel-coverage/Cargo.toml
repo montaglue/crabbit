@@ -1,0 +1,23 @@
+[package]
+name = "kernel-coverage"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+# Vendored so the repo is self-contained (CI/fresh clones have no
+# kernel-corpus sibling); must stay link_name-identical to the corpus copy.
+crabbit-device = { path = "../vendor/crabbit-device" }
+
+[profile.dev]
+overflow-checks = false
+panic = "abort"
+
+[profile.release]
+overflow-checks = false
+panic = "abort"
+
+[workspace]

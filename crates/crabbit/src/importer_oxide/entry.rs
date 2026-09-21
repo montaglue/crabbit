@@ -273,7 +273,11 @@ pub(super) fn import_function<'tcx>(
             continue;
         }
         let abi_ty = convert_immediate_ty(tcx, ctx, ty)?;
-        let group = arg_abi_for_ty(ctx, abi_ty)?;
+        let group = if is_kernel {
+            kernel_param_abi(ctx, abi_ty)?
+        } else {
+            arg_abi_for_ty(ctx, abi_ty)?
+        };
         match &group {
             ArgAbi::Leaves(leaves) => inputs.extend(leaves.iter().map(|(_, ty)| *ty)),
             ArgAbi::Indirect => inputs.push(llvm_ptr_ty(ctx)),

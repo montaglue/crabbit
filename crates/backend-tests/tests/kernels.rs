@@ -24,7 +24,12 @@ fn backend_path(root: &Path) -> PathBuf {
     } else {
         "libcrabbit.so"
     };
-    root.join("target").join("debug").join(file_name)
+    // The `cargo build` below inherits CARGO_TARGET_DIR, so the dylib lands
+    // there when the variable is set (e.g. to avoid build-lock contention).
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
+    target.join("debug").join(file_name)
 }
 
 fn build_backend(root: &Path, cargo: &str) -> PathBuf {
@@ -84,6 +89,13 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
     assert!(ptx.contains(".shared .align 4 .b8 "), "{ptx}");
     assert!(ptx.contains("bar.sync 0;"), "{ptx}");
     assert!(ptx.contains("add.rn.f32"), "{ptx}");
+    // State-space inference: params are global, the reduction tile is
+    // accessed in raw shared form. The input params are never stored
+    // through, so their loads take the read-only cache (`.nc`).
+    assert!(ptx.contains("ld.global.nc.u32"), "{ptx}");
+    assert!(ptx.contains("st.global.u32"), "{ptx}");
+    assert!(ptx.contains("ld.shared.f32"), "{ptx}");
+    assert!(ptx.contains("st.shared.f32"), "{ptx}");
     let sidecars: Vec<PathBuf> = fs::read_dir(target_dir.join("release/deps"))
         .unwrap()
         .flatten()
@@ -175,5 +187,133 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
         run.status.success(),
         "LLVM-compiled kernels produced wrong results on the GPU:\n{}",
         String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// Coverage kernels beyond the corpus v1 leaf subset: struct GEPs through
+/// pointer params, an alloca that survives mem2reg (dynamically indexed
+/// local array → `.local`), a recursive device helper (surviving call
+/// → PTX `.func` with the `.param` ABI), the warp primitives (all four
+/// `shfl.sync` modes — a real shfl.down tree reduction checked bit-exact —
+/// plus `bar.warp.sync` and the `vote.sync` family), dynamic shared memory
+/// (`crabbit.dyn.shared.base` + launch `sharedMemBytes`), and a by-value
+/// struct kernel parameter. Compiled by the crabbit dylib, assembled by
+/// ptxas, executed and checked on the GPU when one is there.
+#[test]
+fn kernel_coverage_structs_allocas_device_calls() {
+    let root = repo_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let backend = build_backend(&root, &cargo);
+    let fixture_dir = root.join("crates/backend-tests/fixtures/kernel-coverage");
+    let target_dir = root.join("target/crabbit-backend-tests-kernel-coverage");
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir).expect("clear kernel fixture target dir");
+    }
+    fs::create_dir_all(&target_dir).unwrap();
+    let ptx_out = target_dir.join("kernels.ptx");
+
+    let status = Command::new(&cargo)
+        .arg("rustc")
+        .arg("--manifest-path")
+        .arg(fixture_dir.join("Cargo.toml"))
+        .args(["--lib", "--release", "--"])
+        .arg(format!("-Zcodegen-backend={}", backend.display()))
+        .args(["-Coverflow-checks=off", "-Csave-temps"])
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("CRABBIT_PTX_OUT", &ptx_out)
+        .status()
+        .expect("failed to run cargo for the kernel-coverage fixture");
+    assert!(status.success(), "kernel-coverage fixture did not compile with the crabbit dylib");
+
+    assert!(ptx_out.exists(), "CRABBIT_PTX_OUT was not written");
+    let ptx = fs::read_to_string(&ptx_out).unwrap();
+    assert!(ptx.contains(".visible .entry pair_swap_sum("), "{ptx}");
+    assert!(ptx.contains(".visible .entry local_table("), "{ptx}");
+    assert!(ptx.contains(".visible .entry tri_rec("), "{ptx}");
+    // The alloca residue is a .local array addressed via cvta.local.
+    assert!(ptx.contains(".local .align 4 .b8 __crabbit_local_"), "{ptx}");
+    assert!(ptx.contains("cvta.local.u64"), "{ptx}");
+    // The recursive helper survives as a real .func with a param-ABI call.
+    assert!(ptx.contains(".func ("), "{ptx}");
+    assert!(ptx.contains("call.uni"), "{ptx}");
+    assert!(ptx.contains("st.param."), "{ptx}");
+    // Warp primitives: all four shuffle modes, warp barrier, votes.
+    assert!(ptx.contains("shfl.sync.down.b32"), "{ptx}");
+    assert!(ptx.contains("shfl.sync.up.b32"), "{ptx}");
+    assert!(ptx.contains("shfl.sync.bfly.b32"), "{ptx}");
+    assert!(ptx.contains("shfl.sync.idx.b32"), "{ptx}");
+    assert!(ptx.contains("bar.warp.sync"), "{ptx}");
+    assert!(ptx.contains("vote.sync.ballot.b32"), "{ptx}");
+    assert!(ptx.contains("vote.sync.all.pred"), "{ptx}");
+    assert!(ptx.contains("vote.sync.any.pred"), "{ptx}");
+    // Dynamic shared memory: one extern window, shared-qualified accesses.
+    assert!(ptx.contains(".extern .shared .align 16 .b8 __crabbit_dyn_shared[];"), "{ptx}");
+    assert!(ptx.contains("st.shared.f32"), "{ptx}");
+    assert!(ptx.contains("ld.shared.f32"), "{ptx}");
+    // By-value struct kernel param: one .param with ld.param field loads.
+    assert!(ptx.contains(".param .align 4 .b8 affine_apply_param_0[12]"), "{ptx}");
+    assert!(ptx.contains("ld.param.f32 %f0, [affine_apply_param_0];"), "{ptx}");
+    assert!(ptx.contains("ld.param.u32 %r0, [affine_apply_param_0+8];"), "{ptx}");
+
+    let Some(ptxas) = find_tool(&["ptxas", "/usr/local/cuda/bin/ptxas"]) else {
+        eprintln!("ptxas not found; skipping assembly + GPU execution");
+        return;
+    };
+    let output = Command::new(&ptxas)
+        .args(["-arch=sm_121", "-o"])
+        .arg(target_dir.join("kernels.cubin"))
+        .arg(&ptx_out)
+        .output()
+        .expect("run ptxas");
+    assert!(
+        output.status.success(),
+        "ptxas rejected the coverage PTX:\n{}\n{ptx}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cuda_include = Path::new("/usr/local/cuda/include");
+    let libcuda_present = ["/usr/lib/aarch64-linux-gnu/libcuda.so.1", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.1"]
+        .iter()
+        .any(|p| Path::new(p).exists());
+    if !cuda_include.join("cuda.h").exists() || !libcuda_present {
+        eprintln!("no CUDA driver/headers; skipping GPU execution");
+        return;
+    }
+    let harness = target_dir.join("run_coverage");
+    let gcc = Command::new("gcc")
+        .arg("-O1")
+        .arg("-o")
+        .arg(&harness)
+        .arg(fixture_dir.join("harness/run_coverage.c"))
+        .arg(format!("-I{}", cuda_include.display()))
+        .arg("-lcuda")
+        .output()
+        .expect("run gcc");
+    assert!(
+        gcc.status.success(),
+        "harness build failed:\n{}",
+        String::from_utf8_lossy(&gcc.stderr)
+    );
+    let run = Command::new(&harness).arg(&ptx_out).output().expect("run harness");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    if stderr.contains("cuInit(0) failed") || stderr.contains("cuDeviceGet") {
+        eprintln!("no usable GPU: {stderr}; skipping GPU execution");
+        return;
+    }
+    assert!(
+        run.status.success(),
+        "coverage kernels produced wrong results on the GPU:\n{stderr}\n{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("pair_swap_sum ok")
+            && stdout.contains("local_table ok")
+            && stdout.contains("tri_rec ok")
+            && stdout.contains("warp_reduce ok")
+            && stdout.contains("warp_ops ok")
+            && stdout.contains("dyn_smem_reverse ok")
+            && stdout.contains("affine_apply ok"),
+        "{stdout}"
     );
 }

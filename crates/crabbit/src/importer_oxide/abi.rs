@@ -55,6 +55,19 @@ pub(super) enum ArgAbi {
     Indirect,
 }
 
+/// Kernel (`.entry`) parameters are never flattened or passed indirectly:
+/// the CUDA launch ABI hands each parameter — scalar or aggregate — as ONE
+/// `.param` whose bytes are the host value's C layout, and the NVPTX
+/// emitter loads an aggregate's leaves with `ld.param` at their field
+/// offsets (docs/KERNEL-ABI.md). Zero-sized types keep their no-presence
+/// rule so parameter indices stay aligned with the host launch.
+pub(super) fn kernel_param_abi(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
+    if let Ok(0) = crabbit_ty_size(ctx, ty) {
+        return Ok(ArgAbi::Leaves(Vec::new()));
+    }
+    Ok(ArgAbi::Leaves(vec![(Vec::new(), ty)]))
+}
+
 pub(super) fn arg_abi_for_ty(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
     // Zero-sized types (`()`, `!`, captureless closures) have no ABI
     // presence: no signature input, no call argument, no entry-block
