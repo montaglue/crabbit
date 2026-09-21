@@ -9,6 +9,7 @@ pub mod ops;
 
 pub use attributes::{
     BlockmapIdAttr, BranchWeightsAttr, DerivedFromAttr, DerivedFromManyAttr, InlinedFromAttr, OpIdAttr, BytesAttr, DataAttr, DataReloc, LinkageAttr, TlsAttr,
+    VBinOpKindAttr, VReduceKindAttr, VectorizeEpilogueAttr,
 };
 
 use pliron::{

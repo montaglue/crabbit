@@ -20,24 +20,47 @@ use crate::{
 
 use super::{error::Aarch64Err, frontend::module_op, util::cast_operation};
 
+/// Caller-saved GPRs, tried first: they cost nothing in the prologue but
+/// calls clobber them, so only values that do not cross a call may use them.
 const ALLOCATABLE_GPRS: [Register; 4] = [
     Register::gpr(9),
     Register::gpr(10),
     Register::gpr(11),
     Register::gpr(12),
 ];
+/// Callee-saved GPRs (AAPCS x19-x28): preserved across calls. A value live
+/// across a call allocates here instead of force-spilling; each register the
+/// function actually uses is saved/restored by the frame-lowering pass (the
+/// allocator records them in the func's `saved_regs` attribute).
+const CALLEE_SAVED_GPRS: [Register; 10] = [
+    Register::gpr(19),
+    Register::gpr(20),
+    Register::gpr(21),
+    Register::gpr(22),
+    Register::gpr(23),
+    Register::gpr(24),
+    Register::gpr(25),
+    Register::gpr(26),
+    Register::gpr(27),
+    Register::gpr(28),
+];
 const SPILL_SCRATCH_GPRS: [Register; 3] = [Register::gpr(13), Register::gpr(14), Register::gpr(15)];
-/// The FP pool mirrors the GPR pool's caller-saved design: d16-d19 are
-/// caller-saved (v8-v15 are callee-saved, and crabbit's prologues do not
-/// save callee-saved registers), so values live across calls force-spill
-/// instead of relying on preserved registers.
-const ALLOCATABLE_FPR_NUMBERS: [u8; 4] = [16, 17, 18, 19];
+/// Caller-saved FP pool: d16-d19 and d23-d31 (d20-d22 are spill scratch,
+/// d0-d7 are argument/result registers).
+const ALLOCATABLE_FPR_NUMBERS: [u8; 13] = [16, 17, 18, 19, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+/// Callee-saved FP registers: AAPCS preserves the low 64 bits of v8-v15,
+/// which is exactly the d (and s) view this backend uses.
+const CALLEE_SAVED_FPR_NUMBERS: [u8; 8] = [8, 9, 10, 11, 12, 13, 14, 15];
 const SPILL_SCRATCH_FPR_NUMBERS: [u8; 3] = [20, 21, 22];
 const SPILL_SLOT_BYTES: u64 = 8;
 
-/// The register bank an interval allocates from. `Fpr32` and `Fpr64`
-/// virtual registers share the `Fpr` bank (an `s` register is the low half
-/// of its `d` register); the vreg's own class picks the spelling at rewrite.
+/// The register bank an interval allocates from. `Fpr32`, `Fpr64` and
+/// `Simd128` virtual registers all share the `Fpr` bank: an `s`/`d`/`q`
+/// register of one number is ONE physical allocation unit (`q<n>` aliases
+/// `d<n>`), so keeping them in the same pool makes d/q overlap impossible
+/// by construction. The vreg's own class picks the spelling at rewrite and
+/// the spill-slot size; `Simd128` additionally may never take a
+/// callee-saved index (AAPCS preserves only the low 64 bits of v8–v15).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum Bank {
     Gpr,
@@ -47,30 +70,75 @@ enum Bank {
 fn bank_of(class: RegisterClass) -> Option<Bank> {
     match class {
         RegisterClass::Gpr64 => Some(Bank::Gpr),
-        RegisterClass::Fpr64 | RegisterClass::Fpr32 => Some(Bank::Fpr),
+        RegisterClass::Fpr64 | RegisterClass::Fpr32 | RegisterClass::Simd128 => Some(Bank::Fpr),
         _ => None,
     }
 }
 
-fn pool_size(bank: Bank) -> usize {
+/// Pool layout per bank: indices `0..caller_pool_size` are the caller-saved
+/// registers, the rest are callee-saved. The free list is kept sorted, so
+/// picking the smallest free index prefers caller-saved registers (no
+/// prologue cost) and, past those, reuses the same few callee-saved
+/// registers (each distinct one costs a save/restore pair).
+fn caller_pool_size(bank: Bank) -> usize {
     match bank {
         Bank::Gpr => ALLOCATABLE_GPRS.len(),
         Bank::Fpr => ALLOCATABLE_FPR_NUMBERS.len(),
     }
 }
 
+fn pool_size(bank: Bank) -> usize {
+    match bank {
+        Bank::Gpr => ALLOCATABLE_GPRS.len() + CALLEE_SAVED_GPRS.len(),
+        Bank::Fpr => ALLOCATABLE_FPR_NUMBERS.len() + CALLEE_SAVED_FPR_NUMBERS.len(),
+    }
+}
+
+fn is_callee_saved_index(bank: Bank, phys_index: usize) -> bool {
+    phys_index >= caller_pool_size(bank)
+}
+
 /// The physical register for `phys_index` in `bank`, spelled in the vreg's
 /// own class.
 fn pool_register(bank: Bank, phys_index: usize, class: RegisterClass) -> Register {
-    match bank {
-        Bank::Gpr => ALLOCATABLE_GPRS[phys_index],
-        Bank::Fpr => {
-            let number = ALLOCATABLE_FPR_NUMBERS[phys_index];
-            if class == RegisterClass::Fpr32 {
-                Register::fpr32(number)
+    let number = match bank {
+        Bank::Gpr => {
+            return if phys_index < ALLOCATABLE_GPRS.len() {
+                ALLOCATABLE_GPRS[phys_index]
             } else {
-                Register::fpr64(number)
+                CALLEE_SAVED_GPRS[phys_index - ALLOCATABLE_GPRS.len()]
+            };
+        }
+        Bank::Fpr => {
+            if phys_index < ALLOCATABLE_FPR_NUMBERS.len() {
+                ALLOCATABLE_FPR_NUMBERS[phys_index]
+            } else {
+                CALLEE_SAVED_FPR_NUMBERS[phys_index - ALLOCATABLE_FPR_NUMBERS.len()]
             }
+        }
+    };
+    match class {
+        RegisterClass::Fpr32 => Register::fpr32(number),
+        RegisterClass::Simd128 => Register::simd128(number),
+        _ => Register::fpr64(number),
+    }
+}
+
+/// The `saved_regs` attribute bit for a callee-saved pool register:
+/// bits 0-31 are x0-x31, bits 32-63 are d0-d31.
+fn saved_reg_mask_bit(bank: Bank, phys_index: usize) -> u64 {
+    match bank {
+        Bank::Gpr => {
+            let Register::Physical(
+                crate::dialects::aarch64::registers::PhysicalRegister::Gpr64(number),
+            ) = CALLEE_SAVED_GPRS[phys_index - ALLOCATABLE_GPRS.len()]
+            else {
+                unreachable!("callee-saved GPR pool holds physical x registers");
+            };
+            1u64 << number
+        }
+        Bank::Fpr => {
+            1u64 << (32 + CALLEE_SAVED_FPR_NUMBERS[phys_index - ALLOCATABLE_FPR_NUMBERS.len()])
         }
     }
 }
@@ -93,6 +161,7 @@ impl Pass for Aarch64RegisterAllocatePass {
                 let source = match opts.freq {
                     BlockFreqModel::Uniform => "uniform",
                     BlockFreqModel::Spectral => "spectral",
+                    BlockFreqModel::SpectralLoop => "spectral-loop",
                     BlockFreqModel::Profile => "profile",
                 };
                 // eprintln! rather than log::warn!: this runs inside a rustc codegen
@@ -171,6 +240,9 @@ fn allocate_function(ctx: &mut Context, func: FuncOp, opts: &CodegenOpts) -> Cra
         ctx,
         align_to_16(base_stack_size + allocation.spill_slots * SPILL_SLOT_BYTES),
     );
+    if allocation.saved_regs_mask != 0 {
+        func.set_saved_regs(ctx, allocation.saved_regs_mask);
+    }
     Ok(())
 }
 
@@ -239,6 +311,9 @@ fn block_frequencies(live: &FunctionLiveness, opts: &CodegenOpts, symbol: &str) 
     match opts.freq {
         BlockFreqModel::Uniform => vec![1.0; blocks],
         BlockFreqModel::Spectral => spectral_frequencies(&live.successors, 0),
+        BlockFreqModel::SpectralLoop => {
+            crate::passes::spectral_freq::spectral_frequencies_loop_aware(&live.successors, 0)
+        }
         BlockFreqModel::Profile => crate::passes::profile_freq::frequencies_for(symbol, blocks)
             .unwrap_or_else(|| vec![1.0; blocks]),
     }
@@ -496,15 +571,23 @@ fn values_live_across_calls(
 struct AllocationResult {
     assignments: HashMap<VirtualRegister, Allocation>,
     spill_slots: u64,
+    /// Callee-saved registers the allocation uses, as the func-level
+    /// `saved_regs` bitmask (bits 0-31 x0-x31, bits 32-63 d0-d31).
+    saved_regs_mask: u64,
 }
 
 /// One linear scan over all intervals, with an independent register pool
 /// (free list + active set) per [Bank]. The spill-victim policies compare
 /// only intervals competing for the same bank; spill slots are shared.
+///
+/// Values live across a call (`call_crossing`) may only occupy callee-saved
+/// registers — calls clobber the caller-saved pool. When no callee-saved
+/// register is free and no eligible victim is worth evicting, the value
+/// spills (the pre-callee-saved behavior for every call-crossing value).
 fn linear_scan(
     intervals: &[LiveInterval],
     classes: &HashMap<VirtualRegister, RegisterClass>,
-    forced_spills: &BTreeSet<VirtualRegister>,
+    call_crossing: &BTreeSet<VirtualRegister>,
     weights: Option<&HashMap<VirtualRegister, f64>>,
 ) -> AllocationResult {
     let mut active: HashMap<Bank, Vec<ActiveInterval>> = HashMap::new();
@@ -515,15 +598,21 @@ fn linear_scan(
     }
     let mut assignments = HashMap::<VirtualRegister, Allocation>::new();
     let mut spill_slots = 0u64;
+    let mut saved_regs_mask = 0u64;
 
     for interval in intervals {
-        let bank = classes
+        let class = *classes
             .get(&interval.vreg)
-            .and_then(|class| bank_of(*class))
-            .expect("interval for a vreg with no allocatable class");
-        if forced_spills.contains(&interval.vreg) {
-            assignments.insert(interval.vreg, Allocation::Spill(spill_slots));
-            spill_slots += 1;
+            .expect("interval for a vreg with no class");
+        let bank = bank_of(class).expect("interval for a vreg with no allocatable class");
+        let crossing = call_crossing.contains(&interval.vreg);
+        // No register can hold a 128-bit value across a call: the whole
+        // caller-saved file is clobbered and AAPCS preserves only the low
+        // 64 bits of v8–v15. Force-spill (the pre-callee-saved behavior).
+        let is_q = class == RegisterClass::Simd128;
+        if is_q && crossing {
+            let slot = take_spill_slots(&mut spill_slots, class);
+            assignments.insert(interval.vreg, Allocation::Spill(slot));
             continue;
         }
 
@@ -531,22 +620,50 @@ fn linear_scan(
         let free = free.get_mut(&bank).unwrap();
         expire_old_intervals(interval.start, active, free);
         free.sort_unstable();
-        let phys_index = if let Some(phys_index) = free.first().copied() {
-            free.remove(0);
-            phys_index
+        let free_position = if crossing {
+            free.iter()
+                .position(|index| is_callee_saved_index(bank, *index))
+        } else if is_q {
+            // Simd128 values may never sit in a callee-saved register:
+            // only its low 64 bits would be preserved/restored.
+            free.iter()
+                .position(|index| !is_callee_saved_index(bank, *index))
+        } else {
+            (!free.is_empty()).then_some(0)
+        };
+        // A call-crossing value can only evict a victim holding a
+        // callee-saved register; a Simd128 value only one holding a
+        // caller-saved register; anything else must be eligible.
+        let eligible = |candidate: &ActiveInterval| {
+            if crossing {
+                return is_callee_saved_index(bank, candidate.phys_index);
+            }
+            if is_q {
+                return !is_callee_saved_index(bank, candidate.phys_index);
+            }
+            true
+        };
+        let phys_index = if let Some(position) = free_position {
+            free.remove(position)
         } else if let Some(spilled) = match weights {
-            None => spill_furthest_end(interval, active),
-            Some(weights) => spill_cheapest_weight(interval, active, weights),
+            None => spill_furthest_end(interval, active, eligible),
+            Some(weights) => spill_cheapest_weight(interval, active, weights, eligible),
         } {
-            assignments.insert(spilled.interval.vreg, Allocation::Spill(spill_slots));
-            spill_slots += 1;
+            let victim_class = *classes
+                .get(&spilled.interval.vreg)
+                .expect("active interval for a vreg with no class");
+            let slot = take_spill_slots(&mut spill_slots, victim_class);
+            assignments.insert(spilled.interval.vreg, Allocation::Spill(slot));
             spilled.phys_index
         } else {
-            assignments.insert(interval.vreg, Allocation::Spill(spill_slots));
-            spill_slots += 1;
+            let slot = take_spill_slots(&mut spill_slots, class);
+            assignments.insert(interval.vreg, Allocation::Spill(slot));
             continue;
         };
 
+        if is_callee_saved_index(bank, phys_index) {
+            saved_regs_mask |= saved_reg_mask_bit(bank, phys_index);
+        }
         assignments.insert(interval.vreg, Allocation::Phys(phys_index));
         active.push(ActiveInterval {
             interval: interval.clone(),
@@ -563,19 +680,22 @@ fn linear_scan(
     AllocationResult {
         assignments,
         spill_slots,
+        saved_regs_mask,
     }
 }
 
-/// Baseline (Poletto–Sarkar): evict the active interval that ends furthest
-/// away, but only if it outlives `current`; otherwise `current` itself
-/// spills.
+/// Baseline (Poletto–Sarkar): evict the `eligible` active interval that ends
+/// furthest away, but only if it outlives `current`; otherwise `current`
+/// itself spills.
 fn spill_furthest_end(
     current: &LiveInterval,
     active: &mut Vec<ActiveInterval>,
+    eligible: impl Fn(&ActiveInterval) -> bool,
 ) -> Option<ActiveInterval> {
     let spill_index = active
         .iter()
         .enumerate()
+        .filter(|(_, candidate)| eligible(candidate))
         .max_by(|(_, lhs), (_, rhs)| {
             lhs.interval
                 .end
@@ -587,18 +707,20 @@ fn spill_furthest_end(
     (active[spill_index].interval.end > current.end).then(|| active.remove(spill_index))
 }
 
-/// Weighted-cost policy: evict the candidate (active or `current`) whose
-/// total restore cost — `restore_estimate × Σ freq(use)` — is lowest.
-/// Returns `None` when `current` itself is the cheapest to spill.
+/// Weighted-cost policy: evict the `eligible` candidate (active or
+/// `current`) whose total restore cost — `restore_estimate × Σ freq(use)` —
+/// is lowest. Returns `None` when `current` itself is the cheapest to spill.
 fn spill_cheapest_weight(
     current: &LiveInterval,
     active: &mut Vec<ActiveInterval>,
     weights: &HashMap<VirtualRegister, f64>,
+    eligible: impl Fn(&ActiveInterval) -> bool,
 ) -> Option<ActiveInterval> {
     let weight_of = |vreg: VirtualRegister| weights.get(&vreg).copied().unwrap_or(0.0);
     let cheapest_active = active
         .iter()
         .enumerate()
+        .filter(|(_, candidate)| eligible(candidate))
         .min_by(|(_, lhs), (_, rhs)| {
             weight_of(lhs.interval.vreg)
                 .total_cmp(&weight_of(rhs.interval.vreg))
@@ -608,6 +730,24 @@ fn spill_cheapest_weight(
 
     (weight_of(active[cheapest_active].interval.vreg) < weight_of(current.vreg))
         .then(|| active.remove(cheapest_active))
+}
+
+/// Take the spill slot(s) for one value of `class` and return the starting
+/// slot index. Scalar classes take one 8-byte slot; `Simd128` takes two
+/// consecutive slots starting at an even index, so its 16-byte access is
+/// 16-byte aligned (the spill base — the function's pre-RA stack size — is
+/// itself 16-aligned).
+fn take_spill_slots(spill_slots: &mut u64, class: RegisterClass) -> u64 {
+    if class == RegisterClass::Simd128 {
+        *spill_slots = (*spill_slots + 1) & !1;
+        let slot = *spill_slots;
+        *spill_slots += 2;
+        slot
+    } else {
+        let slot = *spill_slots;
+        *spill_slots += 1;
+        slot
+    }
 }
 
 fn expire_old_intervals(
@@ -790,12 +930,14 @@ fn next_spill_scratch(
     };
     let scratch = match bank {
         Bank::Gpr => SPILL_SCRATCH_GPRS.get(*index).copied(),
-        Bank::Fpr => SPILL_SCRATCH_FPR_NUMBERS.get(*index).map(|number| {
-            if class == RegisterClass::Fpr32 {
-                Register::fpr32(*number)
-            } else {
-                Register::fpr64(*number)
-            }
+        Bank::Fpr => SPILL_SCRATCH_FPR_NUMBERS.get(*index).map(|number| match class {
+            RegisterClass::Fpr32 => Register::fpr32(*number),
+            // q20–q22 are the full-vector views of the d20–d22 scratch
+            // registers: caller-saved and outside every pool, so the q view
+            // is just as free (the shared index keeps d/q scratch of one
+            // instruction from colliding on the same number).
+            RegisterClass::Simd128 => Register::simd128(*number),
+            _ => Register::fpr64(*number),
         }),
     };
     let Some(scratch) = scratch else {
@@ -808,11 +950,17 @@ fn next_spill_scratch(
 }
 
 /// The sp-offset spill store/reload opcodes for a register class. FP values
-/// spill through FP loads/stores (an f32 still occupies a full 8-byte slot).
+/// spill through FP loads/stores (an f32 still occupies a full 8-byte slot;
+/// a q value takes two consecutive 16-aligned slots — see
+/// [take_spill_slots]).
 fn spill_opcodes(
     class: RegisterClass,
 ) -> (aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode) {
     match class {
+        RegisterClass::Simd128 => (
+            aarch64_ops::StrqSpOffsetOp::OPCODE,
+            aarch64_ops::LdrqSpOffsetOp::OPCODE,
+        ),
         RegisterClass::Fpr64 => (
             aarch64_ops::StrdSpOffsetOp::OPCODE,
             aarch64_ops::LdrdSpOffsetOp::OPCODE,
@@ -877,8 +1025,10 @@ mod tests {
         );
     }
 
+    /// A value live across a call sits in a callee-saved register instead
+    /// of spilling; the allocator records the register for frame lowering.
     #[test]
-    fn spills_virtual_register_live_across_call() {
+    fn call_crossing_value_uses_callee_saved_register() {
         let mut ctx = context();
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
@@ -887,7 +1037,37 @@ mod tests {
         aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
-        assert_eq!(func.stack_size(&ctx), 16);
+        assert_eq!(func.stack_size(&ctx), 0, "no spill slot is needed");
+        assert_eq!(func.saved_regs(&ctx), 1u64 << 19);
+        let insts: Vec<_> = entry.deref(&ctx).iter(&ctx).collect();
+        assert_eq!(
+            aarch64_ops::reg(&ctx, insts[0], ATTR_KEY_AARCH64_RD.as_ref()).unwrap(),
+            Register::gpr(19)
+        );
+    }
+
+    /// When every callee-saved register is taken by other call-crossing
+    /// values, the furthest-ending one spills — the pre-callee-saved
+    /// fallback.
+    #[test]
+    fn call_crossing_overflow_spills() {
+        let mut ctx = context();
+        let func = func(&mut ctx);
+        let entry = func.entry_block(&ctx);
+        for index in 0..11u32 {
+            aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(index), index as u64)
+                .insert_at_back(entry, &ctx);
+        }
+        aarch64_ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
+        // v0 is used last, so it ends furthest and is the eviction victim.
+        for index in (1..11u32).rev() {
+            aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(index))
+                .insert_at_back(entry, &ctx);
+        }
+        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+
+        allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
+        assert_eq!(func.stack_size(&ctx), 16, "exactly one value spills");
         let opcodes: Vec<_> = entry
             .deref(&ctx)
             .iter(&ctx)
@@ -911,7 +1091,17 @@ mod tests {
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
         aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(0), 1).insert_at_back(entry, &ctx);
+        // Fill the callee-saved pool with other call-crossing values so v0
+        // (which ends furthest) spills.
+        for index in 1..11u32 {
+            aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(index), index as u64)
+                .insert_at_back(entry, &ctx);
+        }
         aarch64_ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
+        for index in 1..11u32 {
+            aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(index))
+                .insert_at_back(entry, &ctx);
+        }
         aarch64_ops::movk(&mut ctx, Register::virtual_gpr(0), 2, 16).insert_at_back(entry, &ctx);
         aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
 
@@ -946,12 +1136,13 @@ mod tests {
         let mut ctx = context();
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
-        for index in 0..8u32 {
+        let values = pool_size(Bank::Gpr) as u32 + 2;
+        for index in 0..values {
             aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(index), index as u64)
                 .insert_at_back(entry, &ctx);
         }
-        for index in 0..8u32 {
-            aarch64_ops::mov(&mut ctx, Register::gpr(index as u8), Register::virtual_gpr(index))
+        for index in 0..values {
+            aarch64_ops::mov(&mut ctx, Register::gpr((index % 8) as u8), Register::virtual_gpr(index))
                 .insert_at_back(entry, &ctx);
         }
 
@@ -982,16 +1173,25 @@ mod tests {
             .count()
     }
 
-    /// A call-crossing constant: under the trivial-remat estimate its uses
+    /// A spilled constant: under the trivial-remat estimate its uses
     /// re-execute the `mov_imm` instead of reloading, and the slot store
-    /// stays (the safe form).
+    /// stays (the safe form). The callee-saved pool is exhausted by other
+    /// call-crossing values so the constant actually spills.
     #[test]
     fn remat_restores_constant_without_reload() {
         let mut ctx = context();
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
         aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(0), 7).insert_at_back(entry, &ctx);
+        for index in 1..11u32 {
+            aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(index), index as u64)
+                .insert_at_back(entry, &ctx);
+        }
         aarch64_ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
+        for index in 1..11u32 {
+            aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(index))
+                .insert_at_back(entry, &ctx);
+        }
         aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
 
         let opts = CodegenOpts {
@@ -1001,9 +1201,137 @@ mod tests {
         allocate_function(&mut ctx, func, &opts).unwrap();
 
         assert_eq!(count_opcode(&ctx, entry, aarch64_ops::LdrSpOffsetOp::OPCODE), 0);
-        // Original def plus one rematerialization at the use.
-        assert_eq!(count_opcode(&ctx, entry, aarch64_ops::MovImmOp::OPCODE), 2);
+        // The 11 original defs plus one rematerialization at the use.
+        assert_eq!(count_opcode(&ctx, entry, aarch64_ops::MovImmOp::OPCODE), 12);
         assert_eq!(count_opcode(&ctx, entry, aarch64_ops::StrSpOffsetOp::OPCODE), 1);
+    }
+
+    /// Simd128 vregs allocate from the shared Fpr pool: the q vreg takes
+    /// q16 (the first caller-saved pool number) and a simultaneously live d
+    /// vreg takes d17 — one allocation unit per register number, so d/q
+    /// overlap is impossible by construction.
+    #[test]
+    fn simd128_allocates_q_registers_from_the_shared_fpr_pool() {
+        use crate::dialects::aarch64::op_interfaces::Aarch64Opcode;
+        let mut ctx = context();
+        let func = func(&mut ctx);
+        let entry = func.entry_block(&ctx);
+        let vq = Register::virtual_simd128(0);
+        let vd = Register::virtual_fpr64(1);
+        aarch64_ops::unary(&mut ctx, Aarch64Opcode::DupV4sGpr, vq, Register::gpr(0))
+            .insert_at_back(entry, &ctx);
+        aarch64_ops::unary(&mut ctx, Aarch64Opcode::FmovDX, vd, Register::gpr(0))
+            .insert_at_back(entry, &ctx);
+        aarch64_ops::fmov_rr(&mut ctx, Aarch64Opcode::MovV16b, Register::simd128(0), vq)
+            .insert_at_back(entry, &ctx);
+        aarch64_ops::fmov_rr(&mut ctx, Aarch64Opcode::FmovD, Register::fpr64(0), vd)
+            .insert_at_back(entry, &ctx);
+
+        allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
+        assert_eq!(func.stack_size(&ctx), 0);
+        let insts: Vec<_> = entry.deref(&ctx).iter(&ctx).collect();
+        assert_eq!(
+            aarch64_ops::reg(&ctx, insts[0], ATTR_KEY_AARCH64_RD.as_ref()).unwrap(),
+            Register::simd128(16),
+            "q vreg takes the first caller-saved pool number, spelled q"
+        );
+        assert_eq!(
+            aarch64_ops::reg(&ctx, insts[1], ATTR_KEY_AARCH64_RD.as_ref()).unwrap(),
+            Register::fpr64(17),
+            "the overlapping d vreg takes the NEXT pool number, never d16"
+        );
+    }
+
+    /// With every caller-saved Fpr pool register taken by live q values,
+    /// the next q vreg spills to a 16-byte slot instead of touching the
+    /// callee-saved d8–d15 range (which preserves only its low 64 bits).
+    #[test]
+    fn simd128_never_takes_a_callee_saved_register() {
+        use crate::dialects::aarch64::op_interfaces::Aarch64Opcode;
+        let mut ctx = context();
+        let func = func(&mut ctx);
+        let entry = func.entry_block(&ctx);
+        let live = ALLOCATABLE_FPR_NUMBERS.len() as u32 + 1;
+        for index in 0..live {
+            aarch64_ops::unary(
+                &mut ctx,
+                Aarch64Opcode::DupV4sGpr,
+                Register::virtual_simd128(index),
+                Register::gpr(0),
+            )
+            .insert_at_back(entry, &ctx);
+        }
+        for index in 0..live {
+            aarch64_ops::fmov_rr(
+                &mut ctx,
+                Aarch64Opcode::MovV16b,
+                Register::simd128(0),
+                Register::virtual_simd128(index),
+            )
+            .insert_at_back(entry, &ctx);
+        }
+
+        allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
+        assert_eq!(func.saved_regs(&ctx), 0, "no callee-saved register is used");
+        assert_eq!(func.stack_size(&ctx), 16, "one q value spills 16 bytes");
+        let opcodes: Vec<_> = entry
+            .deref(&ctx)
+            .iter(&ctx)
+            .filter_map(|op| aarch64_ops::opcode(&ctx, op))
+            .collect();
+        assert!(opcodes.contains(&aarch64_ops::StrqSpOffsetOp::OPCODE));
+        assert!(opcodes.contains(&aarch64_ops::LdrqSpOffsetOp::OPCODE));
+        // The spill scratch is the q view of the reserved d20.
+        let reload = entry
+            .deref(&ctx)
+            .iter(&ctx)
+            .find(|op| {
+                aarch64_ops::opcode(&ctx, *op) == Some(aarch64_ops::LdrqSpOffsetOp::OPCODE)
+            })
+            .unwrap();
+        assert_eq!(
+            aarch64_ops::reg(&ctx, reload, ATTR_KEY_AARCH64_RD.as_ref()).unwrap(),
+            Register::simd128(20)
+        );
+    }
+
+    /// A q value live across a call force-spills: no register (caller- or
+    /// callee-saved) preserves all 128 bits across a call.
+    #[test]
+    fn simd128_crossing_a_call_spills() {
+        use crate::dialects::aarch64::op_interfaces::Aarch64Opcode;
+        let mut ctx = context();
+        let func = func(&mut ctx);
+        let entry = func.entry_block(&ctx);
+        let vq = Register::virtual_simd128(0);
+        aarch64_ops::unary(&mut ctx, Aarch64Opcode::DupV4sGpr, vq, Register::gpr(0))
+            .insert_at_back(entry, &ctx);
+        aarch64_ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
+        aarch64_ops::fmov_rr(&mut ctx, Aarch64Opcode::MovV16b, Register::simd128(0), vq)
+            .insert_at_back(entry, &ctx);
+
+        allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
+        assert_eq!(func.saved_regs(&ctx), 0);
+        assert_eq!(func.stack_size(&ctx), 16);
+        let opcodes: Vec<_> = entry
+            .deref(&ctx)
+            .iter(&ctx)
+            .filter_map(|op| aarch64_ops::opcode(&ctx, op))
+            .collect();
+        assert!(opcodes.contains(&aarch64_ops::StrqSpOffsetOp::OPCODE));
+        assert!(opcodes.contains(&aarch64_ops::LdrqSpOffsetOp::OPCODE));
+    }
+
+    /// Simd128 spill slots are two consecutive 8-byte slots starting at an
+    /// even index, so their sp offsets stay 16-byte aligned.
+    #[test]
+    fn simd128_spill_slots_are_16_byte_aligned() {
+        let mut slots = 0u64;
+        assert_eq!(take_spill_slots(&mut slots, RegisterClass::Fpr64), 0);
+        assert_eq!(take_spill_slots(&mut slots, RegisterClass::Simd128), 2);
+        assert_eq!(take_spill_slots(&mut slots, RegisterClass::Gpr64), 4);
+        assert_eq!(take_spill_slots(&mut slots, RegisterClass::Simd128), 6);
+        assert_eq!(slots, 8);
     }
 
     /// Builds the discrimination case: v0 ends furthest and is used six
@@ -1012,12 +1340,14 @@ mod tests {
     fn build_pressure_with_hot_value(ctx: &mut Context) -> (FuncOp, Ptr<BasicBlock>) {
         let func = func(ctx);
         let entry = func.entry_block(ctx);
-        for index in 0..5u32 {
+        let values = pool_size(Bank::Gpr) as u32 + 1;
+        for index in 0..values {
             aarch64_ops::mov_imm(ctx, Register::virtual_gpr(index), index as u64)
                 .insert_at_back(entry, ctx);
         }
-        aarch64_ops::mov(ctx, Register::gpr(0), Register::virtual_gpr(4)).insert_at_back(entry, ctx);
-        for index in 1..4u32 {
+        aarch64_ops::mov(ctx, Register::gpr(0), Register::virtual_gpr(values - 1))
+            .insert_at_back(entry, ctx);
+        for index in 1..values - 1 {
             aarch64_ops::mov(ctx, Register::gpr(1), Register::virtual_gpr(index))
                 .insert_at_back(entry, ctx);
         }

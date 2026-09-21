@@ -24,23 +24,41 @@ pub struct TargetProfile {
     /// mirrors LLVM's always-expand); recorded for the measured,
     /// per-site policy the backward-attribution work enables.
     pub int_div_cheap: bool,
+    /// The backend can select and allocate 128-bit vector operations
+    /// (aarch64 NEON today; x86_64's isel has no vector lowering).
+    /// Consumed by [vectorize]: a vectorized module would fail isel on a
+    /// backend without it.
+    ///
+    /// [vectorize]: crate::passes::llvm::vectorize
+    pub simd128: bool,
 }
 
 impl TargetProfile {
-    /// The host CPU (aarch64/x86_64 machine pipelines).
+    /// The host CPU (aarch64/x86_64 machine pipelines). SIMD is opt-in
+    /// per target via [Self::with_simd128] — only the aarch64 backends
+    /// lower vector ops.
     pub const fn host_cpu() -> Self {
         TargetProfile {
             has_branch_divergence: false,
             int_div_cheap: false,
+            simd128: false,
         }
     }
 
     /// The GPU kernel pipeline (NVPTX translation; ptxas owns the machine
-    /// work downstream).
+    /// work downstream). `simd128` stays off: SIMT lanes are the
+    /// parallelism model, and the NVPTX translator does not know the
+    /// vector ops.
     pub const fn gpu_kernel() -> Self {
         TargetProfile {
             has_branch_divergence: true,
             int_div_cheap: false,
+            simd128: false,
         }
+    }
+
+    pub const fn with_simd128(mut self, simd128: bool) -> Self {
+        self.simd128 = simd128;
+        self
     }
 }

@@ -60,6 +60,7 @@ dict_key!(ATTR_KEY_AARCH64_CALLEE, "aarch64_callee");
 dict_key!(ATTR_KEY_AARCH64_LITERAL_LABEL, "aarch64_literal_label");
 dict_key!(ATTR_KEY_AARCH64_LITERAL_BYTES, "aarch64_literal_bytes");
 dict_key!(ATTR_KEY_AARCH64_STACK_SIZE, "aarch64_stack_size");
+dict_key!(ATTR_KEY_AARCH64_SAVED_REGS, "aarch64_saved_regs");
 
 #[def_op("aarch64.func")]
 #[derive_op_interface_impl(
@@ -117,6 +118,26 @@ impl FuncOp {
             IntegerAttr::new(ty, APInt::from_u64(bytes, bw(64))),
         );
     }
+
+    /// The callee-saved registers this function's body uses, as a bitmask:
+    /// bits 0-31 are x0-x31, bits 32-63 are d0-d31. Set by the register
+    /// allocator; the frame-lowering pass emits the save/restore code.
+    pub fn saved_regs(&self, ctx: &Context) -> u64 {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .get::<IntegerAttr>(&ATTR_KEY_AARCH64_SAVED_REGS)
+            .map(|attr| attr.value().to_u64())
+            .unwrap_or(0)
+    }
+
+    pub fn set_saved_regs(&self, ctx: &mut Context, mask: u64) {
+        let ty = IntegerType::get(ctx, 64, Signedness::Signless);
+        self.get_operation().deref_mut(ctx).attributes.set(
+            ATTR_KEY_AARCH64_SAVED_REGS.clone(),
+            IntegerAttr::new(ty, APInt::from_u64(mask, bw(64))),
+        );
+    }
 }
 
 impl Printable for FuncOp {
@@ -136,6 +157,10 @@ impl Printable for FuncOp {
         let stack_size = self.stack_size(ctx);
         if stack_size != 0 {
             write!(f, "stack_size={stack_size} ")?;
+        }
+        let saved_regs = self.saved_regs(ctx);
+        if saved_regs != 0 {
+            write!(f, "saved_regs={saved_regs} ")?;
         }
         region(self).fmt(ctx, state, f)
     }
@@ -165,16 +190,20 @@ impl Parsable for FuncOp {
         let stack_size = combine::parser::char::string("stack_size")
             .skip(token('='))
             .with(int_parser::<u64>());
+        let saved_regs = combine::parser::char::string("saved_regs")
+            .skip(token('='))
+            .with(int_parser::<u64>());
         let mut parser = (
             spaced(LinkageAttr::parser(())),
             token('@').with(Identifier::parser(())),
             optional(attempt(spaced(stack_size))),
+            optional(attempt(spaced(saved_regs))),
             spaced(Region::parser(op)),
         );
 
         parser
             .parse_stream(state_stream)
-            .map(|(linkage, name, stack_size, _region)| -> OpObj {
+            .map(|(linkage, name, stack_size, saved_regs, _region)| -> OpObj {
                 let ctx = &mut *state_stream.state.ctx;
                 let func = FuncOp { op };
                 func.set_symbol_name(ctx, name);
@@ -184,6 +213,9 @@ impl Parsable for FuncOp {
                     .set(ATTR_KEY_AARCH64_LINKAGE.clone(), linkage);
                 if let Some(bytes) = stack_size {
                     func.set_stack_size(ctx, bytes);
+                }
+                if let Some(mask) = saved_regs {
+                    func.set_saved_regs(ctx, mask);
                 }
                 OpObj::new(func)
             })
@@ -1129,6 +1161,52 @@ define_aarch64_instructions! {
     FmovS => FmovSOp, "aarch64.fmov_s", "fmov_s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RM => Use];
     FmovImmD => FmovImmDOp, "aarch64.fmov_imm_d", "fmov_imm_d", [ATTR_KEY_AARCH64_RD => Def];
     FmovImmS => FmovImmSOp, "aarch64.fmov_imm_s", "fmov_imm_s", [ATTR_KEY_AARCH64_RD => Def];
+    // 128-bit NEON vector ops (q registers). Element arrangement is part of
+    // the opcode, as with the scalar FP `_d`/`_s` families.
+    AddV4s => AddV4sOp, "aarch64.add_v4s", "add_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    SubV4s => SubV4sOp, "aarch64.sub_v4s", "sub_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    MulV4s => MulV4sOp, "aarch64.mul_v4s", "mul_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    AddV2d => AddV2dOp, "aarch64.add_v2d", "add_v2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    SubV2d => SubV2dOp, "aarch64.sub_v2d", "sub_v2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FaddV4s => FaddV4sOp, "aarch64.fadd_v4s", "fadd_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FsubV4s => FsubV4sOp, "aarch64.fsub_v4s", "fsub_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FmulV4s => FmulV4sOp, "aarch64.fmul_v4s", "fmul_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FdivV4s => FdivV4sOp, "aarch64.fdiv_v4s", "fdiv_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FaddV2d => FaddV2dOp, "aarch64.fadd_v2d", "fadd_v2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FsubV2d => FsubV2dOp, "aarch64.fsub_v2d", "fsub_v2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FmulV2d => FmulV2dOp, "aarch64.fmul_v2d", "fmul_v2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FdivV2d => FdivV2dOp, "aarch64.fdiv_v2d", "fdiv_v2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    // Lane-size-agnostic bitwise ops on the full 128-bit vector.
+    AndV16b => AndV16bOp, "aarch64.and_v16b", "and_v16b", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    OrrV16b => OrrV16bOp, "aarch64.orr_v16b", "orr_v16b", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    EorV16b => EorV16bOp, "aarch64.eor_v16b", "eor_v16b", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    // Per-lane shifts by an immediate (the `imm` attribute).
+    ShlV4sImm => ShlV4sImmOp, "aarch64.shl_v4s_imm", "shl_v4s_imm", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    UshrV4sImm => UshrV4sImmOp, "aarch64.ushr_v4s_imm", "ushr_v4s_imm", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    SshrV4sImm => SshrV4sImmOp, "aarch64.sshr_v4s_imm", "sshr_v4s_imm", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    ShlV2dImm => ShlV2dImmOp, "aarch64.shl_v2d_imm", "shl_v2d_imm", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    UshrV2dImm => UshrV2dImmOp, "aarch64.ushr_v2d_imm", "ushr_v2d_imm", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    SshrV2dImm => SshrV2dImmOp, "aarch64.sshr_v2d_imm", "sshr_v2d_imm", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    // Register-to-register whole-vector move (`mov vd.16b, vm.16b`, the ORR alias).
+    MovV16b => MovV16bOp, "aarch64.mov_v16b", "mov_v16b", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RM => Use];
+    // Broadcast a scalar into every lane: from a GPR (`dup vd.4s, wn`) or
+    // from an FP scalar's element 0 (`dup vd.4s, vn.s[0]`).
+    DupV4sGpr => DupV4sGprOp, "aarch64.dup_v4s_gpr", "dup_v4s_gpr", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    DupV2dGpr => DupV2dGprOp, "aarch64.dup_v2d_gpr", "dup_v2d_gpr", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    DupV4sFpr => DupV4sFprOp, "aarch64.dup_v4s_fpr", "dup_v4s_fpr", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    DupV2dFpr => DupV2dFprOp, "aarch64.dup_v2d_fpr", "dup_v2d_fpr", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    // Horizontal reductions: integer `addv s, v.4s` / `addp d, v.2d`, and the
+    // FP pairwise-add ladder (`faddp v.4s` then `faddp s, v.2s`; `faddp d, v.2d`).
+    AddvS4s => AddvS4sOp, "aarch64.addv_s4s", "addv_s4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    AddpD2d => AddpD2dOp, "aarch64.addp_d2d", "addp_d2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FaddpV4s => FaddpV4sOp, "aarch64.faddp_v4s", "faddp_v4s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use, ATTR_KEY_AARCH64_RM => Use];
+    FaddpS2s => FaddpS2sOp, "aarch64.faddp_s2s", "faddp_s2s", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    FaddpD2d => FaddpD2dOp, "aarch64.faddp_d2d", "faddp_d2d", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
+    // 128-bit loads/stores, mirroring the GPR/FP sp-offset and reg-offset forms.
+    StrqSpOffset => StrqSpOffsetOp, "aarch64.strq_sp_offset", "strq_sp_offset", [ATTR_KEY_AARCH64_RD => Use];
+    LdrqSpOffset => LdrqSpOffsetOp, "aarch64.ldrq_sp_offset", "ldrq_sp_offset", [ATTR_KEY_AARCH64_RD => Def];
+    StrqRegOffset => StrqRegOffsetOp, "aarch64.strq_reg_offset", "strq_reg_offset", [ATTR_KEY_AARCH64_RD => Use, ATTR_KEY_AARCH64_RN => Use];
+    LdrqRegOffset => LdrqRegOffsetOp, "aarch64.ldrq_reg_offset", "ldrq_reg_offset", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
     StrdSpOffset => StrdSpOffsetOp, "aarch64.strd_sp_offset", "strd_sp_offset", [ATTR_KEY_AARCH64_RD => Use];
     LdrdSpOffset => LdrdSpOffsetOp, "aarch64.ldrd_sp_offset", "ldrd_sp_offset", [ATTR_KEY_AARCH64_RD => Def];
     StrsSpOffset => StrsSpOffsetOp, "aarch64.strs_sp_offset", "strs_sp_offset", [ATTR_KEY_AARCH64_RD => Use];

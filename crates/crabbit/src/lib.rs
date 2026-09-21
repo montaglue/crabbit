@@ -193,15 +193,15 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, EmitErr
 /// values directly in that form.
 fn pipeline(target: &TargetBackend, already_lowered: bool) -> Result<Passes, EmitError> {
     let mut passes = Passes::default();
+    // Only the aarch64 backends lower the mid-end's vector ops.
+    let profile = pliron_ll::target_profile::TargetProfile::host_cpu()
+        .with_simd128(target.name.starts_with("aarch64"));
     if already_lowered {
         // CRABBIT_EMIT_IR ran lower-dialect-mir standalone (to print the
         // module in its pure-LLVM-dialect form); continue from there.
-        pliron_ll::passes::llvm::add_llvm_midend_passes(
-            &mut passes,
-            &pliron_ll::target_profile::TargetProfile::host_cpu(),
-        );
+        pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
     } else {
-        add_midend_passes(&mut passes, &pliron_ll::target_profile::TargetProfile::host_cpu());
+        add_midend_passes(&mut passes, &profile);
     }
     // The machine pipeline, with the register allocator swapped for the
     // engine chosen by CRABBIT_REGALLOC (see [regalloc_engine]; the

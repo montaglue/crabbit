@@ -111,7 +111,9 @@ impl ServeHooks {
         let profile = if target == NVPTX_TARGET {
             pliron_ll::target_profile::TargetProfile::gpu_kernel()
         } else {
+            // Only the aarch64 backends lower the mid-end's vector ops.
             pliron_ll::target_profile::TargetProfile::host_cpu()
+                .with_simd128(target.starts_with("aarch64"))
         };
         pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
         if target == NVPTX_TARGET {

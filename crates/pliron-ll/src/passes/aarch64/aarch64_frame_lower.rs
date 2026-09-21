@@ -3,7 +3,7 @@ use crate::{
     dialects::{
         aarch64::{
             ops::{self as aarch64_ops, ATTR_KEY_AARCH64_RD, FuncOp},
-            registers::{LR, X16, X17},
+            registers::{LR, Register, X16, X17},
         },
         builtin::op_interfaces::OneRegionInterface,
     },
@@ -36,19 +36,47 @@ impl Pass for Aarch64FrameLowerPass {
 
 fn lower_function_frame(ctx: &mut Context, func: FuncOp) {
     let stack_size = func.stack_size(ctx);
+    // The callee-saved save area sits above the allocator's spill slots:
+    // [0, stack_size) holds locals and spills at the offsets the allocator
+    // already baked in, [stack_size, frame_bytes) holds one 8-byte slot per
+    // saved register.
+    let saved = saved_registers(func.saved_regs(ctx));
+    let frame_bytes = align_to_16(stack_size + saved.len() as u64 * 8);
     let entry = func.entry_block(ctx);
     // Incoming stack arguments are fixed objects above the frame: once the
     // link register save and the frame allocation are in place, they sit
     // at `frame + lr save + offset` from sp.
     let lr_save_bytes = link_register_save_bytes(ctx, entry);
-    rewrite_stack_arg_loads(ctx, func, stack_size + lr_save_bytes);
-    if stack_size == 0 {
+    rewrite_stack_arg_loads(ctx, func, frame_bytes + lr_save_bytes);
+    if frame_bytes == 0 {
         return;
     }
 
-    insert_prologue(ctx, entry, stack_size);
-    insert_epilogues(ctx, func, stack_size);
+    insert_prologue(ctx, entry, frame_bytes, stack_size, &saved);
+    insert_epilogues(ctx, func, frame_bytes, stack_size, &saved);
     legalize_large_sp_address_offsets(ctx, func);
+}
+
+/// The registers named by a func-level `saved_regs` bitmask (bits 0-31 are
+/// x0-x31, bits 32-63 are d0-d31), GPRs first, ascending — the fixed
+/// save-area layout order.
+fn saved_registers(mask: u64) -> Vec<Register> {
+    let mut regs = Vec::new();
+    for number in 0..32u8 {
+        if mask & (1u64 << number) != 0 {
+            regs.push(Register::gpr(number));
+        }
+    }
+    for number in 0..32u8 {
+        if mask & (1u64 << (32 + number)) != 0 {
+            regs.push(Register::fpr64(number));
+        }
+    }
+    regs
+}
+
+fn align_to_16(bytes: u64) -> u64 {
+    (bytes + 15) & !15
 }
 
 /// The bytes the entry block's leading link-register save (`str lr,
@@ -209,14 +237,50 @@ fn sp_mem_reg_offset_form(
         Aarch64Opcode::LdrdSpOffset => Some((Aarch64Opcode::LdrdRegOffset, 8)),
         Aarch64Opcode::StrsSpOffset => Some((Aarch64Opcode::StrsRegOffset, 4)),
         Aarch64Opcode::LdrsSpOffset => Some((Aarch64Opcode::LdrsRegOffset, 4)),
+        Aarch64Opcode::StrqSpOffset => Some((Aarch64Opcode::StrqRegOffset, 16)),
+        Aarch64Opcode::LdrqSpOffset => Some((Aarch64Opcode::LdrqRegOffset, 16)),
         _ => None,
     }
 }
 
+/// The save/restore opcodes and save-area offset of each saved register:
+/// slot `i` lives at `stack_size + i * 8`.
+fn save_slots(
+    saved: &[Register],
+    stack_size: u64,
+) -> Vec<(Register, aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode, u64)> {
+    saved
+        .iter()
+        .enumerate()
+        .map(|(index, reg)| {
+            let (store, load) = if reg.is_fpr() {
+                (
+                    aarch64_ops::StrdSpOffsetOp::OPCODE,
+                    aarch64_ops::LdrdSpOffsetOp::OPCODE,
+                )
+            } else {
+                (
+                    aarch64_ops::StrSpOffsetOp::OPCODE,
+                    aarch64_ops::LdrSpOffsetOp::OPCODE,
+                )
+            };
+            (*reg, store, load, stack_size + index as u64 * 8)
+        })
+        .collect()
+}
+
 /// Allocate the frame right after the link-register save (when there is
 /// one), before anything else in the entry block: every later sp-relative
-/// access, spill stores included, assumes the frame exists.
-fn insert_prologue(ctx: &mut Context, entry: Ptr<BasicBlock>, stack_size: u64) {
+/// access, spill stores included, assumes the frame exists. Callee-saved
+/// registers are stored into the save area immediately after the frame
+/// allocation, before any body instruction can write them.
+fn insert_prologue(
+    ctx: &mut Context,
+    entry: Ptr<BasicBlock>,
+    frame_bytes: u64,
+    stack_size: u64,
+    saved: &[Register],
+) {
     let mut after = None;
     let mut cursor = entry.deref(ctx).get_head();
     while let Some(op) = cursor {
@@ -232,8 +296,20 @@ fn insert_prologue(ctx: &mut Context, entry: Ptr<BasicBlock>, stack_size: u64) {
         cursor = op.deref(ctx).get_next();
     }
 
-    for bytes in stack_chunks(stack_size) {
+    for bytes in stack_chunks(frame_bytes) {
         let op = aarch64_ops::sub_sp_imm(ctx, bytes);
+        if let Some(mark) = after {
+            op.insert_after(ctx, mark);
+        } else {
+            op.insert_at_front(entry, ctx);
+        }
+        if super::blockmap::blockmap_enabled() {
+            super::opmap::set_derived_from(ctx, op, super::opmap::roots::FRAME);
+        }
+        after = Some(op);
+    }
+    for (reg, store, _, offset) in save_slots(saved, stack_size) {
+        let op = aarch64_ops::str_sp_offset_sized(ctx, store, reg, offset);
         if let Some(mark) = after {
             op.insert_after(ctx, mark);
         } else {
@@ -246,14 +322,26 @@ fn insert_prologue(ctx: &mut Context, entry: Ptr<BasicBlock>, stack_size: u64) {
     }
 }
 
-fn insert_epilogues(ctx: &mut Context, func: FuncOp, stack_size: u64) {
+fn insert_epilogues(
+    ctx: &mut Context,
+    func: FuncOp,
+    frame_bytes: u64,
+    stack_size: u64,
+    saved: &[Register],
+) {
     let blocks: Vec<_> = func.get_region(ctx).deref(ctx).iter(ctx).collect();
     for block in blocks {
-        insert_block_epilogues(ctx, block, stack_size);
+        insert_block_epilogues(ctx, block, frame_bytes, stack_size, saved);
     }
 }
 
-fn insert_block_epilogues(ctx: &mut Context, block: Ptr<BasicBlock>, stack_size: u64) {
+fn insert_block_epilogues(
+    ctx: &mut Context,
+    block: Ptr<BasicBlock>,
+    frame_bytes: u64,
+    stack_size: u64,
+    saved: &[Register],
+) {
     let insts: Vec<_> = block.deref(ctx).iter(ctx).collect();
     let mut marks: Vec<_> = insts
         .iter()
@@ -281,7 +369,16 @@ fn insert_block_epilogues(ctx: &mut Context, block: Ptr<BasicBlock>, stack_size:
     }
 
     for mark in marks {
-        for bytes in stack_chunks(stack_size).into_iter().rev() {
+        // Restores execute while the frame still exists (before the sp
+        // adjustment), so the save-area offsets match the prologue's.
+        for (reg, _, load, offset) in save_slots(saved, stack_size) {
+            let op = aarch64_ops::ldr_sp_offset_sized(ctx, load, reg, offset);
+            op.insert_before(ctx, mark);
+            if super::blockmap::blockmap_enabled() {
+                super::opmap::set_derived_from(ctx, op, super::opmap::roots::FRAME);
+            }
+        }
+        for bytes in stack_chunks(frame_bytes).into_iter().rev() {
             let op = aarch64_ops::add_sp_imm(ctx, bytes);
             op.insert_before(ctx, mark);
             if super::blockmap::blockmap_enabled() {
@@ -382,7 +479,7 @@ mod tests {
         aarch64_ops::str_pre_sp(&mut ctx, FP, 16).insert_at_back(entry, &ctx);
         aarch64_ops::mov(&mut ctx, Register::gpr(1), Register::gpr(0)).insert_at_back(entry, &ctx);
 
-        insert_prologue(&mut ctx, entry, 5000);
+        insert_prologue(&mut ctx, entry, 5000, 5000, &[]);
 
         assert_eq!(
             opcodes_and_imms(&ctx, entry),
@@ -471,7 +568,7 @@ mod tests {
         aarch64_ops::ldr_post_sp(&mut ctx, LR, 16).insert_at_back(entry, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
-        insert_block_epilogues(&mut ctx, entry, 32);
+        insert_block_epilogues(&mut ctx, entry, 32, 32, &[]);
 
         assert_eq!(
             opcodes_and_imms(&ctx, entry),
@@ -492,13 +589,46 @@ mod tests {
         aarch64_ops::ldr_post_sp(&mut ctx, FP, 16).insert_at_back(entry, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
-        insert_block_epilogues(&mut ctx, entry, 32);
+        insert_block_epilogues(&mut ctx, entry, 32, 32, &[]);
 
         assert_eq!(
             opcodes_and_imms(&ctx, entry),
             [
                 ("mov".to_string(), None),
                 ("ldr_post_sp".to_string(), Some(16)),
+                ("add_sp_imm".to_string(), Some(32)),
+                ("ret".to_string(), None),
+            ]
+        );
+    }
+
+    /// A function whose allocation used x19 and d8: the frame grows by an
+    /// aligned save area above the spill area, saves go right after the
+    /// frame allocation, restores right before the sp adjustment.
+    #[test]
+    fn callee_saved_registers_are_saved_and_restored() {
+        let mut ctx = context();
+        let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+        let func = func(&mut ctx);
+        func.set_stack_size(&mut ctx, 16);
+        func.set_saved_regs(&mut ctx, (1u64 << 19) | (1u64 << (32 + 8)));
+        func.get_operation().insert_at_back(body, &ctx);
+        let entry = func.entry_block(&ctx);
+        aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
+
+        Aarch64FrameLowerPass
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        assert_eq!(
+            opcodes_and_imms(&ctx, entry),
+            [
+                ("sub_sp_imm".to_string(), Some(32)),
+                ("str_sp_offset".to_string(), Some(16)),
+                ("strd_sp_offset".to_string(), Some(24)),
+                ("ldr_sp_offset".to_string(), Some(16)),
+                ("ldrd_sp_offset".to_string(), Some(24)),
                 ("add_sp_imm".to_string(), Some(32)),
                 ("ret".to_string(), None),
             ]

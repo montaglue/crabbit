@@ -85,6 +85,11 @@ pub enum BlockFreqModel {
     Uniform,
     /// Perron–Frobenius stationary frequencies of the CFG random walk.
     Spectral,
+    /// Spectral with a loop-aware branch prior: successors staying in a
+    /// branch's innermost natural loop share probability 7/8 (LLVM's
+    /// loop-branch-weight convention), so loop bodies weigh ~8 per nesting
+    /// level instead of the uniform walk's cap of 2.
+    SpectralLoop,
     /// Measured frequencies from the `CRABBIT_PROFILE` JSON (per function
     /// symbol, one value per RA-order block; uniform fallback per
     /// function when absent). See [crate::passes::profile_freq].
@@ -131,12 +136,13 @@ impl CodegenOpts {
         let freq = match env("CRABBIT_BLOCK_FREQ").as_deref() {
             None | Some("uniform") => BlockFreqModel::Uniform,
             Some("spectral") => BlockFreqModel::Spectral,
+            Some("spectral-loop") => BlockFreqModel::SpectralLoop,
             Some("profile") => BlockFreqModel::Profile,
             Some(other) => {
                 return Err(input_error_noloc!(CodegenOptsErr::UnknownValue {
                     var: "CRABBIT_BLOCK_FREQ",
                     value: other.to_string(),
-                    expected: "uniform, spectral, profile",
+                    expected: "uniform, spectral, spectral-loop, profile",
                 }));
             }
         };

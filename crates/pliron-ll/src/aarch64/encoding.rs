@@ -223,6 +223,57 @@ fn encode_fixed_inst(ctx: &Context, op: Ptr<Operation>, opcode: Aarch64Opcode) -
         ops::FmovSOp::OPCODE => encode_fmov_rr(ctx, op, 0x1e20_4000),
         ops::FmovImmDOp::OPCODE => encode_fmov_imm(ctx, op, 0x1e60_1000),
         ops::FmovImmSOp::OPCODE => encode_fmov_imm(ctx, op, 0x1e20_1000),
+        // 128-bit NEON vector data-processing (q registers). Reference words
+        // for every base come from llvm-mc (`-triple=aarch64 -show-encoding`).
+        ops::AddV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x4ea0_8400),
+        ops::SubV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x6ea0_8400),
+        ops::MulV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x4ea0_9c00),
+        ops::AddV2dOp::OPCODE => encode_three_vreg(ctx, op, 0x4ee0_8400),
+        ops::SubV2dOp::OPCODE => encode_three_vreg(ctx, op, 0x6ee0_8400),
+        ops::FaddV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x4e20_d400),
+        ops::FsubV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x4ea0_d400),
+        ops::FmulV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x6e20_dc00),
+        ops::FdivV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x6e20_fc00),
+        ops::FaddV2dOp::OPCODE => encode_three_vreg(ctx, op, 0x4e60_d400),
+        ops::FsubV2dOp::OPCODE => encode_three_vreg(ctx, op, 0x4ee0_d400),
+        ops::FmulV2dOp::OPCODE => encode_three_vreg(ctx, op, 0x6e60_dc00),
+        ops::FdivV2dOp::OPCODE => encode_three_vreg(ctx, op, 0x6e60_fc00),
+        ops::AndV16bOp::OPCODE => encode_three_vreg(ctx, op, 0x4e20_1c00),
+        ops::OrrV16bOp::OPCODE => encode_three_vreg(ctx, op, 0x4ea0_1c00),
+        ops::EorV16bOp::OPCODE => encode_three_vreg(ctx, op, 0x6e20_1c00),
+        // Per-lane immediate shifts. The A64 immh:immb field encodes the
+        // shift as `lanebits + sh` for SHL and `2*lanebits - sh` for the
+        // right shifts; the range checks below keep every emitted word a
+        // valid encoding of the IR-level shift amount.
+        ops::ShlV4sImmOp::OPCODE => encode_vshift_imm(ctx, op, 0x4f00_5400, 32, false),
+        ops::UshrV4sImmOp::OPCODE => encode_vshift_imm(ctx, op, 0x6f00_0400, 32, true),
+        ops::SshrV4sImmOp::OPCODE => encode_vshift_imm(ctx, op, 0x4f00_0400, 32, true),
+        ops::ShlV2dImmOp::OPCODE => encode_vshift_imm(ctx, op, 0x4f00_5400, 64, false),
+        ops::UshrV2dImmOp::OPCODE => encode_vshift_imm(ctx, op, 0x6f00_0400, 64, true),
+        ops::SshrV2dImmOp::OPCODE => encode_vshift_imm(ctx, op, 0x4f00_0400, 64, true),
+        // mov vd.16b, vm.16b is orr vd.16b, vm.16b, vm.16b.
+        ops::MovV16bOp::OPCODE => {
+            let rm = qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32;
+            let rd = qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()).unwrap()) as u32;
+            Some(0x4ea0_1c00 | (rm << 16) | (rm << 5) | rd)
+        }
+        // Lane broadcasts.
+        ops::DupV4sGprOp::OPCODE => encode_two_reg(ctx, op, 0x4e04_0c00, qreg, xreg),
+        ops::DupV2dGprOp::OPCODE => encode_two_reg(ctx, op, 0x4e08_0c00, qreg, xreg),
+        ops::DupV4sFprOp::OPCODE => encode_two_reg(ctx, op, 0x4e04_0400, qreg, freg),
+        ops::DupV2dFprOp::OPCODE => encode_two_reg(ctx, op, 0x4e08_0400, qreg, freg),
+        // Horizontal reductions: the scalar destination is the low element
+        // of the vector file (s/d view), the source the full q view.
+        ops::AddvS4sOp::OPCODE => encode_two_reg(ctx, op, 0x4eb1_b800, freg, qreg),
+        ops::AddpD2dOp::OPCODE => encode_two_reg(ctx, op, 0x5ef1_b800, freg, qreg),
+        ops::FaddpV4sOp::OPCODE => encode_three_vreg(ctx, op, 0x6e20_d400),
+        ops::FaddpS2sOp::OPCODE => encode_two_reg(ctx, op, 0x7e30_d800, freg, qreg),
+        ops::FaddpD2dOp::OPCODE => encode_two_reg(ctx, op, 0x7e70_d800, freg, qreg),
+        // 128-bit loads/stores (scaled imm12 with unscaled ldur/stur fallback).
+        ops::StrqSpOffsetOp::OPCODE => encode_q_mem_offset(ctx, op, 0x3d80_0000, Some(31)),
+        ops::LdrqSpOffsetOp::OPCODE => encode_q_mem_offset(ctx, op, 0x3dc0_0000, Some(31)),
+        ops::StrqRegOffsetOp::OPCODE => encode_q_mem_offset(ctx, op, 0x3d80_0000, None),
+        ops::LdrqRegOffsetOp::OPCODE => encode_q_mem_offset(ctx, op, 0x3dc0_0000, None),
         // FP loads/stores mirroring the GPR sp-offset and reg-offset forms.
         ops::StrdSpOffsetOp::OPCODE => encode_fp_mem_offset(ctx, op, 0xfd00_0000, 8, Some(31)),
         ops::LdrdSpOffsetOp::OPCODE => encode_fp_mem_offset(ctx, op, 0xfd40_0000, 8, Some(31)),
@@ -302,6 +353,65 @@ fn freg(reg: Register) -> u8 {
         | Register::Physical(PhysicalRegister::Fpr32(number)) => number,
         other => panic!("expected a physical AArch64 FP register at encoding, got `{other}`"),
     }
+}
+
+/// The hardware number of a physical 128-bit SIMD register (`q<n>`).
+fn qreg(reg: Register) -> u8 {
+    match reg {
+        Register::Physical(PhysicalRegister::Simd128(number)) => number,
+        other => panic!("expected a physical AArch64 SIMD register at encoding, got `{other}`"),
+    }
+}
+
+/// A three-register NEON vector op: all operands in the q view; the
+/// arrangement lives in the base word.
+fn encode_three_vreg(ctx: &Context, op: Ptr<Operation>, base: u32) -> Option<u32> {
+    Some(
+        base | ((qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32) << 16)
+            | ((qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32) << 5)
+            | qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()).unwrap()) as u32,
+    )
+}
+
+/// A per-lane shift by immediate (`shl`/`sshr`/`ushr <Vd>.<T>, <Vn>.<T>,
+/// #sh`): immh:immb is `lanebits + sh` for left shifts and
+/// `2*lanebits - sh` for right shifts (right shifts of 0 are not
+/// encodable; left shifts reach `lanebits - 1`).
+fn encode_vshift_imm(
+    ctx: &Context,
+    op: Ptr<Operation>,
+    base: u32,
+    lanebits: u64,
+    right: bool,
+) -> Option<u32> {
+    let sh = ops::imm(ctx, op)?;
+    let field = if right {
+        if sh == 0 || sh > lanebits {
+            return None;
+        }
+        2 * lanebits - sh
+    } else {
+        if sh >= lanebits {
+            return None;
+        }
+        lanebits + sh
+    };
+    Some(
+        base | ((field as u32) << 16)
+            | ((qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32) << 5)
+            | qreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()).unwrap()) as u32,
+    )
+}
+
+/// 128-bit loads/stores share the scaled-immediate/unscaled addressing
+/// forms with a byte scale of 16 and a q data register.
+fn encode_q_mem_offset(
+    ctx: &Context,
+    op: Ptr<Operation>,
+    base: u32,
+    fixed_rn: Option<u8>,
+) -> Option<u32> {
+    encode_mem_offset_with(ctx, op, base, 16, fixed_rn, qreg)
 }
 
 fn encode_three_freg(ctx: &Context, op: Ptr<Operation>, base: u32) -> Option<u32> {
@@ -728,6 +838,132 @@ mod tests {
         ];
         for (opcode, rt, offset, expected) in cases_reg {
             let inst = ops::ldr_reg_offset_sized(&mut ctx, *opcode, *rt, x(1), *offset);
+            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+        }
+    }
+
+    /// Every expected word was produced by llvm-mc
+    /// (`-triple=aarch64 -show-encoding`) from the textual form in the
+    /// comment.
+    #[test]
+    fn encodes_neon_vector_instructions_to_reference_words() {
+        use crate::dialects::aarch64::op_interfaces::Aarch64Opcode;
+        let mut ctx = context();
+        let q = Register::simd128;
+        let d = Register::fpr64;
+        let s = Register::fpr32;
+        let x = Register::gpr;
+
+        let three: &[(Aarch64Opcode, u32)] = &[
+            // add/sub/mul v0.4s, v1.4s, v2.4s ; add/sub v0.2d, v1.2d, v2.2d
+            (Aarch64Opcode::AddV4s, 0x4ea2_8420),
+            (Aarch64Opcode::SubV4s, 0x6ea2_8420),
+            (Aarch64Opcode::MulV4s, 0x4ea2_9c20),
+            (Aarch64Opcode::AddV2d, 0x4ee2_8420),
+            (Aarch64Opcode::SubV2d, 0x6ee2_8420),
+            // fadd/fsub/fmul/fdiv v0.4s, v1.4s, v2.4s
+            (Aarch64Opcode::FaddV4s, 0x4e22_d420),
+            (Aarch64Opcode::FsubV4s, 0x4ea2_d420),
+            (Aarch64Opcode::FmulV4s, 0x6e22_dc20),
+            (Aarch64Opcode::FdivV4s, 0x6e22_fc20),
+            // fadd/fsub/fmul/fdiv v0.2d, v1.2d, v2.2d
+            (Aarch64Opcode::FaddV2d, 0x4e62_d420),
+            (Aarch64Opcode::FsubV2d, 0x4ee2_d420),
+            (Aarch64Opcode::FmulV2d, 0x6e62_dc20),
+            (Aarch64Opcode::FdivV2d, 0x6e62_fc20),
+            // faddp v0.4s, v1.4s, v2.4s
+            (Aarch64Opcode::FaddpV4s, 0x6e22_d420),
+            // and/orr/eor v0.16b, v1.16b, v2.16b
+            (Aarch64Opcode::AndV16b, 0x4e22_1c20),
+            (Aarch64Opcode::OrrV16b, 0x4ea2_1c20),
+            (Aarch64Opcode::EorV16b, 0x6e22_1c20),
+        ];
+        for (opcode, expected) in three {
+            let inst = ops::binary(&mut ctx, *opcode, q(0), q(1), q(2));
+            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+        }
+
+        let two: &[(Aarch64Opcode, Register, Register, u32)] = &[
+            // dup v0.4s, w1 ; dup v0.2d, x1
+            (Aarch64Opcode::DupV4sGpr, q(0), x(1), 0x4e04_0c20),
+            (Aarch64Opcode::DupV2dGpr, q(0), x(1), 0x4e08_0c20),
+            // dup v0.4s, v1.s[0] ; dup v0.2d, v1.d[0]
+            (Aarch64Opcode::DupV4sFpr, q(0), s(1), 0x4e04_0420),
+            (Aarch64Opcode::DupV2dFpr, q(0), d(1), 0x4e08_0420),
+            // addv s0, v1.4s ; addp d0, v1.2d
+            (Aarch64Opcode::AddvS4s, s(0), q(1), 0x4eb1_b820),
+            (Aarch64Opcode::AddpD2d, d(0), q(1), 0x5ef1_b820),
+            // faddp s0, v1.2s ; faddp d0, v1.2d
+            (Aarch64Opcode::FaddpS2s, s(0), q(1), 0x7e30_d820),
+            (Aarch64Opcode::FaddpD2d, d(0), q(1), 0x7e70_d820),
+        ];
+        for (opcode, rd, rn, expected) in two {
+            let inst = ops::unary(&mut ctx, *opcode, *rd, *rn);
+            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+        }
+
+        // mov v0.16b, v1.16b (orr alias)
+        let mov = ops::fmov_rr(&mut ctx, Aarch64Opcode::MovV16b, q(0), q(1));
+        assert_eq!(
+            encode_fixed_inst(&ctx, mov, Aarch64Opcode::MovV16b),
+            Some(0x4ea1_1c20)
+        );
+
+        // Immediate lane shifts (llvm-mc reference words).
+        let shifts: &[(Aarch64Opcode, u64, Option<u32>)] = &[
+            // shl v0.4s, v1.4s, #3 ; #0
+            (Aarch64Opcode::ShlV4sImm, 3, Some(0x4f23_5420)),
+            (Aarch64Opcode::ShlV4sImm, 0, Some(0x4f20_5420)),
+            // sshr/ushr v0.4s, v1.4s, #3 ; sshr #31
+            (Aarch64Opcode::SshrV4sImm, 3, Some(0x4f3d_0420)),
+            (Aarch64Opcode::UshrV4sImm, 3, Some(0x6f3d_0420)),
+            (Aarch64Opcode::SshrV4sImm, 31, Some(0x4f21_0420)),
+            // shl/sshr v0.2d, v1.2d, #3 ; ushr #63
+            (Aarch64Opcode::ShlV2dImm, 3, Some(0x4f43_5420)),
+            (Aarch64Opcode::SshrV2dImm, 3, Some(0x4f7d_0420)),
+            (Aarch64Opcode::UshrV2dImm, 63, Some(0x6f41_0420)),
+            // Out-of-range shifts are unencodable, never mis-encoded.
+            (Aarch64Opcode::ShlV4sImm, 32, None),
+            (Aarch64Opcode::SshrV4sImm, 0, None),
+            (Aarch64Opcode::UshrV4sImm, 33, None),
+        ];
+        for (opcode, sh, expected) in shifts {
+            let inst = ops::unary(&mut ctx, *opcode, q(0), q(1));
+            ops::set_imm(&mut ctx, inst, *sh);
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                *expected,
+                "{opcode:?} #{sh}"
+            );
+        }
+    }
+
+    #[test]
+    fn encodes_q_memory_forms_to_reference_words() {
+        use crate::dialects::aarch64::op_interfaces::Aarch64Opcode;
+        let mut ctx = context();
+        let q = Register::simd128;
+        let x = Register::gpr;
+
+        // ldr/str q0, [sp, #32]
+        let cases_sp: &[(Aarch64Opcode, u64, u32)] = &[
+            (Aarch64Opcode::LdrqSpOffset, 32, 0x3dc0_0be0),
+            (Aarch64Opcode::StrqSpOffset, 32, 0x3d80_0be0),
+        ];
+        for (opcode, offset, expected) in cases_sp {
+            let inst = ops::ldr_sp_offset_sized(&mut ctx, *opcode, q(0), *offset);
+            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+        }
+
+        // ldr/str q0, [x1, #32] ; ldur/stur q0, [x1, #3] (unscaled fallback)
+        let cases_reg: &[(Aarch64Opcode, u64, u32)] = &[
+            (Aarch64Opcode::LdrqRegOffset, 32, 0x3dc0_0820),
+            (Aarch64Opcode::StrqRegOffset, 32, 0x3d80_0820),
+            (Aarch64Opcode::LdrqRegOffset, 3, 0x3cc0_3020),
+            (Aarch64Opcode::StrqRegOffset, 3, 0x3c80_3020),
+        ];
+        for (opcode, offset, expected) in cases_reg {
+            let inst = ops::ldr_reg_offset_sized(&mut ctx, *opcode, q(0), x(1), *offset);
             assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
         }
     }

@@ -14,6 +14,7 @@ pub mod simplify_cfg;
 pub mod sink;
 pub mod sroa;
 pub mod unroll;
+pub mod vectorize;
 
 use crate::conversion::pass::{Mem2RegPass, Passes};
 use crate::target_profile::TargetProfile;
@@ -71,4 +72,9 @@ pub fn add_llvm_midend_passes(passes: &mut Passes, profile: &TargetProfile) {
     passes.add_pass(simplify::LLVMSimplifyPass);
     passes.add_pass(simplify_cfg::LLVMSimplifyCfgPass);
     passes.add_pass(simplify::LLVMSimplifyPass);
+    // LAST on purpose: no other mid-end pass ever sees the crabbit-internal
+    // vector ops, so the op-safety tables need no entries for them.
+    // Self-disables on divergent targets and backends without SIMD lowering
+    // ([TargetProfile::simd128]).
+    passes.add_pass(vectorize::LLVMVectorizePass::new(profile));
 }

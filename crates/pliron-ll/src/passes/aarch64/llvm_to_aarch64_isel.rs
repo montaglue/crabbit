@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _, OneOpdInterface as _};
 use pliron_llvm::op_interfaces::{PointerTypeResult as _};
 
-use crate::ll::ops::CStrOp;
+use crate::ll::ops::{CStrOp, VBinOp, VLoadOp, VReduceOp, VSplatOp, VStoreOp, vector_type_of};
+use crate::ll::{VBinOpKindAttr, VReduceKindAttr};
+use pliron::derive::op_interface_impl;
 
 use crate::{
     common_traits::Named,
@@ -769,6 +771,216 @@ fn lower_function(
                     value.get_type(ctx),
                     &mut next_vreg,
                 )?;
+            } else if let Some(vload) = op_obj.downcast_ref::<VLoadOp>() {
+                let result = vload.get_result(ctx);
+                vec_shape(ctx, result.get_type(ctx)).ok_or_else(|| {
+                    input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                        "ll.vload of unsupported vector type {}",
+                        pliron::printable::Printable::disp(&result.get_type(ctx), ctx)
+                    )))
+                })?;
+                let addr = lookup_value(ctx, &values, op_ptr.deref(ctx).get_operand(0))?;
+                let (base, offset) = simd_address(ctx, insert_block, addr, &mut next_vreg)?;
+                let dst = fresh_simd(&mut next_vreg);
+                aarch64_ops::ldr_reg_offset_sized(
+                    ctx,
+                    aarch64_ops::LdrqRegOffsetOp::OPCODE,
+                    dst,
+                    base,
+                    offset,
+                )
+                .insert_at_back(insert_block, ctx);
+                values.insert(result, LoweredValue::Reg(dst));
+            } else if let Some(vstore) = op_obj.downcast_ref::<VStoreOp>() {
+                let value = lookup_value(ctx, &values, vstore.value_operand(ctx))?;
+                let src = materialize_simd(value, "ll.vstore value")?;
+                let addr = lookup_value(ctx, &values, vstore.address_operand(ctx))?;
+                let (base, offset) = simd_address(ctx, insert_block, addr, &mut next_vreg)?;
+                aarch64_ops::str_reg_offset_sized(
+                    ctx,
+                    aarch64_ops::StrqRegOffsetOp::OPCODE,
+                    src,
+                    base,
+                    offset,
+                )
+                .insert_at_back(insert_block, ctx);
+            } else if let Some(vsplat) = op_obj.downcast_ref::<VSplatOp>() {
+                let result = vsplat.get_result(ctx);
+                let shape = vec_shape(ctx, result.get_type(ctx)).ok_or_else(|| {
+                    input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                        "ll.vsplat of unsupported vector type {}",
+                        pliron::printable::Printable::disp(&result.get_type(ctx), ctx)
+                    )))
+                })?;
+                let scalar = lookup_value(ctx, &values, op_ptr.deref(ctx).get_operand(0))?;
+                let dst = fresh_simd(&mut next_vreg);
+                let (opcode, src) = match shape {
+                    VecShape::F32x4 => (
+                        aarch64_ops::DupV4sFprOp::OPCODE,
+                        materialize_fp(
+                            ctx, insert_block, scalar, FpKind::F32, &mut next_vreg,
+                            "ll.vsplat input",
+                        )?,
+                    ),
+                    VecShape::F64x2 => (
+                        aarch64_ops::DupV2dFprOp::OPCODE,
+                        materialize_fp(
+                            ctx, insert_block, scalar, FpKind::F64, &mut next_vreg,
+                            "ll.vsplat input",
+                        )?,
+                    ),
+                    VecShape::I32x4 => (
+                        aarch64_ops::DupV4sGprOp::OPCODE,
+                        materialize(ctx, insert_block, scalar, &mut next_vreg, "ll.vsplat input")?,
+                    ),
+                    VecShape::I64x2 => (
+                        aarch64_ops::DupV2dGprOp::OPCODE,
+                        materialize(ctx, insert_block, scalar, &mut next_vreg, "ll.vsplat input")?,
+                    ),
+                };
+                aarch64_ops::unary(ctx, opcode, dst, src).insert_at_back(insert_block, ctx);
+                values.insert(result, LoweredValue::Reg(dst));
+            } else if let Some(vbin) = op_obj.downcast_ref::<VBinOp>() {
+                let result = vbin.get_result(ctx);
+                let kind = vbin.kind(ctx);
+                let shape = vec_shape(ctx, result.get_type(ctx)).ok_or_else(|| {
+                    input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                        "ll.vbinop of unsupported vector type {}",
+                        pliron::printable::Printable::disp(&result.get_type(ctx), ctx)
+                    )))
+                })?;
+                let (lhs_v, rhs_v) = {
+                    let op_ref = op_ptr.deref(ctx);
+                    (op_ref.get_operand(0), op_ref.get_operand(1))
+                };
+                let lhs = materialize_simd(lookup_value(ctx, &values, lhs_v)?, "ll.vbinop lhs")?;
+                if kind.is_shift() {
+                    // Shifts lower to the immediate NEON forms: the rhs must
+                    // be an `ll.vsplat` of a constant (the vectorizer's
+                    // invariant).
+                    let sh = vsplat_immediate(ctx, &values, rhs_v)?;
+                    let opcode = match (kind, shape) {
+                        (VBinOpKindAttr::Shl, VecShape::I32x4) => {
+                            aarch64_ops::ShlV4sImmOp::OPCODE
+                        }
+                        (VBinOpKindAttr::LShr, VecShape::I32x4) => {
+                            aarch64_ops::UshrV4sImmOp::OPCODE
+                        }
+                        (VBinOpKindAttr::AShr, VecShape::I32x4) => {
+                            aarch64_ops::SshrV4sImmOp::OPCODE
+                        }
+                        (VBinOpKindAttr::Shl, VecShape::I64x2) => {
+                            aarch64_ops::ShlV2dImmOp::OPCODE
+                        }
+                        (VBinOpKindAttr::LShr, VecShape::I64x2) => {
+                            aarch64_ops::UshrV2dImmOp::OPCODE
+                        }
+                        (VBinOpKindAttr::AShr, VecShape::I64x2) => {
+                            aarch64_ops::SshrV2dImmOp::OPCODE
+                        }
+                        (kind, shape) => {
+                            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                                "ll.vbinop {kind} on {shape:?}"
+                            ))));
+                        }
+                    };
+                    let dst = fresh_simd(&mut next_vreg);
+                    let inst = aarch64_ops::unary(ctx, opcode, dst, lhs);
+                    aarch64_ops::set_imm(ctx, inst, sh);
+                    inst.insert_at_back(insert_block, ctx);
+                    values.insert(result, LoweredValue::Reg(dst));
+                    continue;
+                }
+                let rhs = materialize_simd(lookup_value(ctx, &values, rhs_v)?, "ll.vbinop rhs")?;
+                use VBinOpKindAttr as K;
+                use VecShape as S;
+                let opcode = match (kind, shape) {
+                    (K::Add, S::I32x4) => aarch64_ops::AddV4sOp::OPCODE,
+                    (K::Sub, S::I32x4) => aarch64_ops::SubV4sOp::OPCODE,
+                    (K::Mul, S::I32x4) => aarch64_ops::MulV4sOp::OPCODE,
+                    (K::Add, S::I64x2) => aarch64_ops::AddV2dOp::OPCODE,
+                    (K::Sub, S::I64x2) => aarch64_ops::SubV2dOp::OPCODE,
+                    (K::And, S::I32x4 | S::I64x2) => aarch64_ops::AndV16bOp::OPCODE,
+                    (K::Or, S::I32x4 | S::I64x2) => aarch64_ops::OrrV16bOp::OPCODE,
+                    (K::Xor, S::I32x4 | S::I64x2) => aarch64_ops::EorV16bOp::OPCODE,
+                    (K::FAdd, S::F32x4) => aarch64_ops::FaddV4sOp::OPCODE,
+                    (K::FSub, S::F32x4) => aarch64_ops::FsubV4sOp::OPCODE,
+                    (K::FMul, S::F32x4) => aarch64_ops::FmulV4sOp::OPCODE,
+                    (K::FDiv, S::F32x4) => aarch64_ops::FdivV4sOp::OPCODE,
+                    (K::FAdd, S::F64x2) => aarch64_ops::FaddV2dOp::OPCODE,
+                    (K::FSub, S::F64x2) => aarch64_ops::FsubV2dOp::OPCODE,
+                    (K::FMul, S::F64x2) => aarch64_ops::FmulV2dOp::OPCODE,
+                    (K::FDiv, S::F64x2) => aarch64_ops::FdivV2dOp::OPCODE,
+                    (kind, shape) => {
+                        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                            "ll.vbinop {kind} on {shape:?}"
+                        ))));
+                    }
+                };
+                let dst = fresh_simd(&mut next_vreg);
+                aarch64_ops::binary(ctx, opcode, dst, lhs, rhs).insert_at_back(insert_block, ctx);
+                values.insert(result, LoweredValue::Reg(dst));
+            } else if let Some(vred) = op_obj.downcast_ref::<VReduceOp>() {
+                let result = vred.get_result(ctx);
+                let kind = vred.kind(ctx);
+                let src_v = op_ptr.deref(ctx).get_operand(0);
+                let shape = vec_shape(ctx, src_v.get_type(ctx)).ok_or_else(|| {
+                    input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                        "ll.vreduce of unsupported vector type {}",
+                        pliron::printable::Printable::disp(&src_v.get_type(ctx), ctx)
+                    )))
+                })?;
+                let src = materialize_simd(lookup_value(ctx, &values, src_v)?, "ll.vreduce input")?;
+                let lowered = match (kind, shape) {
+                    (VReduceKindAttr::Add, VecShape::I32x4) => {
+                        // addv s, v.4s wraps mod 2^32 per lane sum; fmov w,s
+                        // zero-extends into the 64-bit register invariant.
+                        let sum = fresh_fpr(&mut next_vreg, FpKind::F32);
+                        aarch64_ops::unary(ctx, aarch64_ops::AddvS4sOp::OPCODE, sum, src)
+                            .insert_at_back(insert_block, ctx);
+                        let dst = fresh_vreg(&mut next_vreg);
+                        aarch64_ops::unary(ctx, aarch64_ops::FmovWSOp::OPCODE, dst, sum)
+                            .insert_at_back(insert_block, ctx);
+                        LoweredValue::Reg(dst)
+                    }
+                    (VReduceKindAttr::Add, VecShape::I64x2) => {
+                        let sum = fresh_fpr(&mut next_vreg, FpKind::F64);
+                        aarch64_ops::unary(ctx, aarch64_ops::AddpD2dOp::OPCODE, sum, src)
+                            .insert_at_back(insert_block, ctx);
+                        let dst = fresh_vreg(&mut next_vreg);
+                        aarch64_ops::unary(ctx, aarch64_ops::FmovXDOp::OPCODE, dst, sum)
+                            .insert_at_back(insert_block, ctx);
+                        LoweredValue::Reg(dst)
+                    }
+                    (VReduceKindAttr::FAdd, VecShape::F32x4) => {
+                        // faddp.4s then faddp s, v.2s: (l0+l1) + (l2+l3).
+                        let pairs = fresh_simd(&mut next_vreg);
+                        aarch64_ops::binary(
+                            ctx,
+                            aarch64_ops::FaddpV4sOp::OPCODE,
+                            pairs,
+                            src,
+                            src,
+                        )
+                        .insert_at_back(insert_block, ctx);
+                        let dst = fresh_fpr(&mut next_vreg, FpKind::F32);
+                        aarch64_ops::unary(ctx, aarch64_ops::FaddpS2sOp::OPCODE, dst, pairs)
+                            .insert_at_back(insert_block, ctx);
+                        LoweredValue::Reg(dst)
+                    }
+                    (VReduceKindAttr::FAdd, VecShape::F64x2) => {
+                        let dst = fresh_fpr(&mut next_vreg, FpKind::F64);
+                        aarch64_ops::unary(ctx, aarch64_ops::FaddpD2dOp::OPCODE, dst, src)
+                            .insert_at_back(insert_block, ctx);
+                        LoweredValue::Reg(dst)
+                    }
+                    (kind, shape) => {
+                        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                            "ll.vreduce {kind} on {shape:?}"
+                        ))));
+                    }
+                };
+                values.insert(result, lowered);
             } else if let Some(call) = op_obj.downcast_ref::<CallOp>() {
                 let callee = call.callee(ctx);
                 let args = call.args(ctx);
@@ -1459,6 +1671,112 @@ pub(super) fn fresh_fpr(next_vreg: &mut usize, kind: FpKind) -> Register {
     reg
 }
 
+pub(super) fn fresh_simd(next_vreg: &mut usize) -> Register {
+    let reg = Register::virtual_simd128(*next_vreg as u32);
+    *next_vreg += 1;
+    reg
+}
+
+/// The 128-bit NEON shapes this backend lowers vector values to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum VecShape {
+    F32x4,
+    F64x2,
+    I32x4,
+    I64x2,
+}
+
+/// The NEON shape of a fixed vector type, if the backend supports it.
+pub(super) fn vec_shape(ctx: &Context, ty: TypeHandle) -> Option<VecShape> {
+    let (elem, lanes) = vector_type_of(ctx, ty)?;
+    if let Some(kind) = fp_kind(ctx, elem) {
+        return match (kind, lanes) {
+            (FpKind::F32, 4) => Some(VecShape::F32x4),
+            (FpKind::F64, 2) => Some(VecShape::F64x2),
+            _ => None,
+        };
+    }
+    match (integer_width_and_signedness(ctx, elem), lanes) {
+        (Some((32, _)), 4) => Some(VecShape::I32x4),
+        (Some((64, _)), 2) => Some(VecShape::I64x2),
+        _ => None,
+    }
+}
+
+/// A vector value must already live in a Simd128 virtual register: only the
+/// vector ops produce vector values, and they always define one.
+fn materialize_simd(value: LoweredValue, context: &str) -> CrabbitResult<Register> {
+    match value {
+        LoweredValue::Reg(reg) if reg.class() == RegisterClass::Simd128 => Ok(reg),
+        other => Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+            "cannot materialize {context}: expected a 128-bit vector register, got {other:?}"
+        )))),
+    }
+}
+
+/// A vector load/store address as `(base register, byte offset)`.
+fn simd_address(
+    ctx: &mut Context,
+    block: Ptr<crate::ir::basic_block::BasicBlock>,
+    addr: LoweredValue,
+    next_vreg: &mut usize,
+) -> CrabbitResult<(Register, u64)> {
+    match addr {
+        LoweredValue::Reg(reg) if reg.class() == RegisterClass::Gpr64 => Ok((reg, 0)),
+        LoweredValue::Address { base, offset } => Ok((base, offset)),
+        LoweredValue::StackAddr(slot) => {
+            let dst = fresh_vreg(next_vreg);
+            aarch64_ops::add_sp_offset(ctx, dst, slot.offset).insert_at_back(block, ctx);
+            Ok((dst, 0))
+        }
+        other => Ok((
+            materialize_pointer(ctx, block, other, next_vreg, "vector access address")?,
+            0,
+        )),
+    }
+}
+
+/// The constant a shift-`ll.vbinop`'s rhs splats, per the vectorizer's
+/// invariant that vector shifts are by lane-uniform constants.
+fn vsplat_immediate(
+    ctx: &Context,
+    values: &HashMap<Value, LoweredValue>,
+    rhs: Value,
+) -> CrabbitResult<u64> {
+    let scalar = rhs
+        .defining_op()
+        .and_then(|def| {
+            let op_obj = Operation::get_op_dyn(def, ctx);
+            op_obj
+                .downcast_ref::<VSplatOp>()
+                .map(|splat| splat.get_operation().deref(ctx).get_operand(0))
+        })
+        .ok_or_else(|| {
+            input_error_noloc!(Aarch64Err::UnsupportedOp(
+                "vector shift rhs is not an ll.vsplat".to_string()
+            ))
+        })?;
+    match lookup_value(ctx, values, scalar)? {
+        LoweredValue::Imm(imm) => Ok(imm as u64),
+        other => Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+            "vector shift amount is not a constant: {other:?}"
+        )))),
+    }
+}
+
+// The mid-end vector ops are valid input for this backend (the pre-isel
+// verifier walks `Aarch64ValidOpInterface`).
+#[op_interface_impl]
+impl super::frontend::Aarch64ValidOpInterface for VLoadOp {}
+#[op_interface_impl]
+impl super::frontend::Aarch64ValidOpInterface for VStoreOp {}
+#[op_interface_impl]
+impl super::frontend::Aarch64ValidOpInterface for VBinOp {}
+#[op_interface_impl]
+impl super::frontend::Aarch64ValidOpInterface for VSplatOp {}
+#[op_interface_impl]
+impl super::frontend::Aarch64ValidOpInterface for VReduceOp {}
+
 /// A register-class-aware copy: GPR-to-GPR uses `mov`, FP-to-FP the matching
 /// `fmov` form, and cross-file copies the bit-preserving `fmov` between the
 /// register files.
@@ -1468,9 +1786,12 @@ pub(super) fn emit_move(
     dst: Register,
     src: Register,
 ) -> CrabbitResult<()> {
-    use RegisterClass::{Fpr32, Fpr64, Gpr64};
+    use RegisterClass::{Fpr32, Fpr64, Gpr64, Simd128};
     let op = match (dst.class(), src.class()) {
         (Gpr64, Gpr64) => aarch64_ops::mov(ctx, dst, src),
+        (Simd128, Simd128) => {
+            aarch64_ops::fmov_rr(ctx, aarch64_ops::MovV16bOp::OPCODE, dst, src)
+        }
         (Fpr64, Fpr64) => aarch64_ops::fmov_rr(ctx, aarch64_ops::FmovDOp::OPCODE, dst, src),
         (Fpr32, Fpr32) => aarch64_ops::fmov_rr(ctx, aarch64_ops::FmovSOp::OPCODE, dst, src),
         (Fpr64, Gpr64) => aarch64_ops::unary(ctx, aarch64_ops::FmovDXOp::OPCODE, dst, src),
@@ -1755,6 +2076,9 @@ pub(super) fn materialize_typed(
     if is_128_bit_integer(ctx, ty) {
         let (lo, _) = materialize_pair(ctx, entry, value, ty, next_vreg, context)?;
         return Ok(lo);
+    }
+    if vec_shape(ctx, ty).is_some() {
+        return materialize_simd(value, context);
     }
     if let Some(kind) = fp_kind(ctx, ty) {
         return materialize_fp(ctx, entry, value, kind, next_vreg, context);
@@ -2157,6 +2481,9 @@ pub(super) fn block_arg_value(
             fresh_vreg(next_vreg),
             fresh_vreg(next_vreg),
         ));
+    }
+    if vec_shape(ctx, ty).is_some() {
+        return Ok(LoweredValue::Reg(fresh_simd(next_vreg)));
     }
     if let Some(kind) = fp_kind(ctx, ty) {
         return Ok(LoweredValue::Reg(fresh_fpr(next_vreg, kind)));

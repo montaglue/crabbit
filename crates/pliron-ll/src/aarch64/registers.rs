@@ -67,6 +67,12 @@ impl Register {
                 class: RegisterClass::Gpr64,
             });
         }
+        if let Some(number) = text.strip_prefix("vq") {
+            return number.parse().ok().map(|id| Self::Virtual {
+                id: VirtualRegister(id),
+                class: RegisterClass::Simd128,
+            });
+        }
         if let Some(number) = text.strip_prefix("vd") {
             return number.parse().ok().map(|id| Self::Virtual {
                 id: VirtualRegister(id),
@@ -104,6 +110,9 @@ impl Register {
             .or_else(|| {
                 parse_number('v').map(|number| Self::Physical(PhysicalRegister::Simd128(number)))
             })
+            .or_else(|| {
+                parse_number('q').map(|number| Self::Physical(PhysicalRegister::Simd128(number)))
+            })
     }
 
     pub const fn virtual_gpr(id: u32) -> Self {
@@ -129,6 +138,14 @@ impl Register {
         }
     }
 
+    /// A virtual 128-bit SIMD register (`q`-class).
+    pub const fn virtual_simd128(id: u32) -> Self {
+        Self::Virtual {
+            id: VirtualRegister(id),
+            class: RegisterClass::Simd128,
+        }
+    }
+
     /// The 64-bit general-purpose register `x<number>`.
     pub const fn gpr(number: u8) -> Self {
         Self::Physical(PhysicalRegister::Gpr64(number))
@@ -142,6 +159,12 @@ impl Register {
     /// The 32-bit FP register `s<number>`.
     pub const fn fpr32(number: u8) -> Self {
         Self::Physical(PhysicalRegister::Fpr32(number))
+    }
+
+    /// The 128-bit SIMD register `q<number>` (the full vector view of
+    /// `v<number>`; aliases `d<number>`/`s<number>` of the same number).
+    pub const fn simd128(number: u8) -> Self {
+        Self::Physical(PhysicalRegister::Simd128(number))
     }
 
     /// The register file this register belongs to.
@@ -183,12 +206,18 @@ impl fmt::Display for Register {
                 id,
                 class: RegisterClass::Fpr32,
             } => write!(f, "vs{}", id.0),
+            Self::Virtual {
+                id,
+                class: RegisterClass::Simd128,
+            } => write!(f, "vq{}", id.0),
             Self::Virtual { id, .. } => write!(f, "vr{}", id.0),
             Self::Physical(PhysicalRegister::Gpr64(number)) => write!(f, "x{number}"),
             Self::Physical(PhysicalRegister::Gpr32(number)) => write!(f, "w{number}"),
             Self::Physical(PhysicalRegister::Fpr64(number)) => write!(f, "d{number}"),
             Self::Physical(PhysicalRegister::Fpr32(number)) => write!(f, "s{number}"),
-            Self::Physical(PhysicalRegister::Simd128(number)) => write!(f, "v{number}"),
+            // `q` is the canonical full-vector spelling (`ldr q0`, spills);
+            // parsing also accepts the architectural `v<n>` name.
+            Self::Physical(PhysicalRegister::Simd128(number)) => write!(f, "q{number}"),
             Self::Physical(PhysicalRegister::Sp) => f.write_str("sp"),
             Self::Physical(PhysicalRegister::Nzcv) => f.write_str("nzcv"),
         }
@@ -212,6 +241,20 @@ mod tests {
             Register::parse("v7"),
             Some(Register::Physical(PhysicalRegister::Simd128(7)))
         );
+    }
+
+    #[test]
+    fn simd128_registers_round_trip_the_q_spelling() {
+        // Canonical print is `q<n>` / `vq<n>`; both parse back to Simd128,
+        // and the architectural `v<n>` spelling still parses.
+        let phys = Register::simd128(7);
+        assert_eq!(phys.to_string(), "q7");
+        assert_eq!(Register::parse("q7"), Some(phys));
+        assert_eq!(Register::parse("v7"), Some(phys));
+        let virt = Register::virtual_simd128(3);
+        assert_eq!(virt.to_string(), "vq3");
+        assert_eq!(Register::parse("vq3"), Some(virt));
+        assert_eq!(virt.class(), RegisterClass::Simd128);
     }
 
     #[test]

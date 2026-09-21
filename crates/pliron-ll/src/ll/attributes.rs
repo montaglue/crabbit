@@ -230,6 +230,13 @@ impl Parsable for DataAttr {
     }
 }
 
+/// Unit marker the vectorizer leaves on the header block of a loop it has
+/// turned into a scalar epilogue, so re-analysis never vectorizes the
+/// epilogue again (its shape is identical to the original loop's).
+#[pliron_attr(name = "ll.vectorize_epilogue", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
+pub struct VectorizeEpilogueAttr;
+
 /// Unit marker for a thread-local `llvm.global`: its storage lives in the
 /// TLS segment (`.tdata`/`.tbss` on ELF) and taking its address yields the
 /// current thread's copy, so backends must materialize it through the
@@ -305,6 +312,177 @@ pub struct InlinedFromAttr(pub i64);
 )]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct BranchWeightsAttr(pub Vec<u32>);
+
+/// The elementwise operation an [ll.vbinop](crate::ll::ops::VBinOp)
+/// performs on each lane.
+#[pliron_attr(name = "ll.vbinop_kind", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum VBinOpKindAttr {
+    /// Wrapping integer add.
+    Add,
+    /// Wrapping integer subtract.
+    Sub,
+    /// Wrapping integer multiply.
+    Mul,
+    And,
+    Or,
+    Xor,
+    /// Per-lane left shift; the rhs must be a lane-wide splat of a constant
+    /// below the lane width (the vectorizer's invariant — the backends
+    /// lower it to the immediate shift forms).
+    Shl,
+    /// Per-lane logical right shift; rhs as for [Self::Shl], nonzero.
+    LShr,
+    /// Per-lane arithmetic right shift; rhs as for [Self::Shl], nonzero.
+    AShr,
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+}
+
+impl VBinOpKindAttr {
+    pub fn parse_str(text: &str) -> Option<Self> {
+        Some(match text {
+            "add" => Self::Add,
+            "sub" => Self::Sub,
+            "mul" => Self::Mul,
+            "and" => Self::And,
+            "or" => Self::Or,
+            "xor" => Self::Xor,
+            "shl" => Self::Shl,
+            "lshr" => Self::LShr,
+            "ashr" => Self::AShr,
+            "fadd" => Self::FAdd,
+            "fsub" => Self::FSub,
+            "fmul" => Self::FMul,
+            "fdiv" => Self::FDiv,
+            _ => return None,
+        })
+    }
+
+    /// Whether the kind operates on FP lanes (drives the elem-type check).
+    pub fn is_fp(self) -> bool {
+        matches!(self, Self::FAdd | Self::FSub | Self::FMul | Self::FDiv)
+    }
+
+    /// Whether the kind is a shift whose rhs must be a splat constant.
+    pub fn is_shift(self) -> bool {
+        matches!(self, Self::Shl | Self::LShr | Self::AShr)
+    }
+}
+
+impl core::fmt::Display for VBinOpKindAttr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Shl => "shl",
+            Self::LShr => "lshr",
+            Self::AShr => "ashr",
+            Self::FAdd => "fadd",
+            Self::FSub => "fsub",
+            Self::FMul => "fmul",
+            Self::FDiv => "fdiv",
+        })
+    }
+}
+
+impl Printable for VBinOpKindAttr {
+    fn fmt(
+        &self,
+        _ctx: &Context,
+        _state: &printable::State,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl Parsable for VBinOpKindAttr {
+    type Arg = ();
+    type Parsed = Self;
+
+    fn parse<'a>(
+        state_stream: &mut StateStream<'a>,
+        _arg: Self::Arg,
+    ) -> ParseResult<'a, Self::Parsed> {
+        let loc = state_stream.loc();
+        let mut parser = many1::<String, _, _>(satisfy(|c: char| c.is_ascii_alphanumeric()));
+        let (text, commit) = parser.parse_stream(state_stream).into_result()?;
+        let Some(kind) = Self::parse_str(&text) else {
+            input_err!(
+                loc,
+                "invalid vbinop kind `{}`: expected one of add, sub, mul, and, or, xor, shl, lshr, ashr, fadd, fsub, fmul, fdiv",
+                text
+            )?
+        };
+        Ok((kind, commit))
+    }
+}
+
+/// The horizontal reduction an [ll.vreduce](crate::ll::ops::VReduceOp)
+/// performs across lanes. FADD reassociates the scalar loop's sum order,
+/// so the vectorizer only emits it behind its opt-in FP knob.
+#[pliron_attr(name = "ll.vreduce_kind", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum VReduceKindAttr {
+    /// Wrapping integer add across lanes (always exact).
+    Add,
+    FAdd,
+}
+
+impl VReduceKindAttr {
+    pub fn parse_str(text: &str) -> Option<Self> {
+        Some(match text {
+            "add" => Self::Add,
+            "fadd" => Self::FAdd,
+            _ => return None,
+        })
+    }
+}
+
+impl core::fmt::Display for VReduceKindAttr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Add => "add",
+            Self::FAdd => "fadd",
+        })
+    }
+}
+
+impl Printable for VReduceKindAttr {
+    fn fmt(
+        &self,
+        _ctx: &Context,
+        _state: &printable::State,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl Parsable for VReduceKindAttr {
+    type Arg = ();
+    type Parsed = Self;
+
+    fn parse<'a>(
+        state_stream: &mut StateStream<'a>,
+        _arg: Self::Arg,
+    ) -> ParseResult<'a, Self::Parsed> {
+        let loc = state_stream.loc();
+        let mut parser = many1::<String, _, _>(satisfy(|c: char| c.is_ascii_alphanumeric()));
+        let (text, commit) = parser.parse_stream(state_stream).into_result()?;
+        let Some(kind) = Self::parse_str(&text) else {
+            input_err!(loc, "invalid vreduce kind `{}`: expected add or fadd", text)?
+        };
+        Ok((kind, commit))
+    }
+}
 
 /// Linkage of a machine-level function symbol.
 #[pliron_attr(name = "ll.linkage", verifier = "succ")]
