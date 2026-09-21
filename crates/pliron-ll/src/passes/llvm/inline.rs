@@ -43,8 +43,16 @@ use crate::{
 
 pub struct LLVMInlinePass {
     /// Callees whose body has more operations than this are not inlined.
+    ///
+    /// EXCEPTION (LLVM's own last-call-site logic): an internal function
+    /// with exactly ONE direct call site anywhere in the module and no
+    /// address-taken reference is ALWAYS inlined, regardless of size —
+    /// the body is erased right after the inline, so module-wide code
+    /// growth is zero.
     pub max_callee_ops: usize,
     /// Stop inlining into a caller once it has grown by this many operations.
+    /// Single-call-site inlines are free (the callee disappears) and do
+    /// not consume this budget.
     pub max_caller_growth: usize,
 }
 
@@ -64,13 +72,30 @@ impl Pass for LLVMInlinePass {
 
     fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
         let funcs = collect_functions(ctx, root);
-        let by_symbol: FxHashMap<Identifier, FuncOp> = funcs
+        let symbols: Vec<Identifier> = funcs
             .iter()
-            .map(|func| (func.get_symbol_name(ctx), *func))
+            .map(|func| func.get_symbol_name(ctx))
+            .collect();
+        let mut by_symbol: FxHashMap<Identifier, FuncOp> = funcs
+            .iter()
+            .zip(&symbols)
+            .map(|(func, symbol)| (symbol.clone(), *func))
             .collect();
 
-        for func in &funcs {
-            self.inline_into_function(ctx, *func, &by_symbol)?;
+        // Reference counts are computed ONCE and maintained incrementally
+        // through every inline (a full module rescan per candidate was a
+        // measured 2.6x compile-time regression on the CPU corpus).
+        let mut counts = count_symbol_references(ctx, root);
+
+        // Single-call-site inlining erases the callee eagerly, so a
+        // function collected up front may be gone by the time its turn
+        // comes — skip it by symbol.
+        let mut erased: FxHashSet<Identifier> = FxHashSet::default();
+        for (func, symbol) in funcs.iter().zip(&symbols) {
+            if erased.contains(symbol) {
+                continue;
+            }
+            self.inline_into_function(ctx, *func, &mut by_symbol, &mut erased, &mut counts)?;
         }
 
         remove_dead_internal_functions(ctx, root);
@@ -103,7 +128,9 @@ impl LLVMInlinePass {
         &self,
         ctx: &mut Context,
         func: FuncOp,
-        by_symbol: &FxHashMap<Identifier, FuncOp>,
+        by_symbol: &mut FxHashMap<Identifier, FuncOp>,
+        erased: &mut FxHashSet<Identifier>,
+        counts: &mut SymbolRefCounts,
     ) -> CrabbitResult<()> {
         if func.is_declaration(ctx) {
             return Ok(());
@@ -112,11 +139,35 @@ impl LLVMInlinePass {
         let mut budget = self.max_caller_growth;
         let mut tag = 0usize;
 
-        while let Some((call, callee, callee_size)) =
-            self.find_inlinable_call(ctx, func, &caller_symbol, by_symbol, budget)
+        while let Some((call, callee, callee_size, single_site)) =
+            self.find_inlinable_call(ctx, func, &caller_symbol, by_symbol, counts, budget)
         {
+            let callee_symbol = callee.get_symbol_name(ctx);
+            // Count bookkeeping: the call op to the callee is erased
+            // (−1), and the cloned body re-adds every reference the
+            // callee body makes (+body refs).
+            let body_refs = count_symbol_references(ctx, callee.get_operation());
+            counts.remove_call_site(&callee_symbol);
+            counts.add_all(&body_refs);
             inline_call(ctx, func, call, callee, tag)?;
-            budget = budget.saturating_sub(callee_size);
+            if single_site {
+                // The one call site is gone; erase the now-unreferenced
+                // body immediately so its own calls stop counting as
+                // extra call sites (a chain of single-site functions
+                // inlines through). Inlining cloned the body's calls into
+                // the caller but never added a reference to the callee
+                // itself, so the maintained count going to zero IS the
+                // no-references proof.
+                if counts.unreferenced(&callee_symbol) {
+                    Operation::erase(callee.get_operation(), ctx);
+                    by_symbol.remove(&callee_symbol);
+                    erased.insert(callee_symbol);
+                    // The erased body's own references go away with it.
+                    counts.remove_all(&body_refs);
+                }
+            } else {
+                budget = budget.saturating_sub(callee_size);
+            }
             tag += 1;
         }
         Ok(())
@@ -124,15 +175,20 @@ impl LLVMInlinePass {
 
     /// Find the first call in `func` whose callee should be inlined: a
     /// direct call to an internal, non-declaration function in this module
-    /// that fits the size budget and whose body this inliner can clone.
+    /// whose body this inliner can clone, and which either (a) is the
+    /// callee's ONLY call site module-wide with its address never taken —
+    /// always inlined, any size (the callee is erased right after, so
+    /// growth is zero) — or (b) fits the size budget. The returned bool
+    /// is true for case (a).
     fn find_inlinable_call(
         &self,
         ctx: &Context,
         func: FuncOp,
         caller_symbol: &Identifier,
         by_symbol: &FxHashMap<Identifier, FuncOp>,
+        counts: &SymbolRefCounts,
         budget: usize,
-    ) -> Option<(CallOp, FuncOp, usize)> {
+    ) -> Option<(CallOp, FuncOp, usize, bool)> {
         let blocks: Vec<_> = func.get_region(ctx)?.deref(ctx).iter(ctx).collect();
         for block in blocks {
             let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
@@ -158,13 +214,104 @@ impl LLVMInlinePass {
                 let Some(size) = clonable_body_size(ctx, *callee) else {
                     continue;
                 };
+                let single_site = counts.call_sites.get(&callee_symbol) == Some(&1)
+                    && counts.address_taken.get(&callee_symbol).copied().unwrap_or(0) == 0;
+                if single_site {
+                    return Some((call, *callee, size, true));
+                }
                 if size > self.max_callee_ops || size > budget {
                     continue;
                 }
-                return Some((call, *callee, size));
+                return Some((call, *callee, size, false));
             }
         }
         None
+    }
+}
+
+/// Module-wide direct-call-site counts and address-taken counts, for the
+/// single-call-site always-inline rule. Computed once per pass run and
+/// maintained incrementally through every inline. Calls inside
+/// not-yet-erased dead internal functions still count (conservative: at
+/// worst an opportunity is missed, never a miscounted "single" site).
+struct SymbolRefCounts {
+    call_sites: FxHashMap<Identifier, usize>,
+    address_taken: FxHashMap<Identifier, usize>,
+}
+
+impl SymbolRefCounts {
+    /// One call site to `symbol` was erased.
+    fn remove_call_site(&mut self, symbol: &Identifier) {
+        if let Some(count) = self.call_sites.get_mut(symbol) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    /// A body making these references was cloned into the module.
+    fn add_all(&mut self, other: &SymbolRefCounts) {
+        for (symbol, k) in &other.call_sites {
+            *self.call_sites.entry(symbol.clone()).or_insert(0) += k;
+        }
+        for (symbol, k) in &other.address_taken {
+            *self.address_taken.entry(symbol.clone()).or_insert(0) += k;
+        }
+    }
+
+    /// A body making these references was erased from the module.
+    fn remove_all(&mut self, other: &SymbolRefCounts) {
+        for (symbol, k) in &other.call_sites {
+            if let Some(count) = self.call_sites.get_mut(symbol) {
+                *count = count.saturating_sub(*k);
+            }
+        }
+        for (symbol, k) in &other.address_taken {
+            if let Some(count) = self.address_taken.get_mut(symbol) {
+                *count = count.saturating_sub(*k);
+            }
+        }
+    }
+
+    fn unreferenced(&self, symbol: &Identifier) -> bool {
+        self.call_sites.get(symbol).copied().unwrap_or(0) == 0
+            && self.address_taken.get(symbol).copied().unwrap_or(0) == 0
+    }
+}
+
+fn count_symbol_references(ctx: &Context, root: Ptr<Operation>) -> SymbolRefCounts {
+    let mut counts = SymbolRefCounts {
+        call_sites: FxHashMap::default(),
+        address_taken: FxHashMap::default(),
+    };
+    collect_symbol_reference_counts(ctx, root, &mut counts);
+    counts
+}
+
+fn collect_symbol_reference_counts(
+    ctx: &Context,
+    op: Ptr<Operation>,
+    counts: &mut SymbolRefCounts,
+) {
+    let opid = Operation::get_opid(op, ctx);
+    if opid == CallOp::get_opid_static() {
+        if let CallOpCallable::Direct(callee) = (CallOp::from_operation(op)).callee(ctx) {
+            *counts.call_sites.entry(callee).or_insert(0) += 1;
+        }
+    } else if opid == AddressOfOp::get_opid_static() {
+        *counts
+            .address_taken
+            .entry((AddressOfOp::from_operation(op)).get_global_name(ctx))
+            .or_insert(0) += 1;
+    }
+
+    let regions: Vec<_> = op.deref(ctx).regions().collect();
+    for region in regions {
+        let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
+        for block in blocks {
+            let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
+            for nested in ops {
+                collect_symbol_reference_counts(ctx, nested, counts);
+            }
+        }
     }
 }
 
@@ -573,5 +720,243 @@ mod tests {
         // Dead internal callee removed; only the caller remains.
         assert!(!text.contains("@callee"), "{text}");
         assert!(text.contains("@caller"), "{text}");
+    }
+
+    /// A callee whose body is `nops` operations (1 constant + a chain of
+    /// adds) returning the chained sum of its argument.
+    fn make_chain_callee(
+        ctx: &mut Context,
+        module_block: Ptr<BasicBlock>,
+        name: &str,
+        linkage: LinkageAttr,
+        nops: usize,
+    ) -> TypedHandle<FuncType> {
+        let i64_ty = i64_type(ctx);
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(ctx, i64_ty, vec![i64_ty], false);
+        let callee = llvm::ops::FuncOp::new(ctx, name.try_into().unwrap(), fn_ty);
+        callee.set_attr_llvm_function_linkage(ctx, linkage);
+        callee.get_or_create_entry_block(ctx);
+        callee.get_operation().insert_at_back(module_block, ctx);
+        let entry = callee.get_entry_block(ctx).unwrap();
+        let arg = entry.deref(ctx).get_argument(0);
+        let int_ty = builtin::types::IntegerType::get(ctx, 64, Signedness::Signless);
+        let one = ConstantOp::new(
+            ctx,
+            Box::new(IntegerAttr::new(
+                int_ty,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
+        one.get_operation().insert_at_back(entry, ctx);
+        let one_val = one.get_result(ctx);
+        let mut acc = arg;
+        for _ in 0..nops.saturating_sub(1) {
+            let add = AddOp::new_with_overflow_flag(ctx, acc, one_val, Default::default());
+            add.get_operation().insert_at_back(entry, ctx);
+            acc = add.get_result(ctx);
+        }
+        ReturnOp::new(ctx, Some(acc))
+            .get_operation()
+            .insert_at_back(entry, ctx);
+        fn_ty
+    }
+
+    /// An external caller with `ncalls` direct calls to `callee_name`,
+    /// returning the last call's result.
+    fn make_caller(
+        ctx: &mut Context,
+        module_block: Ptr<BasicBlock>,
+        callee_name: &str,
+        fn_ty: TypedHandle<FuncType>,
+        ncalls: usize,
+    ) {
+        let caller = llvm::ops::FuncOp::new(ctx, "caller".try_into().unwrap(), fn_ty);
+        caller.set_attr_llvm_function_linkage(ctx, LinkageAttr::ExternalLinkage);
+        caller.get_or_create_entry_block(ctx);
+        caller.get_operation().insert_at_back(module_block, ctx);
+        let entry = caller.get_entry_block(ctx).unwrap();
+        let mut value = entry.deref(ctx).get_argument(0);
+        for _ in 0..ncalls {
+            let call = CallOp::new(
+                ctx,
+                pliron::builtin::op_interfaces::CallOpCallable::Direct(
+                    callee_name.try_into().unwrap(),
+                ),
+                fn_ty,
+                vec![value],
+            );
+            call.get_operation().insert_at_back(entry, ctx);
+            value = call.get_operation().deref(ctx).get_result(0);
+        }
+        ReturnOp::new(ctx, Some(value))
+            .get_operation()
+            .insert_at_back(entry, ctx);
+    }
+
+    /// A pass with a tiny size budget, so any inline of the ~150-op
+    /// callee can only come from the single-call-site rule.
+    fn tiny_budget_pass() -> LLVMInlinePass {
+        LLVMInlinePass {
+            max_callee_ops: 10,
+            max_caller_growth: 4000,
+        }
+    }
+
+    #[test]
+    fn always_inlines_single_call_site_internal_regardless_of_size() {
+        let mut ctx = test_context();
+        let module = ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let module_block = module.get_body(&ctx, 0);
+        let fn_ty = make_chain_callee(
+            &mut ctx,
+            module_block,
+            "big",
+            LinkageAttr::InternalLinkage,
+            150,
+        );
+        make_caller(&mut ctx, module_block, "big", fn_ty, 1);
+
+        tiny_budget_pass()
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        let text = format!("{}", module.get_operation().disp(&ctx));
+        assert!(!text.contains("llvm.call"), "{text}");
+        assert!(!text.contains("@big"), "single-site callee must be erased: {text}");
+        assert_eq!(text.matches("llvm.add").count(), 149, "{text}");
+    }
+
+    #[test]
+    fn two_call_sites_respect_the_size_budget() {
+        let mut ctx = test_context();
+        let module = ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let module_block = module.get_body(&ctx, 0);
+        let fn_ty = make_chain_callee(
+            &mut ctx,
+            module_block,
+            "big",
+            LinkageAttr::InternalLinkage,
+            150,
+        );
+        make_caller(&mut ctx, module_block, "big", fn_ty, 2);
+
+        tiny_budget_pass()
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        let text = format!("{}", module.get_operation().disp(&ctx));
+        // Over the size budget and not single-site: both calls stay.
+        assert_eq!(text.matches("llvm.call").count(), 2, "{text}");
+        assert!(text.contains("@big"), "{text}");
+    }
+
+    #[test]
+    fn recursive_callee_bails() {
+        let mut ctx = test_context();
+        let module = ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let module_block = module.get_body(&ctx, 0);
+        let i64_ty = i64_type(&mut ctx);
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(&ctx, i64_ty, vec![i64_ty], false);
+
+        // rec: internal, calls itself (2 call sites total with the caller,
+        // and the self-call is excluded outright).
+        let rec = llvm::ops::FuncOp::new(&mut ctx, "rec".try_into().unwrap(), fn_ty);
+        rec.set_attr_llvm_function_linkage(&ctx, LinkageAttr::InternalLinkage);
+        rec.get_or_create_entry_block(&mut ctx);
+        rec.get_operation().insert_at_back(module_block, &ctx);
+        let entry = rec.get_entry_block(&ctx).unwrap();
+        let arg = entry.deref(&ctx).get_argument(0);
+        let self_call = CallOp::new(
+            &mut ctx,
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("rec".try_into().unwrap()),
+            fn_ty,
+            vec![arg],
+        );
+        self_call.get_operation().insert_at_back(entry, &ctx);
+        let res = self_call.get_operation().deref(&ctx).get_result(0);
+        ReturnOp::new(&mut ctx, Some(res))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        make_caller(&mut ctx, module_block, "rec", fn_ty, 1);
+
+        tiny_budget_pass()
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        let text = format!("{}", module.get_operation().disp(&ctx));
+        assert!(text.contains("@rec"), "{text}");
+        assert!(text.contains("llvm.call"), "{text}");
+    }
+
+    #[test]
+    fn external_linkage_single_call_site_bails() {
+        let mut ctx = test_context();
+        let module = ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let module_block = module.get_body(&ctx, 0);
+        let fn_ty = make_chain_callee(
+            &mut ctx,
+            module_block,
+            "ext",
+            LinkageAttr::ExternalLinkage,
+            150,
+        );
+        make_caller(&mut ctx, module_block, "ext", fn_ty, 1);
+
+        tiny_budget_pass()
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        let text = format!("{}", module.get_operation().disp(&ctx));
+        // External linkage is never inlined by this pass, whatever the
+        // call-site count.
+        assert_eq!(text.matches("llvm.call").count(), 1, "{text}");
+        assert!(text.contains("@ext"), "{text}");
+    }
+
+    /// A chain caller → a → b of single-site internal functions inlines
+    /// all the way through: erasing `a` right after its inline is what
+    /// stops `a`'s dead body from counting as a second call site of `b`.
+    #[test]
+    fn single_site_chain_inlines_through() {
+        let mut ctx = test_context();
+        let module = ModuleOp::new(&mut ctx, "test".try_into().unwrap());
+        let module_block = module.get_body(&ctx, 0);
+        let i64_ty = i64_type(&mut ctx);
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(&ctx, i64_ty, vec![i64_ty], false);
+
+        // b: internal, 150 ops.
+        make_chain_callee(&mut ctx, module_block, "b", LinkageAttr::InternalLinkage, 150);
+
+        // a: internal, calls b once.
+        let a = llvm::ops::FuncOp::new(&mut ctx, "a".try_into().unwrap(), fn_ty);
+        a.set_attr_llvm_function_linkage(&ctx, LinkageAttr::InternalLinkage);
+        a.get_or_create_entry_block(&mut ctx);
+        a.get_operation().insert_at_back(module_block, &ctx);
+        let entry = a.get_entry_block(&ctx).unwrap();
+        let arg = entry.deref(&ctx).get_argument(0);
+        let call_b = CallOp::new(
+            &mut ctx,
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("b".try_into().unwrap()),
+            fn_ty,
+            vec![arg],
+        );
+        call_b.get_operation().insert_at_back(entry, &ctx);
+        let res = call_b.get_operation().deref(&ctx).get_result(0);
+        ReturnOp::new(&mut ctx, Some(res))
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+
+        make_caller(&mut ctx, module_block, "a", fn_ty, 1);
+
+        tiny_budget_pass()
+            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .unwrap();
+
+        let text = format!("{}", module.get_operation().disp(&ctx));
+        assert!(!text.contains("llvm.call"), "{text}");
+        assert!(!text.contains("@a"), "{text}");
+        assert!(!text.contains("@b"), "{text}");
+        assert_eq!(text.matches("llvm.add").count(), 149, "{text}");
     }
 }
