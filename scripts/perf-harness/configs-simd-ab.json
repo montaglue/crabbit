@@ -1,0 +1,5 @@
+[
+  { "name": "linear-simd", "env": {} },
+  { "name": "eregalloc-c2-simd", "env": { "CRABBIT_REGALLOC": "eregalloc", "CRABBIT_REGALLOC_ORACLE": "c2" } },
+  { "name": "linear-simd-fpreduce", "env": { "CRABBIT_VECTORIZE_FP_REDUCE": "1" } }
+]

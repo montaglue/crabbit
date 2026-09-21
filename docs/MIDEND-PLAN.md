@@ -145,3 +145,112 @@ speculatable, memory effects}) in `passes/llvm/analysis.rs` that every
 pass derives its set from, with the FP ops classified; a missed op then
 fails in ONE place. Not done in the review-fix round: touching the safety
 sets changes what every pass may do and deserves its own measured commit.
+
+DONE (2026-09-20): `passes/llvm/analysis.rs` now owns the table
+(`OpEffect` + `op_effects()`), with FP arithmetic, fcmp, select and the
+FP casts classified Pure (no FP exceptions modeled; nothing derived from
+the table reassociates). simplify/adce consume `deletable_op_ids`,
+gvn/dse `memory_benign_op_ids`, licm/sink derive via `op_ids_in`. gvn
+additionally CSEs FP bins/fneg/fcmp/select on bit-identical keys that
+include the fast-math flags (equality, like the nsw/nuw rule). Bycatch
+fixed by the consolidation: AShr was missing from gvn's bin set and from
+licm's hoistable set; InsertValue was missing from licm's.
+
+## Full unroll (2026-09-20): the deferred item 5, revisited for gemm_tiled
+
+The GPU corpus finally produced the evidence item 5 waited for: after the
+state-space + immediate/GEP translator rounds, gemm_tiled sits at 1.49×
+nvcc (56 regs, 66.7% occupancy) and the remaining PTX/SASS delta is the
+un-unrolled 16-iteration inner tile loop — nvcc fully unrolls it; our
+16-instruction PTX inner loop stalls on per-iteration index math + loop
+control that straight-line code would constant-fold away.
+
+`passes/llvm/unroll.rs` (llvm-unroll), gated by
+`CRABBIT_MIDEND_DISABLE=unroll`:
+
+- FULL unroll only. 1- or 2-block natural loops, one latch, one exit
+  edge: `header→body→header` with the exiting cond_br in the header
+  (rustc's canonical `Range` while-shape) or `header⇄header` (do-while).
+  Preheader required (same restriction as licm).
+- Trip count by direct simulation of the canonical induction shape:
+  block-arg iv starting at constant C0, backedge update `add iv, C1`
+  (constant), exiting `icmp` against constant C2 (either operand order,
+  any predicate, the compare may test iv or iv-next). Simulation uses the
+  dialect's wrapping semantics at the iv's width, so every predicate/step
+  combination is exact, not pattern-matched.
+- Bounds: 2 ≤ trip ≤ 32, ≤ 40 non-terminator ops across the loop blocks
+  (worst-case growth ~1300 ops). Any region-free op clones (loads,
+  stores, calls included): cloning preserves execution counts exactly, so
+  no speculation argument is needed.
+- Rewrite: clones are laid straight-line into the preheader; the iv is
+  substituted by its per-iteration constant; loop-carried block args
+  thread through the clones; uses of loop-defined values outside the loop
+  are rewired to the final iteration's clone; the preheader branch is
+  retargeted to the exit block with the exit edge's operands mapped; the
+  loop blocks are deleted. Dead residue (cloned icmps, final iv adds) is
+  left for adce/simplify.
+- ADJOINT: 1→N cloning; clones are stamped `derived_from` the original
+  op's effective sources after stripping the copied identity attrs (a
+  clone must not duplicate `ll.op_id`); materialized iv constants derive
+  from the iv update op; the new preheader→exit branch derives from the
+  cond_br it replaces.
+- Placement: after gvn/divmagic/licm/gvn (loop body already minimal,
+  invariants hoisted), before the backward round — dse/adce erase the
+  dead per-iteration control clones and the final simplify folds the
+  per-iteration address math. Run for all targets; thresholds currently
+  target-independent (TargetProfile is threaded for a future split).
+
+### Results (2026-09-20, same-session A/B, gate off vs on)
+
+GPU corpus (kernel-corpus results/gpu/unroll-baseline vs unroll-after,
+14×2 arms×2 sizes, all correct, zero spills): **a well-diagnosed null on
+gemm_tiled.** The pass fires on gemm_tiled's 16-iter tile loop and on
+transpose; 12/14 kernels' PTX is byte-identical. gemm_tiled PTX loses its
+inner loop (140→304 lines, 32 straight-line ld.shared with per-iteration
+constant offsets folded into the index adds) — but runtime is exactly
+unchanged (1.2941 → 1.2942 ms, 1.494× nvcc), regs 56, occupancy 66.7%,
+because **ptxas was already fully unrolling this loop in SASS**: the
+baseline and after cubins disassemble to the same 218 instructions modulo
+register names (32 LDS, 16 IMAD MACs, no inner branch in either).
+Mechanism of the remaining 1.49× gap, from the SASS diff vs nvcc:
+- ptxas pre-hoists all 32 per-iteration LDS addresses into live registers
+  (R2–R47: 15 IADD3 `+1..+0xf` then 32 LEA) — that address file IS the
+  56-reg pressure capping occupancy at 66.7%; nvcc holds 2 base registers
+  and uses immediate-offset/vectorized shared loads.
+- nvcc vectorizes one operand's tile loads as 4× LDS.128 vs our 16× LDS.
+- integer-op totals per tile: crabbit 35 LEA + 34 IADD3 + 18 IMAD vs nvcc
+  19 IMAD + 5 LEA + 2 IADD3.
+The fix is therefore NOT more mid-end unrolling: it is shared-memory
+addressing form — emit `ld.shared [base+imm]` (reassociate
+`(tx + 16k)<<2` to `base_tx + 64k` so the constant lands in the memory
+operand) and consider LDS vectorization — translator/addressing work,
+tracked for the nvptx backlog.
+The optional second gvn after unroll was NOT added: per-iteration address
+expressions differ in their constants (nothing for CSE to merge — the
+iv-independent subexpressions were already hoisted by licm, which runs
+before), and the SASS evidence shows ptxas already performs the cleanup
+downstream on GPU.
+
+Transpose also unrolls (regs 22→26, runtime 0.5904→0.5860 ms, within
+noise, still ≤ nvcc). gemm_control/seidel_2d loops don't match (trip
+count above the bound / shape), PTX identical. Geomean crabbit/nvcc
+1.046→1.051 — entirely session noise on code-identical kernels (the two
+changed kernels moved 0.000/−0.7%).
+
+CPU corpus (perf-harness results/unroll-cpu-ab, runs=5, pinned CPU 7,
+same-session unroll-off vs unroll-on, all correct): **no kernel regresses
+>3% — and the unroller WINS where GPU was a null**, because the aarch64
+backend has no ptxas downstream to do the unroll for it:
+
+| kernel (run_median_s) | off | on | on/off |
+|---|---|---|---|
+| gemm_tiled | 10.198 | 8.525 | **0.836** |
+| transpose | 1.141 | 1.020 | **0.894** |
+| vector_add | 1.014 | 1.003 | 0.989 |
+| rms_norm | 1.514 | 1.492 | 0.986 |
+| seidel_2d | 0.992 | 1.000 | 1.008 (worst) |
+| the other 9 | — | — | 0.997–1.002 |
+
+Cross-session sanity vs results/session-after `linear`: same picture
+(gemm_tiled 0.837, transpose 0.890, rest ±1%). No target gating needed:
+thresholds stay target-independent.

@@ -14,7 +14,7 @@
 //! | variable | values |
 //! |---|---|
 //! | `CRABBIT_REGALLOC_ORACLE` | `c0` (syntactic), `c2` (saturated e-graph) |
-//! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile`, `cmt-provider` |
+//! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `spectral-loop`, `profile`, `cmt-provider` |
 //! | `CRABBIT_MEASURED_COSTS` | op_costs.json; lifted per-decision costs replace the oracle's estimates |
 #![feature(rustc_private)]
 
@@ -53,11 +53,12 @@ fn eregalloc_factory() -> Result<DynPass, String> {
     let source = match env("CRABBIT_BLOCK_FREQ").as_deref() {
         None | Some("uniform") => BlockFreqSource::Uniform,
         Some("spectral") => BlockFreqSource::Spectral,
+        Some("spectral-loop") => BlockFreqSource::SpectralLoop,
         Some("profile") => BlockFreqSource::Provider(research_config::profile_block_frequencies),
         Some("cmt-provider") => BlockFreqSource::Provider(cmt_block_frequencies),
         Some(other) => {
             return Err(format!(
-                "unknown value `{other}` for CRABBIT_BLOCK_FREQ; expected one of: uniform, spectral, profile, cmt-provider"
+                "unknown value `{other}` for CRABBIT_BLOCK_FREQ; expected one of: uniform, spectral, spectral-loop, profile, cmt-provider"
             ));
         }
     };

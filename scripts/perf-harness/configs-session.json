@@ -1,0 +1,7 @@
+[
+  { "name": "linear", "env": {} },
+  { "name": "linear-w-specloop", "env": { "CRABBIT_SPILL_POLICY": "weighted", "CRABBIT_BLOCK_FREQ": "spectral-loop" } },
+  { "name": "eregalloc-c0", "env": { "CRABBIT_REGALLOC": "eregalloc", "CRABBIT_REGALLOC_ORACLE": "c0" } },
+  { "name": "eregalloc-c2", "env": { "CRABBIT_REGALLOC": "eregalloc", "CRABBIT_REGALLOC_ORACLE": "c2" } },
+  { "name": "eregalloc-c2-specloop", "env": { "CRABBIT_REGALLOC": "eregalloc", "CRABBIT_REGALLOC_ORACLE": "c2", "CRABBIT_BLOCK_FREQ": "spectral-loop" } }
+]

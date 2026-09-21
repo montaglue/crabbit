@@ -14,7 +14,7 @@ through it today.**
 
 `crabbit` is a [rustc codegen backend](https://rustc-dev-guide.rust-lang.org/backend/backend-agnostic.html):
 `cargo rustc -- -Zcodegen-backend=libcrabbit.so` and your crate is compiled
-by ~40 passes of hand-written Rust — MIR imported into
+by ~45 passes of hand-written Rust — MIR imported into
 [`pliron`](https://github.com/pliron-org/pliron) (an MLIR-style IR
 framework) dialects, then mid-end optimization, instruction selection,
 linear-scan register allocation, encoding — down to native **aarch64 ELF**
@@ -22,9 +22,9 @@ linear-scan register allocation, encoding — down to native **aarch64 ELF**
 
 ```text
    MIR ──► mir dialect ──► llvm dialect ──► aarch64 dialect ──► ELF/Mach-O
-                │  gvn · licm · div-magic         │
-                │  dse · adce · sink              └──► (registers, frames,
-                │                                       encodings: all ours)
+                │  gvn · licm · div-magic · unroll │
+                │  dse · adce · sink · vectorize   └──► (registers incl. NEON,
+                │                                        frames, encodings: all ours)
                 └────────► native NVPTX ──► PTX ──► runs on real GPUs
 ```
 
@@ -36,7 +36,9 @@ per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
 
 The same dialect stack emits **native NVPTX**: `#[no_mangle]
 __crabbit_kernel_*` Rust functions become PTX — no LLVM, no NVVM — measured at
-geomean **1.13× nvcc** across a 14-kernel corpus, 10/14 within 3%.
+geomean **1.01× nvcc** across a 14-kernel corpus (dead tie on tiled gemm at
+35 vs 35 registers), and racing 17 production kernels sourced from real
+codebases at parity, ahead of nvcc on 6 of them.
 
 And underneath sits the research it was built to carry — **backward PGO**:
 every emitted instruction carries provenance through every lowering level,
@@ -67,14 +69,28 @@ Around the compiler:
 - **Real crates compile.** All four `apache/arrow-rs` core crates
   (`arrow-schema`, `arrow-buffer`, `arrow-data`, `arrow-array`) compile
   through crabbit (`scripts/perf-harness/` drives this; corpus B).
-- **GPU code within reach of nvcc.** On a 14-kernel corpus (each kernel as
+- **GPU code at parity with nvcc.** On a 14-kernel corpus (each kernel as
   Rust-via-crabbit, Rust-via-LLVM from *identical IR*, and CUDA C++ via
-  nvcc), crabbit's native PTX is geomean **1.13× nvcc**, with **10/14 kernels
-  within 3%** and zero correctness failures
-  (results: `kernel-corpus/results/gpu/20260828-104400/gpu_analysis.md`).
+  nvcc), crabbit's native PTX is geomean **1.01× nvcc**, **12/14 kernels
+  within 2%**, tiled gemm a dead tie at 35 vs 35 registers, zero
+  correctness failures
+  (results: `kernel-corpus/results/gpu/20260920-final/`).
+- **Real production kernels, sourced not written.** A sibling corpus of
+  **17 kernels extracted verbatim** from real codebases (an MoE inference
+  engine, llama.cpp, llm.c — dequantization, attention pooling, warp-level
+  reductions, Mamba decode) runs correct through crabbit; crabbit is
+  **ahead of nvcc on 6** (bf16-decode attention 0.77×, argsort 0.90×,
+  q4_0 dequant 0.98×), at parity on most, and every remaining loss carries
+  a SASS-level mechanism analysis. Porting it surfaced and fixed **three
+  real miscompiles**, including a latent scalar-transmute bug on both
+  targets (now fixture-guarded).
 - **Optimizations that pay measurably.** Adding constant-divisor strength
   reduction took the `seidel_2d` GPU kernel from **3.93 ms → 2.06 ms**;
-  a target-profile-aware sinking rule (don't add control dependence under
+  shared-memory addressing + 128-bit shared loads took tiled gemm from
+  1.49× nvcc to a tie; full unrolling of geometric-induction warp
+  reductions turned two rms-norm kernels from losses into wins; a NEON
+  loop vectorizer took the worst CPU kernel **4.5× faster**; a
+  target-profile-aware sinking rule (don't add control dependence under
   SIMT divergence) recovered a measured 10% regression on `gemm_tiled`
   (`docs/MIDEND-PLAN.md` records each finding with its mechanism).
 - **Attribution that survives audits.** Synthetic samples injected on a
@@ -84,12 +100,17 @@ Around the compiler:
   `seidel_2d`'s GPU samples attribute to one source op (the consumer of the
   recurrence load), matching the PTX analysis
   (results: `kernel-corpus/results/gpu-attribution/20260831-090227/ANALYSIS.md`).
-- **Honest experiments, nulls included.** Measured-cost feedback into the
-  register allocator: null on this corpus. Analytic (spectral) block
-  frequencies vs. measured: median Spearman **0.002** — the uniform-prior
-  model cannot represent iteration counts
-  (E1: `kernel-corpus/results/cpu-feedback/20260831/E1-ANALYSIS.md`,
-  E4: `kernel-corpus/results/cpu-feedback/20260831/E4-ANALYSIS.md`).
+- **Honest experiments, nulls included.** Analytic (spectral) block
+  frequencies under a uniform prior vs. measured: median Spearman
+  **0.002** — the uniform walk cannot represent iteration counts; a
+  loop-aware branch prior lifts it to **0.742** (better on 14/14 kernels)
+  (`kernel-corpus/results/cpu-feedback/20260831/FREQ-MODEL-EVAL.md`).
+  With that and a repaired cost model, measured profile frequencies became
+  the best-performing linear-allocator configuration — winning exactly
+  where the analytic model mis-predicts
+  (`kernel-corpus/results/cpu-feedback/20260920-pgo/`); earlier nulls are
+  kept on the record
+  (E1: `kernel-corpus/results/cpu-feedback/20260831/E1-ANALYSIS.md`).
 
 ![arrow-schema IR at the llvm-gvn boundary in the pliron-inspect UI: the
 24 MB module compiled by crabbit, replayed per pass, browsable with
@@ -203,7 +224,7 @@ no rebuild (`crates/pliron-ll/src/codegen_opts.rs`,
 | --- | --- | --- |
 | `CRABBIT_REGALLOC` | `linear`, `eregalloc` | baseline linear scan vs. the e-graph availability-oracle allocator |
 | `CRABBIT_REGALLOC_ORACLE` | `c0`, `c2` | syntactic vs. saturated-e-graph restore oracle |
-| `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile`, `cmt-provider` | spill-weight frequencies: none / analytic Perron–Frobenius / **measured perf profile** |
+| `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `spectral-loop`, `profile`, `cmt-provider` | spill-weight frequencies: none / analytic Perron–Frobenius (optionally with the loop-aware 7/8 branch prior) / **measured perf profile** |
 | `CRABBIT_MIDEND_DISABLE` | `gvn,licm,divmagic,dse,adce,sink` | ablate individual mid-end passes |
 | `CRABBIT_PROFILE`, `CRABBIT_MEASURED_COSTS` | paths | measured frequencies / per-decision costs (see backward PGO) |
 | `CRABBIT_EMIT_IR`, `CRABBIT_PTX_OUT`, `CRABBIT_LL_OUT` | paths | printed IR / PTX / textual LLVM IR side outputs |
