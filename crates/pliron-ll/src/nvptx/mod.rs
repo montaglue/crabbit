@@ -65,7 +65,7 @@
 //! form same-thread consecutive groups, so there is no win to buy.
 //!
 //! `ld.global.nc` (the read-only data cache): a global load takes `.nc`
-//! when the per-root write-set analysis ([spaces::readonly_values]) proves
+//! when the per-root write-set analysis (`spaces::readonly_values`) proves
 //! the loaded memory is written by NO store, atomic, or opaque call
 //! anywhere in the kernel body. Every thread runs this same body, so the
 //! proof covers the whole launch — exactly `.nc`'s requirement (the

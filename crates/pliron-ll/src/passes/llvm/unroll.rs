@@ -30,10 +30,10 @@
 //!   `icmp`. The trip count is found by direct simulation of that
 //!   (wrapping) arithmetic, so every predicate and any step sign/width
 //!   ≤ 64 handled by the table below is exact — the same simulator runs
-//!   both step kinds, only the per-iteration [IvStep::apply] differs.
-//! - Bounds: 2 ≤ trip ≤ [MAX_TRIP], loop body ≤ [MAX_LOOP_OPS]
-//!   non-terminator ops, trip × body ≤ [MAX_UNROLL_GROWTH] cloned ops
-//!   per unroll, and ≤ [MAX_FUNC_GROWTH] cloned ops per function per
+//!   both step kinds, only the per-iteration `IvStep::apply` differs.
+//! - Bounds: 2 ≤ trip ≤ `MAX_TRIP`, loop body ≤ `MAX_LOOP_OPS`
+//!   non-terminator ops, trip × body ≤ `MAX_UNROLL_GROWTH` cloned ops
+//!   per unroll, and ≤ `MAX_FUNC_GROWTH` cloned ops per function per
 //!   pass run (the rounds loop is a fixpoint — nested constant-trip
 //!   loops unroll inside-out one per round, so growth compounds).
 //! - Every non-terminator op is clonable (no nested regions). Cloning is

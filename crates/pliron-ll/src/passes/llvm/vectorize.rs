@@ -36,7 +36,7 @@
 //! trip 0, and every live-out value keep their scalar semantics. The
 //! vector loop's guard is `wrapping(bound - iv) >= VF`, which for the
 //! accepted `lt` predicates is exactly "at least VF more scalar
-//! iterations" and cannot overflow (see [analyze]'s trip-safety note).
+//! iterations" and cannot overflow (see `analyze`'s trip-safety note).
 //!
 //! ADJOINT (backward attribution): every emitted op derives from the
 //! scalar op it widens or replaces (vector body ops from their scalar
