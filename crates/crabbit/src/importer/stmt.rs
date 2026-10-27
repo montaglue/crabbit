@@ -247,6 +247,18 @@ pub(super) fn import_terminator<'tcx>(
                 return Ok(());
             }
 
+            if lower_cuda_device_call(tcx, ctx, state, insert_block, body, func, args, destination)? {
+                let Some(target) = target else {
+                    mir_dialect::ops::UnreachableOp::new(ctx)
+                        .get_operation()
+                        .insert_at_back(insert_block, ctx);
+                    return Ok(());
+                };
+                let goto = mir_dialect::ops::GotoOp::new(ctx, block_for(state, *target)?, vec![]);
+                goto.get_operation().insert_at_back(insert_block, ctx);
+                return Ok(());
+            }
+
             if lower_known_intrinsic_call(
                 tcx,
                 ctx,

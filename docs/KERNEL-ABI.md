@@ -1,113 +1,124 @@
-# crabbit kernel ABI convention (corpus v1)
+# crabbit kernel ABI convention (corpus v2)
 
 How a Rust-written GPU kernel reaches crabbit's native NVPTX path, and the
 conventions the kernel corpus (`~/projects/montaglue/kernel-corpus`) follows.
-This is the "minimal `#[no_mangle]` + tiny device-intrinsics shim" route the
-kernel-corpus brief allows; cuda-oxide's own `#[kernel]` macro is NOT used
-because it mangles kernels as `cuda_oxide_kernel_<hash>_…` and routes
-intrinsics through `cuda_intrinsics::__cuda_oxide_intrinsic_abi_v1::iNNNN`
-placeholder fns that only `rustc-codegen-cuda` rewrites; crabbit's importer
-detects kernels by symbol prefix and needs the intrinsics as plain foreign
-declarations.
+Kernels are written against cuda-oxide's device API: the `#[kernel]`
+attribute from `cuda-macros` and the `cuda_device` crate (`thread`, `warp`,
+`float`, `atomic`, `SharedArray`, `DynamicSharedArray`), both consumed from
+NVIDIA's upstream repository at the revision crabbit pins. A kernel crate
+therefore also compiles with cuda-oxide's own compiler.
 
 ## Kernel functions
 
 ```rust
 #![no_std]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) { … }
+use cuda_device::{kernel, thread};
+
+#[kernel]
+pub fn vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) {
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
+    if i < n {
+        unsafe { *out.add(i as usize) = *a.add(i as usize) + *b.add(i as usize) };
+    }
+}
 ```
 
-- Symbol prefix `__crabbit_kernel_` (`KERNEL_EXPORT_PREFIX` in
-  `crates/crabbit/src/importer_oxide.rs`) marks a kernel: the importer puts
-  its body into the `rust_kernels` module instead of the host module. The
-  PTX `.entry` name is the symbol with the prefix STRIPPED (`vector_add`),
-  so the three comparison arms (crabbit PTX, LLVM PTX, nvcc) share one
-  entry name per kernel.
-- Parameters: raw pointers (`*const T` / `*mut T`, T ∈ {i32,u32,i64,u64,f32,f64,u8}),
-  scalars `u32`/`i32`/`u64`/`i64`/`f32`/`f64`, and by-value `#[repr(C)]`
-  structs of those scalars/pointers (nested structs/arrays included; no
-  slices or references). Pointer params are global-memory addresses. A
-  struct param is ONE launch argument: crabbit emits `.param .align A .b8
-  name[size]` in the C layout (natural alignment, fields padded) and loads
-  the fields with `ld.param` at their offsets, so the host passes a
-  pointer to the C struct in `kernelParams[i]` exactly as it would for an
-  nvcc kernel. Kernel parameters are never flattened or passed indirectly
-  (the host-side aarch64 rules do not apply to `.entry` signatures).
-- Calls: the intrinsics below always work. Internal Rust helpers are
-  inlined by the mid-end; one that survives (e.g. recursion) becomes a PTX
-  `.func` with the `.param` ABI (scalar params/result only). Corpus
-  kernels still prefer `macro_rules!`/inline code so the three arms
-  compare like for like.
-- No panics reachable: index with raw pointer arithmetic (`*a.add(i)`),
-  never slices; build device crates with `-Coverflow-checks=off`
-  (`overflow-checks = false` in the profile) and `panic = "abort"`.
+- `#[kernel]` renames the function to cuda-oxide's reserved symbol
+  (`KERNEL_PREFIX` from `reserved-oxide-symbols`, currently
+  `cuda_oxide_codegen_v1_cuda_oxide_kernel_<hash>_<name>`). The importer
+  detects kernels by that prefix and puts their bodies into the
+  `rust_kernels` module. The PTX `.entry` name is the symbol with the prefix
+  STRIPPED (`vector_add`), so the three comparison arms (crabbit PTX, LLVM
+  PTX, nvcc) share one entry name per kernel. `pub unsafe fn` is accepted
+  too.
+- Device crates set `default-features = false` on `cuda-device` and
+  `cuda-macros`: the `host` feature would pull in `cuda-host`, and the host
+  side of a crabbit device crate is never linked.
+- Parameters: raw pointers (`*const T` / `*mut T`, T ∈
+  {i32,u32,i64,u64,f32,f64,u8}), scalars `u32`/`i32`/`u64`/`i64`/`f32`/`f64`,
+  and by-value `#[repr(C)]` structs of those (nested structs/arrays
+  included). `&[T]` and `DisjointSlice<T>` are accepted and are passed as
+  ONE by-value `{ptr, len}` struct parameter each (16 bytes, align 8).
+  Pointer params are global-memory addresses. A struct param is one launch
+  argument: crabbit emits `.param .align A .b8 name[size]` in the C layout
+  and loads the fields with `ld.param`, so the host passes a pointer to the
+  C struct in `kernelParams[i]` exactly as it would for an nvcc kernel.
+  Kernel parameters are never flattened or passed indirectly. The corpus
+  keeps raw pointers plus scalars so the Rust, CUDA C++ and LLVM arms share
+  one launch signature; cuda-oxide's own host launchers (which flatten
+  slices) are not used.
+- Calls: the `cuda_device` functions below always work. Internal Rust
+  helpers are inlined by the mid-end; one that survives (e.g. recursion)
+  becomes a PTX `.func` with the `.param` ABI (scalar params/result only).
+- No panics reachable: index with raw pointer arithmetic (`*a.add(i)`) or
+  checked `cuda_device` accessors; build device crates with
+  `-Coverflow-checks=off` (`overflow-checks = false` in the profile) and
+  `panic = "abort"`.
 - Host code must not call a kernel directly (crabbit errors on that).
 
-## Intrinsics: the `crabbit-device` shim crate
+## The device API the importer understands
 
-`kernel-corpus/crates/crabbit-device` declares the NVVM intrinsics as foreign
-functions under their real LLVM names:
+cuda-device's functions have placeholder bodies (`unreachable!`) that the
+compiler replaces. crabbit's importer intercepts the calls by their
+definition (`crates/crabbit/src/importer/cuda_device.rs`) and builds
+cuda-oxide's `nvvm` dialect ops, which `mir-lower` lowers exactly as it
+lowers cuda-oxide's own output; anything under `cuda_device::` that is not
+listed is ordinary Rust and imports as a call.
+
+| cuda_device | op | PTX |
+|---|---|---|
+| `thread::{threadIdx,blockDim,blockIdx,gridDim}_{x,y,z}()` | `nvvm.read_ptx_sreg_*` | `mov.u32 %r, %tid.x` … |
+| `thread::sync_threads()` | `nvvm.barrier0` | `bar.sync 0` |
+| `warp::sync_mask(m)`, `warp::lane_id()` | `nvvm.bar_warp_sync`, `nvvm.read_ptx_sreg_laneid` | `bar.warp.sync`, `%laneid` |
+| `warp::shuffle{,_up,_down,_xor}{,_f32}_sync(mask, v, lane)` | `nvvm.shfl_sync_{idx,up,down,bfly}_{i32,f32}` | `shfl.sync.*.b32` (full-warp segment) |
+| `warp::{ballot,all,any}_sync(mask, pred)` | `nvvm.vote_sync_*` | `vote.sync.*` |
+| `float::{ex2_approx,lg2_approx,rsqrt_approx,rcp_approx,sin_approx,cos_approx,sqrt_rn,sqrt_approx}_f32(x)` | `nvvm.scalar_math` | `ex2.approx.f32` … |
+| `float::fma_rn_f32(a, b, c)` | placeholder `fmaf32` | `fma.rn.f32` |
+| `f32::max/min/sqrt/mul_add/abs/floor/ceil/trunc/round`, `exp2`, `log2` (core intrinsics, in kernels) | dialect-mir placeholders `__cuda_oxide_rust_intrinsic_*` | `max.f32`, `sqrt.rn.f32`, `fma.rn.f32`, … (`mir-lower` names libdevice `__nv_*`; the translator lowers the single-instruction ones) |
+| `DeviceAtomic{I32,U32,I64,U64}::from_ptr(p).fetch_{add,sub,and,or,xor,min,max}(v, ordering)`, `.swap` | `nvvm.atomic_rmw` (device scope) | `atom.*` |
+| `SharedArray::{as_ptr,as_mut_ptr,as_raw_mut_ptr}`, indexing | address of the `.shared` global | — |
+| `DynamicSharedArray::<T>::{get,get_raw,offset}` | crabbit's `crabbit.dyn.shared.base` | `.extern .shared` window |
+
+Intrinsics not in this table are added here when a kernel needs them (the
+dialect has ops for all of cuda-device; the translator has to lower each).
+
+## Shared memory
+
+A `static mut` of type `SharedArray<T, N>` is a per-CTA shared array
+(cuda-device's type is a zero-sized marker; the importer gives it `N × T`
+bytes of storage in the `.shared` section, aligned to `max(align_of::<T>(),
+ALIGN)`):
 
 ```rust
-unsafe extern "C" {
-    #[link_name = "llvm.nvvm.read.ptx.sreg.tid.x"] pub fn tid_x() -> u32;
-    #[link_name = "llvm.nvvm.barrier0"]            pub fn barrier0();
+use cuda_device::SharedArray;
+
+#[kernel]
+pub fn softmax(x: *const f32, y: *mut f32, rows: u32, d: u32) {
+    static mut RED: SharedArray<f32, 256> = SharedArray::UNINIT;
+    let sh = unsafe { SharedArray::as_raw_mut_ptr(&raw mut RED) };
     …
 }
 ```
 
-rustc's symbol name for a foreign item is its `link_name`; pliron's
-`Legaliser` turns the dots into underscores (`llvm_nvvm_read_ptx_sreg_tid_x`);
-`crates/pliron-ll/src/nvptx` normalizes callee names (strips `llvm_`/`int_`,
-dots→underscores) and lowers the sreg family to `mov.u32 %r, %tid.x`,
-`barrier0` to `bar.sync 0`, etc. Because the names are the genuine LLVM
-intrinsic names, the llvm-export route (`.ll` → `llc -march=nvptx64`) sees
-`declare … @llvm.nvvm.read.ptx.sreg.tid.x()` once underscores are mapped
-back to dots (the exporter/route-(ii) script owns that mapping).
-
-Math on the device uses NVVM math intrinsics, never libm:
-`llvm.nvvm.sqrt.rn.f`, `llvm.nvvm.rsqrt.approx.f`, `llvm.nvvm.ex2.approx.f`,
-`llvm.nvvm.lg2.approx.f`, `llvm.nvvm.fmax.f`, `llvm.nvvm.fmin.f` (f32) and
-the `.d` variants for f64 where they exist. exp(x) = ex2(x · log2 e).
-
-## Shared memory
-
-A `static mut` placed in link section `.shared` is a per-CTA shared array:
-
-```rust
-#[unsafe(link_section = ".shared")]
-static mut TILE: [f32; 32 * 33] = [0.0; 32 * 33];
-```
-
-crabbit emits it as `.shared .align A .b8 TILE[bytes]` and materializes its
-address with `mov.u64 %rd, TILE; cvta.shared.u64 %rd, %rd;` so all loads and
-stores stay generic. Initializers must be all-zero (shared memory cannot be
-statically initialized).
+crabbit emits it as `.shared .align A .b8 NAME[bytes]` and materializes its
+address with `mov.u64 %rd, NAME; cvta.shared.u64 %rd, %rd;` so all loads and
+stores stay generic; accesses the translator can prove shared become
+`ld.shared`/`st.shared`. Shared memory is never statically initialized.
 
 ### Dynamic shared memory (`extern __shared__`)
 
-The launch-sized window is reached through a crabbit-convention intrinsic
-in the shim (LLVM models `extern __shared__` as an external `addrspace(3)`
-global, which Rust cannot declare):
-
-```rust
-#[link_name = "crabbit.dyn.shared.base"] pub fn dyn_shared_base() -> *mut u8;
-```
-
-A call yields the base of the module's single
+`DynamicSharedArray::<T>::get()` (or `get_raw()` for the `*mut u8` base,
+`offset(bytes)` for a partition) yields the base of the module's single
 `.extern .shared .align 16 .b8 __crabbit_dyn_shared[];` declaration, whose
 size is the launch's `sharedMemBytes` (base alignment 16). The result is a
-proven-`.shared` source for provenance, so accesses through it qualify as
-`ld.shared`/`st.shared` like a static tile's. Every call in a kernel
-returns the SAME window (PTX has one extern shared array per module) —
-partition it manually. Launch side: corpus specs set
-`dynamic_shared_bytes` (an expression over the size variables, default 0)
-and `tools/runner.py` passes it as `cuLaunchKernel`'s sharedMemBytes; the
-old `shared_bytes` spec field remains documentation of static usage.
-Caveat: `crabbit.dyn.shared.base` is NOT an LLVM intrinsic, so kernels
-using it do not go through the llvm-export (rust-llvm) arm — like the
-generic atomics.
+proven-`.shared` source for provenance. Every call in a kernel returns the
+SAME window (PTX has one extern shared array per module) — partition it
+manually. Launch side: corpus specs set `dynamic_shared_bytes` (an
+expression over the size variables, default 0) and `tools/runner.py`
+passes it as `cuLaunchKernel`'s sharedMemBytes; the old `shared_bytes`
+spec field remains documentation of static usage. The window is a crabbit
+convention (`crabbit.dyn.shared.base`), so kernels using it do not go
+through the llvm-export (rust-llvm) arm.
 
 ## Value types on the device
 
@@ -127,13 +138,13 @@ kernels.
 | globals | `.shared` statics (zero-init) and `.global` byte-initialized data (no pointers/relocs) | address via `mov.u64` + `cvta.{shared,global}` |
 | control flow | br / cond_br with block args (edge blocks), return void, unreachable → `trap` | switch / indirectbr unsupported |
 | sregs | tid/ntid/ctaid/nctaid .x/.y/.z, laneid, warpsize | |
-| barriers | `llvm.nvvm.barrier0` → `bar.sync 0`; `llvm.nvvm.bar.warp.sync` → `bar.warp.sync mask` (`__syncwarp`); `membar.{gl,cta,sys}` | |
-| warp shuffle | `llvm.nvvm.shfl.sync.{down,up,bfly,idx}.{i32,f32}` → `shfl.sync.<mode>.b32 d, a, b, c, mask` | value-returning forms; NVVM operand order `(mask, value, b, c)`, packed `c = cval \| (segmask << 8)` — full warp: `0x1f` (down/bfly/idx), `0` (up); `bfly` = `__shfl_xor_sync` |
-| warp vote | `llvm.nvvm.vote.{ballot,all,any}.sync` → `vote.sync.{ballot.b32,all.pred,any.pred}` | `(mask, i1 pred)`; ballot returns u32, all/any return bool |
-| dynamic shared | `crabbit.dyn.shared.base` → `.extern .shared` window base | crabbit convention, see the shared-memory section; crabbit-native arm only |
+| barriers | `llvm.nvvm.barrier0` and `llvm.nvvm.barrier.cta.sync.aligned.all` → `bar.sync 0`; `llvm.nvvm.bar.warp.sync` → `bar.warp.sync mask`; `membar.{gl,cta,sys}` | |
+| warp shuffle | `llvm.nvvm.shfl.sync.{down,up,bfly,idx}.{i32,f32}` → `shfl.sync.<mode>.b32` | NVVM operand order `(mask, value, b, c)` |
+| warp vote | `llvm.nvvm.vote.{ballot,all,any}.sync` → `vote.sync.*` | |
+| dynamic shared | `crabbit.dyn.shared.base` → `.extern .shared` window base | crabbit-native arm only |
 | struct params | by-value aggregate kernel params as one `.param .align A .b8 name[size]` | leaves via `ld.param` at natural-layout offsets |
-| atomics | `llvm.nvvm.atomic.{add,max,min,and,or,xor,exch}.gen.i`, `.add.gen.{f,ll,d}`, `.add.gen.i.{cta,sys}` | generic addressing (`atom.*`) |
-| math f32 | sqrt.rn, sqrt.approx, rsqrt.approx, ex2.approx, lg2.approx, sin/cos.approx, rcp.approx, fabs, floor, ceil, round, trunc, fmax, fmin, fma.rn | via `llvm.nvvm.*` link_names (see shim) |
+| atomics | `llvm.nvvm.atomic.{add,max,min,and,or,xor,exch}.gen.i`, `.add.gen.{f,ll,d}`, `.add.gen.i.{cta,sys}` and the `atomicrmw` forms `mir-lower` emits for `nvvm.atomic_rmw` | generic addressing (`atom.*`) |
+| math f32 | sqrt.rn, sqrt.approx, rsqrt.approx, ex2.approx, lg2.approx, sin/cos.approx, rcp.approx, fabs, floor, ceil, round, trunc, fmax, fmin, fma.rn | via `llvm.nvvm.*`, LLVM generic (`llvm.maxnum.f32`) or the single-instruction libdevice names (`__nv_fmaf`, `__nv_fmaxf`, …) |
 | math f64 | sqrt.rn, rsqrt.approx, fabs, floor, ceil, fmax, fmin, fma.rn | |
 | calls | the intrinsics above, plus internal device helpers that survive the inliner (emitted as PTX `.func`s with the `.param` ABI, e.g. recursion) | scalar params/result only on `.func`s; an unknown callee errors by name |
 
@@ -143,30 +154,29 @@ Everything else errors with the op / callee name.
 
 `CRABBIT_LL_OUT=<path>` additionally writes the kernel module as textual
 LLVM IR through cuda-oxide's `llvm-export` (`crates/crabbit/src/kernel_llvm_export.rs`):
-kernels get the `ptx_kernel` calling convention, `llvm_nvvm_*` callees are
-decoded back to `llvm.nvvm.*`, `.shared` statics become `addrspace(3)`
-zero-initialized globals (with `addrspacecast` to generic at each use),
-byte-initialized data becomes `addrspace(1)`. Compile with
+kernels get the `ptx_kernel` calling convention, `.shared` statics become
+`addrspace(3)` zero-initialized globals (with `addrspacecast` to generic at
+each use), byte-initialized data becomes `addrspace(1)`, and the CTA
+barrier is spelled `llvm.nvvm.barrier0` for LLVM 18. Compile with
 `~/.local/opt/llvm18/bin/llc -march=nvptx64 -mcpu=sm_90 -O3` (LLVM 18 does
 not know sm_121; its PTX ISA 7.8 output still assembles and runs on the
-GB10). Caveat for apples-to-apples: the generic atomics (`llvm.nvvm.atomic.add.gen.i`
-etc.) are cuda-oxide/crabbit names, not upstream LLVM intrinsics — kernels
-using atomics will not go through llc until they are mapped to `atomicrmw`.
+GB10).
 
 ## Build and outputs
 
 A device crate is an ordinary `no_std` `lib` crate compiled with
-`-Zcodegen-backend=<libcrabbit.so>`. crabbit writes the host object as
-usual and, when the crate contains kernels, a PTX sidecar next to it:
-`<object stem>.ptx` in the same directory (i.e. under
-`target/<profile>/deps/`), and additionally to the path in
-`CRABBIT_PTX_OUT` when that variable is set (one file per crate; the
-variable is read at rustc time, so pass it through `cargo rustc` env).
-The PTX header defaults to `.target sm_121`, ISA 8.8 (`PtxTarget`);
+`-Zcodegen-backend=<libcrabbit.so>` on crabbit's toolchain (stable 1.99.1
+with `RUSTC_BOOTSTRAP=1`). crabbit writes the host object as usual and,
+when the crate contains kernels, a PTX sidecar next to it: `<object
+stem>.ptx` in the same directory (under `target/<profile>/deps/`), and
+additionally to the path in `CRABBIT_PTX_OUT` when that variable is set
+(one file per crate; read at rustc time, so pass it through `cargo rustc`
+env). The PTX header defaults to `.target sm_121`, ISA 8.8 (`PtxTarget`);
 `CRABBIT_PTX_SM=<n>` overrides the SM.
 
-The host object of a device crate contains nothing but the shim's
-declarations; it is never linked into anything.
+The host object of a device crate contains the host copies of the kernel
+helpers (with cuda-device's placeholder bodies); it is never linked into
+anything.
 
 Concretely (the acceptance fixture, `crates/backend-tests/fixtures/kernel-vector-add`):
 

@@ -1,5 +1,5 @@
 //! End-to-end kernel path (docs/KERNEL-ABI.md): a `#![no_std]` device crate
-//! with `__crabbit_kernel_*` functions is compiled by the crabbit dylib, the
+//! with cuda-oxide `#[kernel]` functions is compiled by the crabbit dylib, the
 //! PTX sidecar is assembled by `ptxas` (skipped without a CUDA toolkit), and
 //! — when a CUDA driver + GPU are present — executed through the driver API
 //! by a small C harness that checks the results exactly.

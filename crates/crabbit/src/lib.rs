@@ -623,6 +623,8 @@ pub use pliron_ll::conversion;
 pub mod dialects {
     // cuda-oxide's MIR port, registered as dialect `mir`.
     pub use crabbit_mir::dialect_mir;
+    // cuda-oxide's device intrinsics as ops, dialect `nvvm`.
+    pub use dialect_nvvm as nvvm;
     pub use pliron_llvm as llvm;
     pub use pliron::builtin;
     pub use pliron_ll::{aarch64, ll, macho, x86_64};

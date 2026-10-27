@@ -8,7 +8,9 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crabbit_device::{FULL_MASK, SHFL_C_DOWN, SHFL_C_UP, raw};
+use cuda_device::{kernel, DynamicSharedArray, SharedArray, thread, warp};
+
+const FULL_MASK: u32 = 0xffff_ffff;
 
 /// A field-addressed pair; `repr(C)` so device and host layouts agree.
 #[repr(C)]
@@ -19,13 +21,13 @@ pub struct Pair {
 
 /// out[i] = Pair { a: p[i].b, b: p[i].a + p[i].b } — struct GEPs on both
 /// the load and store sides.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_pair_swap_sum(
+#[kernel]
+pub unsafe fn pair_swap_sum(
     p: *const Pair,
     out: *mut Pair,
     n: u32,
 ) {
-    let i = raw::ctaid_x() * raw::ntid_x() + raw::tid_x();
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
     if i < n {
         let src = &*p.add(i as usize);
         let dst = &mut *out.add(i as usize);
@@ -37,9 +39,9 @@ pub unsafe extern "C" fn __crabbit_kernel_pair_swap_sum(
 /// out[i] = table[x[i] & 7] where table[j] = x[i] * j + j; the dynamic
 /// read index keeps the table out of mem2reg's reach, so it lowers to a
 /// `.local` array.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_local_table(x: *const u32, out: *mut u32, n: u32) {
-    let i = raw::ctaid_x() * raw::ntid_x() + raw::tid_x();
+#[kernel]
+pub unsafe fn local_table(x: *const u32, out: *mut u32, n: u32) {
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
     if i < n {
         let v = *x.add(i as usize);
         let mut table = [0u32; 8];
@@ -59,9 +61,9 @@ fn tri(n: u32) -> u32 {
 }
 
 /// out[i] = tri(x[i] & 15).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_tri_rec(x: *const u32, out: *mut u32, n: u32) {
-    let i = raw::ctaid_x() * raw::ntid_x() + raw::tid_x();
+#[kernel]
+pub unsafe fn tri_rec(x: *const u32, out: *mut u32, n: u32) {
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
     if i < n {
         *out.add(i as usize) = tri(*x.add(i as usize) & 15);
     }
@@ -72,20 +74,20 @@ pub unsafe extern "C" fn __crabbit_kernel_tri_rec(x: *const u32, out: *mut u32, 
 /// 32*n_warps threads, so every shuffle runs with a full warp. The host
 /// check replays the identical pairing tree (offsets 16, 8, 4, 2, 1), so
 /// the f32 result is bit-exact, verifying shuffle SEMANTICS end to end.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_warp_reduce(
+#[kernel]
+pub unsafe fn warp_reduce(
     x: *const f32,
     out: *mut f32,
     n_warps: u32,
 ) {
-    let i = raw::ctaid_x() * raw::ntid_x() + raw::tid_x();
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
     let warp = i / 32;
     let lane = i % 32;
     if warp < n_warps {
         let mut v = *x.add(i as usize);
         let mut off = 16u32;
         while off > 0 {
-            v += raw::shfl_down_sync_f32(FULL_MASK, v, off, SHFL_C_DOWN);
+            v += warp::shuffle_down_f32_sync(FULL_MASK, v, off);
             off >>= 1;
         }
         if lane == 0 {
@@ -99,8 +101,8 @@ pub unsafe extern "C" fn __crabbit_kernel_warp_reduce(
 /// ballot of "x is odd", and vote all/any packed as (all << 1) | any —
 /// with a `bar.warp.sync` between the shuffles and the votes. n is a
 /// multiple of 32 so every warp is full.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_warp_ops(
+#[kernel]
+pub unsafe fn warp_ops(
     x: *const u32,
     out_bfly: *mut u32,
     out_idx: *mut u32,
@@ -109,17 +111,17 @@ pub unsafe extern "C" fn __crabbit_kernel_warp_ops(
     out_vote: *mut u32,
     n: u32,
 ) {
-    let i = raw::ctaid_x() * raw::ntid_x() + raw::tid_x();
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
     if i < n {
         let v = *x.add(i as usize) as i32;
-        let bfly = raw::shfl_bfly_sync_i32(FULL_MASK, v, 1, SHFL_C_DOWN);
-        let idx = raw::shfl_idx_sync_i32(FULL_MASK, v, 5, SHFL_C_DOWN);
-        let up = raw::shfl_up_sync_i32(FULL_MASK, v, 1, SHFL_C_UP);
-        raw::bar_warp_sync(FULL_MASK);
+        let bfly = warp::shuffle_xor_sync(FULL_MASK, v as u32, 1) as i32;
+        let idx = warp::shuffle_sync(FULL_MASK, v as u32, 5) as i32;
+        let up = warp::shuffle_up_sync(FULL_MASK, v as u32, 1) as i32;
+        warp::sync_mask(FULL_MASK);
         let odd = (v & 1) == 1;
-        let ballot = raw::vote_ballot_sync(FULL_MASK, odd);
-        let all = raw::vote_all_sync(FULL_MASK, odd);
-        let any = raw::vote_any_sync(FULL_MASK, odd);
+        let ballot = warp::ballot_sync(FULL_MASK, odd);
+        let all = warp::all_sync(FULL_MASK, odd);
+        let any = warp::any_sync(FULL_MASK, odd);
         *out_bfly.add(i as usize) = bfly as u32;
         *out_idx.add(i as usize) = idx as u32;
         *out_up.add(i as usize) = up as u32;
@@ -131,20 +133,20 @@ pub unsafe extern "C" fn __crabbit_kernel_warp_ops(
 /// Dynamic shared memory (`extern __shared__`): each block stages its
 /// slice in the window sized by the launch's sharedMemBytes and writes it
 /// back block-reversed. n is a multiple of the block size.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_dyn_smem_reverse(
+#[kernel]
+pub unsafe fn dyn_smem_reverse(
     x: *const f32,
     out: *mut f32,
     n: u32,
 ) {
-    let tid = raw::tid_x();
-    let nt = raw::ntid_x();
-    let i = raw::ctaid_x() * nt + tid;
-    let s = raw::dyn_shared_base() as *mut f32;
+    let tid = thread::threadIdx_x();
+    let nt = thread::blockDim_x();
+    let i = thread::blockIdx_x() * nt + tid;
+    let s = DynamicSharedArray::<u8>::get_raw() as *mut f32;
     if i < n {
         *s.add(tid as usize) = *x.add(i as usize);
     }
-    raw::barrier0();
+    thread::sync_threads();
     if i < n {
         *out.add(i as usize) = *s.add((nt - 1 - tid) as usize);
     }
@@ -160,14 +162,14 @@ pub struct Affine {
 }
 
 /// out[i] = x[i] * w.scale + w.bias + w.shift as f32.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __crabbit_kernel_affine_apply(
+#[kernel]
+pub unsafe fn affine_apply(
     w: Affine,
     x: *const f32,
     out: *mut f32,
     n: u32,
 ) {
-    let i = raw::ctaid_x() * raw::ntid_x() + raw::tid_x();
+    let i = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
     if i < n {
         *out.add(i as usize) = *x.add(i as usize) * w.scale + w.bias + w.shift as f32;
     }

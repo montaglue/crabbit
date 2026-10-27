@@ -42,7 +42,7 @@ per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
 (red), SSA values taking their place (green)](docs/images/inspect-ir-diff.png)
 
 The same dialect stack emits **native NVPTX**: `#[no_mangle]
-__crabbit_kernel_*` Rust functions become PTX — no LLVM, no NVVM — measured at
+`#[kernel]` Rust functions (cuda-oxide's device API) become PTX — no LLVM, no NVVM — measured at
 geomean **1.01× nvcc** across a 14-kernel corpus (dead tie on tiled gemm at
 35 vs 35 registers), and racing 17 production kernels sourced from real
 codebases at parity, ahead of nvcc on 6 of them.

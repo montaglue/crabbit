@@ -1,8 +1,9 @@
 //! rustc MIR importer targeting cuda-oxide's `dialect-mir` (the `mir`
 //! dialect). Walks the crate's monomorphized MIR (`rustc_middle::mir`) and
-//! emits one `mir` module (plus the `rust_kernels` module for device
-//! entries); `crabbit_mir::passes::lower_dialect_mir` then hands the module
-//! to cuda-oxide's `mir-lower`.
+//! emits one `mir` module (plus the `rust_kernels` module for the
+//! cuda-oxide `#[kernel]` entries, see `cuda_device.rs`);
+//! `crabbit_mir::passes::lower_dialect_mir` then hands the module to
+//! cuda-oxide's `mir-lower`.
 
 use std::num::NonZero;
 
@@ -59,6 +60,7 @@ mod helpers;     // slot/block lookup, cached types, ty predicates
 mod convert;     // rustc Ty -> dialect type conversion, enum layout
 mod ox;          // constructor shims over dialect-mir / llvm ops
 mod typing;      // pointer typing + foreign-call signatures, after the walk
+mod cuda_device; // cuda-oxide's device API (`#[kernel]`, cuda_device::*)
 #[cfg(test)]
 mod tests;
 
@@ -76,6 +78,7 @@ use place::*;
 use layout::*;
 use helpers::*;
 use convert::*;
+use cuda_device::*;
 
 /// A single unsupported MIR body or construct discovered during import.
 #[derive(Debug, Clone)]
@@ -93,7 +96,6 @@ pub struct ImportedCrate {
     pub unsupported: Vec<ImportError>,
 }
 
-pub const KERNEL_EXPORT_PREFIX: &str = "__crabbit_kernel_";
 
 struct FunctionImportState<'tcx> {
     module_body: Ptr<BasicBlock>,

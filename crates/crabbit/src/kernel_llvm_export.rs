@@ -153,7 +153,80 @@ pub fn export_kernel_module(ctx: &mut Context, root: Ptr<Operation>) -> Result<S
             }
         }
     }
+    lower_barrier_for_llvm18(ctx, body);
     llvm_export::export::export_module_to_string(ctx, &module)
+}
+
+/// `mir-lower` spells the CTA barrier as the current LLVM intrinsic
+/// `llvm.nvvm.barrier.cta.sync.aligned.all(i32 0)`; the comparison arm's
+/// `llc` is LLVM 18, which predates it and would take the call for a plain
+/// extern. Rewrite it to the equivalent `llvm.nvvm.barrier0()` that every
+/// LLVM knows (the `.ll` is for that arm only; the native PTX path lowers
+/// the op itself).
+fn lower_barrier_for_llvm18(ctx: &mut Context, body: Ptr<pliron::basic_block::BasicBlock>) {
+    use pliron::builtin::op_interfaces::{CallOpCallable, CallOpInterface as _};
+    let aligned: pliron::identifier::Identifier =
+        "llvm_nvvm_barrier_cta_sync_aligned_all".try_into().unwrap();
+    let barrier0: pliron::identifier::Identifier = "llvm_nvvm_barrier0".try_into().unwrap();
+    let top: Vec<Ptr<Operation>> = body.deref(ctx).iter(ctx).collect();
+    let mut rewrote = false;
+    let mut has_barrier0_decl = false;
+    let mut aligned_decl = None;
+    for op in top.iter().copied() {
+        let Some(func) = Operation::get_op::<FuncOp>(op, ctx) else {
+            continue;
+        };
+        let name = func.get_symbol_name(ctx);
+        if name == barrier0 {
+            has_barrier0_decl = true;
+        }
+        if name == aligned && func.is_declaration(ctx) {
+            aligned_decl = Some(op);
+        }
+        if func.is_declaration(ctx) {
+            continue;
+        }
+        let region = func.get_region(ctx).unwrap();
+        let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
+        for block in blocks {
+            let inner: Vec<Ptr<Operation>> = block.deref(ctx).iter(ctx).collect();
+            for inner_op in inner {
+                let Some(call) = Operation::get_op::<pliron_llvm::ops::CallOp>(inner_op, ctx) else {
+                    continue;
+                };
+                let CallOpCallable::Direct(callee) = call.callee(ctx) else {
+                    continue;
+                };
+                if callee != aligned {
+                    continue;
+                }
+                let void_ty = pliron_llvm::types::VoidType::get(ctx).into();
+                let func_ty = pliron_llvm::types::FuncType::get(ctx, void_ty, vec![], false);
+                let replacement = pliron_llvm::ops::CallOp::new(
+                    ctx,
+                    CallOpCallable::Direct(barrier0.clone()),
+                    func_ty,
+                    vec![],
+                );
+                replacement.get_operation().insert_before(ctx, inner_op);
+                Operation::erase(inner_op, ctx);
+                rewrote = true;
+            }
+        }
+    }
+    if !rewrote {
+        return;
+    }
+    if !has_barrier0_decl {
+        let void_ty = pliron_llvm::types::VoidType::get(ctx).into();
+        let func_ty = pliron_llvm::types::FuncType::get(ctx, void_ty, vec![], false);
+        let decl = FuncOp::new(ctx, barrier0, func_ty);
+        decl.set_attr_llvm_function_linkage(ctx, LinkageAttr::ExternalLinkage);
+        decl.get_operation().insert_at_front(body, ctx);
+    }
+    if let Some(decl) = aligned_decl {
+        Operation::erase(decl, ctx);
+    }
 }
 
 /// Drop crabbit's `ll.data` initializer value (the exporter does not know

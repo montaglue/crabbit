@@ -26,6 +26,23 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
         _ => return Ok(false),
     };
 
+    // On the device, core float intrinsics are dialect-mir placeholder calls
+    // (`__cuda_oxide_rust_intrinsic_*`), lowered by mir-lower to the PTX
+    // instruction; the host keeps its libm route below.
+    if is_device_module(ctx, state.module_body)
+        && let Some(suffix) = device_core_intrinsic_placeholder(&name)
+    {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(import_operand(tcx, ctx, state, insert_block, body, &arg.node)?);
+        }
+        let result_ty = values.first().map(|v| v.get_type(ctx));
+        let value = device_placeholder_call(ctx, insert_block, dialect_mir_placeholder(suffix), values, result_ty);
+        if let Some(value) = value {
+            store_place(tcx, ctx, state, insert_block, body, destination, value)?;
+        }
+        return Ok(true);
+    }
     match name.as_str() {
         // Pure optimization hints with no runtime semantics.
         "cold_path" => Ok(true),

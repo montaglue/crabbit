@@ -28,6 +28,7 @@ pub fn create_context() -> Context {
     aarch64::register(&mut ctx);
     x86_64::register(&mut ctx);
     crate::dialects::dialect_mir::register(&mut ctx);
+    crate::dialects::nvvm::register(&mut ctx);
     macho::register(&mut ctx);
     ctx
 }
@@ -141,9 +142,9 @@ pub(super) fn is_kernel_def_id<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_i
     kernel_export_symbol(tcx, def_id).is_some()
 }
 
-/// The exported (unmangled) symbol of `def_id` when it names a kernel:
-/// an `#[export_name = "__crabbit_kernel_…"]` or a `#[no_mangle]` item whose
-/// name carries [KERNEL_EXPORT_PREFIX] (docs/KERNEL-ABI.md).
+/// The exported (unmangled) symbol of `def_id` when it names a kernel: a
+/// cuda-oxide `#[kernel]` entry, whose symbol carries `KERNEL_PREFIX` from
+/// `reserved-oxide-symbols` (docs/KERNEL-ABI.md).
 pub(super) fn kernel_export_symbol<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: rustc_hir::def_id::DefId,
@@ -159,7 +160,7 @@ pub(super) fn kernel_export_symbol<'tcx>(
     } else {
         return None;
     };
-    name.starts_with(KERNEL_EXPORT_PREFIX).then_some(name)
+    is_cuda_oxide_kernel_symbol(&name).then_some(name)
 }
 
 pub(super) fn function_symbol<'tcx>(
@@ -170,7 +171,7 @@ pub(super) fn function_symbol<'tcx>(
     legaliser.legalise(tcx.symbol_name(Instance::mono(tcx, def_id)).name)
 }
 
-/// A kernel's PTX entry name: its exported symbol with [KERNEL_EXPORT_PREFIX]
+/// A kernel's PTX entry name: the `#[kernel]` symbol with its prefix
 /// stripped, so every toolchain arm (crabbit PTX, LLVM PTX, nvcc) shares
 /// one `.entry` name per kernel.
 pub(super) fn kernel_symbol<'tcx>(
@@ -180,8 +181,7 @@ pub(super) fn kernel_symbol<'tcx>(
 ) -> crate::identifier::Identifier {
     let exported = kernel_export_symbol(tcx, def_id)
         .unwrap_or_else(|| tcx.def_path_str(def_id));
-    let entry = exported
-        .strip_prefix(KERNEL_EXPORT_PREFIX)
+    let entry = cuda_oxide_entry_name(&exported)
         .filter(|rest| !rest.is_empty())
         .unwrap_or(&exported);
     legaliser.legalise(entry)

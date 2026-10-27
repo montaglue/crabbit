@@ -22,7 +22,9 @@ flowchart TD
 One front end, crabbit's own, feeds both modules: `crates/crabbit/src/importer/`
 walks the crate's monomorphized MIR and builds a `mir`-dialect module per
 kind — the host module (`rust_crate`) and the kernel module
-(`rust_kernels`, the `__crabbit_kernel_*` entries of `docs/KERNEL-ABI.md`).
+(`rust_kernels`, the cuda-oxide `#[kernel]` entries of `docs/KERNEL-ABI.md`,
+written against the `cuda_device` API, which the importer intercepts into
+`nvvm` dialect ops).
 The dialect is cuda-oxide's `dialect-mir`, consumed unpatched from NVIDIA's
 upstream repository; its verifier is the contract the importer meets, and
 `mir-lower` checks the whole module against it before lowering anything
@@ -144,7 +146,7 @@ Kernel functions take the same mid-end (with
 `TargetProfile::gpu_kernel()`), then `pliron-ll/src/nvptx/mod.rs`
 translates llvm-dialect functions **directly to PTX text** — no NVVM, no
 LLVM; ptxas does register allocation downstream. Integers, f32/f64,
-`.shared` memory (via `#[link_section = ".shared"]` statics), barriers,
+`.shared` memory (`SharedArray` statics), barriers,
 atomics, and the NVVM math/sreg intrinsics are covered; unsupported
 constructs error by name. `CRABBIT_LL_OUT` additionally exports the same
 module as textual LLVM IR (`crates/crabbit/src/kernel_llvm_export.rs`) so

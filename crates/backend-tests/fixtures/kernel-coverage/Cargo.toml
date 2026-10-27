@@ -10,7 +10,8 @@ crate-type = ["lib"]
 [dependencies]
 # Vendored so the repo is self-contained (CI/fresh clones have no
 # kernel-corpus sibling); must stay link_name-identical to the corpus copy.
-crabbit-device = { path = "../vendor/crabbit-device" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81", default-features = false }
+cuda-macros = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81", default-features = false }
 
 [profile.dev]
 overflow-checks = false

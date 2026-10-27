@@ -79,7 +79,7 @@ intrinsic map normalizes callee names (dots→underscores, strips llvm_/int_
 prefixes) and covers the sreg family + barrier0 — extend it as corpus kernels
 demand (shared memory, more barriers, math intrinsics), erroring precisely on
 what's unsupported. How `#[kernel]` functions reach the importer: kernels are
-detected by symbol prefix `__crabbit_kernel_` (see KERNEL_EXPORT_PREFIX in
+detected by cuda-oxide's `#[kernel]` symbol prefix (superseded 2026-10-27: see docs/KERNEL-ABI.md; was `__crabbit_kernel_`,
 importer/) — check how cuda-oxide's `#[kernel]` macro + cuda-device
 intrinsics surface in MIR and make the corpus kernels use whatever attribute/
 prefix actually round-trips; if cuda-oxide's macros don't fit crabbit's current

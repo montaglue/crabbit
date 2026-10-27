@@ -247,6 +247,11 @@ fn normalize_call(ctx: &mut Context, signatures: &BTreeMap<String, Signature>, o
         }
         return;
     }
+    // dialect-mir's own intrinsic placeholders have a closed schema and must
+    // not claim a foreign signature.
+    if callee.starts_with(crate::dialects::dialect_mir::rust_intrinsics::PLACEHOLDER_PREFIX) {
+        return;
+    }
     // A foreign symbol (an `llvm.func` declaration, or defined elsewhere):
     // the call carries its signature.
     let arg_tys: Vec<TypeHandle> = (0..op.deref(ctx).get_num_operands())

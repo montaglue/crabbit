@@ -10,6 +10,30 @@ pub(super) fn declare_static_global<'tcx>(
     if symbol_exists(ctx, module_body, symbol.as_ref()) {
         return Ok(());
     }
+    // A cuda-device `SharedArray<T, N, ALIGN>` static is a zero-sized marker
+    // whose storage the compiler provides: a `.shared` global of N elements
+    // of T (docs/KERNEL-ABI.md), zero bytes, since shared memory cannot be
+    // statically initialized.
+    let static_ty = normalize_ty(tcx, tcx.type_of(def_id).instantiate_identity().skip_normalization());
+    if let Some((bytes, align)) = shared_array_storage(tcx, static_ty)? {
+        let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+        let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, bytes).into();
+        let global = llvm::ops::GlobalOp::new(ctx, symbol.clone(), global_ty);
+        global.set_attr_llvm_global_linkage(ctx, LinkageAttr::InternalLinkage);
+        pliron_ll::ll::set_global_data(
+            ctx,
+            &global,
+            pliron_ll::ll::DataAttr {
+                bytes: vec![0; bytes as usize],
+                align,
+                mutable: true,
+                relocs: Vec::new(),
+            },
+        );
+        pliron_ll::ll::set_global_section(ctx, &global, SHARED_SECTION);
+        global.get_operation().insert_at_back(module_body, ctx);
+        return Ok(());
+    }
     // A local static is defined here from its evaluated initializer; a foreign
     // one is only declared (a `llvm.global` with no initializer), so its
     // address resolves through an undefined symbol-table entry at link time.
