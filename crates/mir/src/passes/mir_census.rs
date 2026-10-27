@@ -101,7 +101,7 @@ pub struct Counts {
     /// Verifier failures, `"<op id>: <reason>"` → count: each op verified
     /// on its own (pliron's full per-op check, which includes dialect-mir's
     /// rules), the reason with its type-specific tail cut off
-    /// ([verifier_reason]). `mir-lower` stops at the first failure; this is
+    /// (`verifier_reason`). `mir-lower` stops at the first failure; this is
     /// the whole distance to its typing contract.
     pub verifier_failures: BTreeMap<String, usize>,
 }
