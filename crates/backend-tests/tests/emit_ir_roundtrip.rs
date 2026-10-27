@@ -223,7 +223,7 @@ fn compile_with_emit(
     manifest: &Path,
     target_dir: &Path,
     emit_dir: &Path,
-    lib: bool,
+    target: &[&str],
 ) {
     let _ = fs::remove_dir_all(emit_dir);
     fs::create_dir_all(emit_dir).expect("emit dir");
@@ -231,9 +231,7 @@ fn compile_with_emit(
     let _ = fs::remove_dir_all(target_dir);
     let mut cmd = Command::new(cargo);
     cmd.arg("rustc").arg("--manifest-path").arg(manifest);
-    if lib {
-        cmd.arg("--lib");
-    }
+    cmd.args(target);
     cmd.arg("--")
         .arg(format!("-Zcodegen-backend={}", backend.display()))
         .arg("-Coverflow-checks=off")
@@ -260,15 +258,19 @@ fn emitted_ir_round_trips_for_every_fixture() {
             continue;
         }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        if name == "backend-smoke" || name == "llama-rms-norm" {
-            // The #[ignore]d AMDGPU-path fixtures; they do not compile on
-            // the aarch64 backend path.
-            continue;
-        }
-        let lib = name == "kernel-vector-add";
+        // Packages with more than one target need the target named.
+        // Packages with more than one target need the target named; the
+        // mixed host+kernel binaries build in release like every kernel
+        // (debug keeps `Option` aggregates the NVPTX translator cannot lower).
+        let target: &[&str] = match name.as_str() {
+            "kernel-vector-add" => &["--lib"],
+            "backend-smoke" => &["--bin", "crabbit-backend-smoke", "--release"],
+            "llama-rms-norm" => &["--release"],
+            _ => &[],
+        };
         let emit_dir = scratch.join("ir").join(&name);
         let target_dir = scratch.join("target").join(&name);
-        compile_with_emit(&cargo, &backend, &manifest, &target_dir, &emit_dir, lib);
+        compile_with_emit(&cargo, &backend, &manifest, &target_dir, &emit_dir, target);
         for failure in roundtrip_dir(&emit_dir) {
             all_failures.push(format!("[{name}] {failure}"));
         }

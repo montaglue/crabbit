@@ -55,6 +55,11 @@ pub fn vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) {
   `-Coverflow-checks=off` (`overflow-checks = false` in the profile) and
   `panic = "abort"`.
 - Host code must not call a kernel directly (crabbit errors on that).
+- Build kernels in release. cuda-device's checked accessors
+  (`DisjointSlice::get_mut`, `ThreadIndex`) return `Option`s whose
+  aggregate values survive in debug code; the NVPTX translator lowers
+  scalars, pointers and by-value struct parameters, not aggregate SSA
+  values, and the optimizer scalarizes them in release.
 
 ## The device API the importer understands
 

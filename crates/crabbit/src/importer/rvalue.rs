@@ -132,6 +132,15 @@ pub(super) fn import_rvalue<'tcx>(
             }
             let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
             let result_type = convert_immediate_ty(tcx, ctx, mono_ty(tcx, state, *ty))?;
+            // A fat pointer cast to a thin one (`*const [T] as *const T`,
+            // `<[T]>::as_ptr`) keeps the data word and drops the metadata.
+            if fat_pointer_leaf_types(ctx, input).is_some()
+                && result_type.deref(ctx).is::<crate::dialects::dialect_mir::types::MirPtrType>()
+            {
+                let data = mir_dialect::ops::ExtractValueOp::new(ctx, input, vec![0], result_type);
+                data.get_operation().insert_at_back(insert_block, ctx);
+                return Ok(cast_value_to_type(ctx, insert_block, data.get_result(ctx), result_type));
+            }
             let cast = mir_dialect::ops::CastOp::new(ctx, input, result_type);
             cast.get_operation().insert_at_back(insert_block, ctx);
             Ok(cast.get_result(ctx))
@@ -893,14 +902,19 @@ fn fat_pointer_leaf_types(ctx: &Context, value: Value) -> Option<(TypeHandle, Ty
     let [data, meta] = fields.as_slice() else {
         return None;
     };
-    let is_word = |field: TypeHandle| {
+    let is_pointer = |field: TypeHandle| {
         let field_ref = field.deref(ctx);
         field_ref.is::<llvm::types::PointerType>()
-            || field_ref
+            || field_ref.is::<crate::dialects::dialect_mir::types::MirPtrType>()
+    };
+    let is_word = |field: TypeHandle| {
+        is_pointer(field)
+            || field
+                .deref(ctx)
                 .downcast_ref::<IntegerType>()
                 .is_some_and(|int| int.width() == 64)
     };
-    (data.deref(ctx).is::<llvm::types::PointerType>() && is_word(*meta)).then_some((*data, *meta))
+    (is_pointer(*data) && is_word(*meta)).then_some((*data, *meta))
 }
 
 /// Compare two fat pointers the way rustc_codegen_ssa's `codegen_fat_ptr_binop`

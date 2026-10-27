@@ -5,7 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-crabbit-device = { path = "../../../crates/crabbit-device" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81", default-features = false }
+cuda-macros = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81", default-features = false }
 
 [[bin]]
 name = "crabbit-llama-rms-norm"

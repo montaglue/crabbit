@@ -712,12 +712,19 @@ fn sudoku_solver_crate_solves_puzzles_from_arguments_with_codegen_dylib() {
     }
 }
 
-#[test]
-#[ignore = "AMDGPU kernel path is not supported by the AArch64 Darwin crabbit object backend yet"]
-fn backend_smoke_crate_compiles_with_codegen_dylib() {
+/// Compile a mixed fixture (a host binary whose crate also holds cuda-oxide
+/// `#[kernel]` functions) with the crabbit dylib: the host executable
+/// builds, links and runs; the kernels land in the PTX sidecar
+/// (`CRABBIT_PTX_OUT`) and not in the host object.
+fn mixed_kernel_binary_fixture(
+    fixture: &str,
+    bin: &str,
+    target_dir_name: &str,
+    expected_ptx: &[&str],
+    kernel_symbol: &str,
+) -> (String, String) {
     let root = repo_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-
     let backend_status = Command::new(&cargo)
         .args(["build", "--manifest-path"])
         .arg(root.join("Cargo.toml"))
@@ -725,232 +732,114 @@ fn backend_smoke_crate_compiles_with_codegen_dylib() {
         .status()
         .expect("failed to build crabbit backend dylib");
     assert!(backend_status.success(), "crabbit backend build failed");
-
     let backend = backend_path(&root);
-    assert!(
-        backend.exists(),
-        "expected backend dylib at {}",
-        backend.display()
-    );
+    assert!(backend.exists(), "expected backend dylib at {}", backend.display());
 
-    let fixture = fixture_manifest(&root, "backend-smoke");
-    let target_dir = root.join("target").join("crabbit-backend-tests-smoke");
+    let manifest = fixture_manifest(&root, fixture);
+    let target_dir = root.join("target").join(target_dir_name);
     if target_dir.exists() {
-        fs::remove_dir_all(&target_dir).expect("failed to clear backend smoke target directory");
+        fs::remove_dir_all(&target_dir).expect("failed to clear the fixture target directory");
     }
-
-    let fixture_status = Command::new(&cargo)
+    let ptx_out = target_dir.join("kernels.ptx");
+    // Release, like every kernel build: cuda-device's checked accessors
+    // (`DisjointSlice::get_mut`, `ThreadIndex`) leave `Option` aggregates
+    // in debug code that the NVPTX translator does not lower; the
+    // optimizer scalarizes them (docs/KERNEL-ABI.md).
+    let mut command = Command::new(&cargo);
+    command
         .arg("rustc")
         .arg("--manifest-path")
-        .arg(fixture)
+        .arg(&manifest)
         .arg("--bin")
-        .arg("crabbit-backend-smoke")
+        .arg(bin)
+        .arg("--release")
         .arg("--")
-        .arg("--emit=obj")
         .arg(format!("-Zcodegen-backend={}", backend.display()))
         .arg("-Coverflow-checks=off")
         .env("CARGO_TARGET_DIR", &target_dir)
-        .status()
-        .expect("failed to compile backend smoke fixture");
+        .env("CRABBIT_PTX_OUT", &ptx_out);
+    if !cfg!(target_os = "macos") {
+        // Keep the intermediate objects for the symbol assertions.
+        command.arg("-Csave-temps");
+    }
+    let fixture_status = command.status().expect("failed to compile the fixture");
+    assert!(fixture_status.success(), "{fixture} did not compile with the crabbit dylib");
 
-    assert!(
-        fixture_status.success(),
-        "backend smoke fixture did not compile with crabbit dylib"
-    );
-
-    let objects = object_files(&target_dir);
-    assert!(
-        !objects.is_empty(),
-        "backend smoke fixture did not produce a non-empty object file under {}",
-        target_dir.display()
-    );
-
-    let executable = target_dir.join("debug").join(format!(
-        "crabbit-backend-smoke{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    assert!(
-        executable.exists(),
-        "backend smoke fixture did not produce executable {}",
-        executable.display()
-    );
-    let crabbit_dump = executable.with_extension("crabbit");
-    assert!(
-        crabbit_dump.exists(),
-        "backend smoke fixture did not produce kernel dump {}",
-        crabbit_dump.display()
-    );
-    let crabbit_text = fs::read_to_string(&crabbit_dump).expect("failed to read kernel dump");
-    assert!(
-        crabbit_text.contains("amdgpu.kernel"),
-        "expected amdgpu.kernel in kernel dump, got:\n{crabbit_text}"
-    );
-    assert!(
-        crabbit_text.contains("gfx906"),
-        "expected MI50 gfx906 metadata in kernel dump, got:\n{crabbit_text}"
-    );
-    assert!(
-        crabbit_text.contains("add_kernel"),
-        "expected kernel symbol in kernel dump, got:\n{crabbit_text}"
-    );
-    assert!(
-        crabbit_text.contains("slice_kernel"),
-        "expected safe slice kernel symbol in kernel dump, got:\n{crabbit_text}"
-    );
-
+    let executable = target_dir
+        .join("release")
+        .join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
+    assert!(executable.exists(), "{fixture} did not produce executable {}", executable.display());
     let run_output = Command::new(&executable)
         .output()
-        .expect("failed to run backend smoke executable");
-    assert!(
-        run_output.status.success(),
-        "backend smoke executable exited unsuccessfully"
-    );
-    let stdout = String::from_utf8_lossy(&run_output.stdout);
+        .expect("failed to run the fixture executable");
+    assert!(run_output.status.success(), "{fixture} executable exited unsuccessfully");
+    let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     assert!(
         stdout.contains("hello from crabbit"),
-        "expected println output from backend smoke executable, got:\n{stdout}"
+        "expected println output from the {fixture} executable, got:\n{stdout}"
     );
 
+    let ptx = fs::read_to_string(&ptx_out).expect("CRABBIT_PTX_OUT was not written");
+    for expected in expected_ptx {
+        assert!(ptx.contains(expected), "expected `{expected}` in the PTX of {fixture}:\n{ptx}");
+    }
+
+    let objects = object_files(&target_dir);
+    assert!(!objects.is_empty(), "{fixture} left no object file under {}", target_dir.display());
     if let Ok(output) = Command::new("nm").args(&objects).output()
         && output.status.success()
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let symbols = String::from_utf8_lossy(&output.stdout);
+        assert!(symbols.contains("main"), "expected main symbol in the host object, got:\n{symbols}");
+        // The kernel is never *defined* on the host. (rustc's own
+        // `symbols.o` lists every exported symbol of the crate as an
+        // undefined reference, the renamed `#[kernel]` included.)
+        let defined_kernel = symbols.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            let (Some(_addr), Some(kind), Some(name)) = (fields.next(), fields.next(), fields.next())
+            else {
+                return false;
+            };
+            matches!(kind, "T" | "t" | "W" | "w") && name.contains(kernel_symbol)
+        });
         assert!(
-            stdout.contains("main"),
-            "expected main symbol, got:\n{stdout}"
-        );
-        assert!(
-            !stdout.contains("add_kernel"),
-            "kernel symbol should be omitted from host object, got:\n{stdout}"
+            !defined_kernel,
+            "kernel `{kernel_symbol}` should not be defined in the host object, got:\n{symbols}"
         );
     }
+    (stdout, ptx)
 }
 
 #[test]
-#[ignore = "AMDGPU kernel path is not supported by the AArch64 Darwin crabbit object backend yet"]
+fn backend_smoke_crate_compiles_with_codegen_dylib() {
+    let (stdout, _ptx) = mixed_kernel_binary_fixture(
+        "backend-smoke",
+        "crabbit-backend-smoke",
+        "crabbit-backend-tests-smoke",
+        &[
+            ".visible .entry add_kernel(",
+            ".visible .entry slice_kernel(",
+            "add.s64",
+            "%tid.x",
+        ],
+        "add_kernel",
+    );
+    assert!(stdout.contains("hello from crabbit: 42"), "{stdout}");
+}
+
+#[test]
 fn llama_rms_norm_crate_compiles_with_codegen_dylib() {
-    let root = repo_root();
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-
-    let backend_status = Command::new(&cargo)
-        .args(["build", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .args(["-p", "crabbit"])
-        .status()
-        .expect("failed to build crabbit backend dylib");
-    assert!(backend_status.success(), "crabbit backend build failed");
-
-    let backend = backend_path(&root);
-    assert!(
-        backend.exists(),
-        "expected backend dylib at {}",
-        backend.display()
+    mixed_kernel_binary_fixture(
+        "llama-rms-norm",
+        "crabbit-llama-rms-norm",
+        "crabbit-backend-tests-llama-rms-norm",
+        &[
+            ".visible .entry llama_rms_norm_f32(",
+            "rsqrt.approx.f32",
+            "bar.sync 0;",
+            ".shared .align 4 .b8 ",
+            "%ctaid.x",
+        ],
+        "llama_rms_norm_f32",
     );
-
-    let fixture = fixture_manifest(&root, "llama-rms-norm");
-    let target_dir = root
-        .join("target")
-        .join("crabbit-backend-tests-llama-rms-norm");
-    if target_dir.exists() {
-        fs::remove_dir_all(&target_dir).expect("failed to clear RMSNorm target directory");
-    }
-
-    let fixture_status = Command::new(&cargo)
-        .arg("rustc")
-        .arg("--manifest-path")
-        .arg(fixture)
-        .arg("--bin")
-        .arg("crabbit-llama-rms-norm")
-        .arg("--")
-        .arg("--emit=obj")
-        .arg(format!("-Zcodegen-backend={}", backend.display()))
-        .arg("-Coverflow-checks=off")
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .status()
-        .expect("failed to compile RMSNorm fixture");
-
-    assert!(
-        fixture_status.success(),
-        "RMSNorm fixture did not compile with crabbit dylib"
-    );
-
-    let objects = object_files(&target_dir);
-    assert!(
-        !objects.is_empty(),
-        "RMSNorm fixture did not produce a non-empty object file under {}",
-        target_dir.display()
-    );
-
-    let executable = target_dir.join("debug").join(format!(
-        "crabbit-llama-rms-norm{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    assert!(
-        executable.exists(),
-        "RMSNorm fixture did not produce executable {}",
-        executable.display()
-    );
-
-    let dumps = crabbit_files(&target_dir);
-    assert!(
-        !dumps.is_empty(),
-        "RMSNorm fixture did not produce a .crabbit kernel dump under {}",
-        target_dir.display()
-    );
-    let stable_dump = executable.with_extension("crabbit");
-    assert!(
-        stable_dump.exists(),
-        "RMSNorm fixture did not produce stable kernel dump {}",
-        stable_dump.display()
-    );
-    let crabbit_text = dumps
-        .iter()
-        .map(|dump| fs::read_to_string(dump).expect("failed to read RMSNorm kernel dump"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    for expected in [
-        "amdgpu.kernel @llama_rms_norm_f32",
-        "gfx906",
-        "block_id_x",
-        "thread_id_x",
-        "block_dim_x",
-        "reduce_sum_f32",
-        "rsqrt_f32",
-        "amdgpu.cast",
-        "amdgpu.load",
-        "amdgpu.store",
-    ] {
-        assert!(
-            crabbit_text.contains(expected),
-            "expected `{expected}` in RMSNorm kernel dump, got:\n{crabbit_text}"
-        );
-    }
-
-    let run_output = Command::new(&executable)
-        .output()
-        .expect("failed to run RMSNorm executable");
-    assert!(
-        run_output.status.success(),
-        "RMSNorm executable exited unsuccessfully"
-    );
-    let stdout = String::from_utf8_lossy(&run_output.stdout);
-    assert!(
-        stdout.contains("hello from crabbit"),
-        "expected println output from RMSNorm executable, got:\n{stdout}"
-    );
-
-    if let Ok(output) = Command::new("nm").args(&objects).output()
-        && output.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("main"),
-            "expected main symbol in RMSNorm object, got:\n{stdout}"
-        );
-        assert!(
-            !stdout.contains("llama_rms_norm_f32"),
-            "kernel symbol should be omitted from RMSNorm host object, got:\n{stdout}"
-        );
-    }
 }

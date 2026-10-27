@@ -1684,8 +1684,13 @@ impl<'c> FuncEmitter<'c> {
         if let Some(constant) = self.consts.get(&value).copied() {
             return Ok(self.materialize_const(constant.class, constant.imm));
         }
+        let defined_by = match value.defining_op() {
+            Some(op) => format!(" (defined by `{}`)", op.disp(self.ctx).to_string().trim()),
+            None => " (a block argument)".to_string(),
+        };
         Err(input_error_noloc!(NvptxErr::UndefinedValue(format!(
-            "{value:?}"
+            "{}{defined_by}",
+            value.disp(self.ctx)
         ))))
     }
 
