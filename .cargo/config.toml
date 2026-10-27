@@ -1,0 +1,7 @@
+# Environment for every build under this directory (the workspace, the
+# backend-tests fixtures compiled with `-Zcodegen-backend`, the inspect
+# driver).
+[env]
+# Unlock `-Z` flags and `#![feature(rustc_private)]` on the pinned stable
+# release (`rust-toolchain.toml`), the same way cuda-oxide does.
+RUSTC_BOOTSTRAP = "1"

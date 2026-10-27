@@ -16,11 +16,15 @@ pliron-inspect-driver.workspace = true
 pliron-ll.workspace = true
 dialect-mir.workspace = true
 mir-lower.workspace = true
+llvm-export.workspace = true
 combine.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
 awint.workspace = true
 log.workspace = true
+rustc-demangle.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

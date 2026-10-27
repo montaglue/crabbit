@@ -5,7 +5,7 @@
 [![coverage](https://codecov.io/gh/montaglue/crabbit/graph/badge.svg)](https://codecov.io/gh/montaglue/crabbit)
 [![dependencies](https://deps.rs/repo/github/montaglue/crabbit/status.svg)](https://deps.rs/repo/github/montaglue/crabbit)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![rustc](https://img.shields.io/badge/rustc-nightly--2026--04--03-orange.svg)](rust-toolchain.toml)
+[![rustc](https://img.shields.io/badge/rustc-1.99.1-orange.svg)](rust-toolchain.toml)
 [![last commit](https://img.shields.io/github/last-commit/montaglue/crabbit)](https://github.com/montaglue/crabbit/commits/main)
 
 **An LLVM-free Rust compiler backend — pure Rust from MIR to machine code —
@@ -21,12 +21,19 @@ linear-scan register allocation, encoding — down to native **aarch64 ELF**
 (and Mach-O) objects. **No LLVM anywhere in the binary path.**
 
 ```text
-   MIR ──► mir dialect ──► llvm dialect ──► aarch64 dialect ──► ELF/Mach-O
-                │  gvn · licm · div-magic · unroll │
-                │  dse · adce · sink · vectorize   └──► (registers incl. NEON,
-                │                                        frames, encodings: all ours)
-                └────────► native NVPTX ──► PTX ──► runs on real GPUs
+   host: MIR ──► mir dialect (our importer) ──► llvm dialect ──► aarch64 dialect ──► ELF/Mach-O
+                                 │  gvn · licm · div-magic · unroll │
+                                 │  dse · adce · sink · vectorize   └──► (registers incl. NEON,
+                                 │                                        frames, encodings: all ours)
+ device: MIR ──► mir dialect (cuda-oxide's translator + transforms, mir-lower)
+                                 └────────► native NVPTX ──► PTX ──► runs on real GPUs
 ```
+
+Kernels are written in [cuda-oxide](https://github.com/NVlabs/cuda-oxide)'s
+own device conventions (`#[kernel]`, `cuda_device::{thread, SharedArray,
+warp, atomic}`); NVIDIA's `mir-importer` translates them and `mir-lower`
+takes them to the LLVM dialect (input verification on), then crabbit's
+mid-end and NVPTX translator finish the job — `docs/KERNEL-ABI.md`.
 
 ![A compiled function's control-flow graph in pliron-inspect's CFG view:
 per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
@@ -141,8 +148,11 @@ the server command and the data path above are live today.)
 
 ## Prerequisites
 
-- Rust **nightly-2026-04-03** with `rustc-dev` + `rust-src` (installed
-  automatically via `rust-toolchain.toml`).
+- Rust **1.99.1** (the stable release cuda-oxide pins) with `rustc-dev` +
+  `rust-src`, installed automatically via `rust-toolchain.toml`;
+  `.cargo/config.toml` sets `RUSTC_BOOTSTRAP=1` so `#![feature(rustc_private)]`
+  and `-Zcodegen-backend` work on the stable release, exactly as upstream
+  cuda-oxide builds.
 - A C++ toolchain for the CFG-layout bindings the inspect driver links
   (`triskel`): g++ ≥ 13 (C++23), libffi-dev, and **fmt ≥ 10** — distro
   packages are often v9; build fmt 11 into /usr/local (the CI workflow
@@ -162,15 +172,22 @@ the server command and the data path above are live today.)
 ## Quickstart
 
 **Toolchain**: pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
-(nightly + `rustc-dev`); rustup picks it up automatically.
+(stable 1.99.1 + `rustc-dev`, with `RUSTC_BOOTSTRAP=1` from
+`.cargo/config.toml`); rustup picks it up automatically.
 
 > **Dependencies:** everything a plain `cargo build` needs resolves from
-> crates.io and pinned public git revisions (our
-> [cuda-oxide fork](https://github.com/montaglue/cuda-oxide)'s
-> `crabbit-patches` branch and
-> [pliron-inspect](https://github.com/montaglue/pliron-inspect)) — no
-> sibling checkouts. The research *engines* are private and live outside
-> this workspace entirely: see **Research build** below.
+> crates.io and pinned public git revisions — no sibling checkouts. The
+> `mir` dialect, its verifier and the `mir` → LLVM-dialect lowering are
+> NVIDIA's [cuda-oxide](https://github.com/NVlabs/cuda-oxide) crates
+> (`dialect-mir`, `mir-lower`, `llvm-export`), consumed unpatched from the
+> upstream repository at one pinned revision; crabbit's own front end
+> (`crates/crabbit/src/importer/`) produces the dialect and must satisfy
+> its verifier, which `mir-lower` runs before lowering anything (see
+> `docs/MIR-DIALECT.md`). The analysis tooling comes from
+> [pliron-inspect](https://github.com/montaglue/pliron-inspect). The
+> research *engines* are private and live outside this workspace entirely:
+> see **Research build** below.
+>
 
 ### Mode 1 — codegen backend
 
@@ -210,9 +227,18 @@ curl -d '{"cmd":"run_artifact","runId":1}' 127.0.0.1:8177    # the ELF object
 Full command set: `server_health`, `list_targets`, `load_module`,
 `start_run`, `run_status`, `cancel_run`, `run_ir`, `run_artifact`,
 `run_costs` (profile lifting), and the language queries `ir_hover`,
-`ir_definition`, `ir_references`, `ir_diagnostics`. The browser UI lives in
-[`pliron-inspect`](https://github.com/montaglue/pliron-inspect)
-(`pliron-inspect --server 127.0.0.1:8177`).
+`ir_definition`, `ir_references`, `ir_diagnostics`.
+
+The browser UI, [`pliron-inspect`](https://github.com/montaglue/pliron-inspect),
+opens this workspace as a project: start `pliron-inspect`, open
+`/analysis`, enter this directory as the project root. It builds and runs
+`crabbit-analysisd` and `crabbit-inspect-driver` from here (named in
+`[workspace.metadata.pliron-inspect]`), lists the traces and emitted
+modules under `.crabbit-traces/` (`CRABBIT_TRACE=1` and `CRABBIT_EMIT_IR=1`
+write there), and gets hover, definition into the dialects' Rust source,
+references and diagnostics from a pliron-lsp engine built from this
+workspace's dialect crates. `pliron-inspect --server 127.0.0.1:8177`
+still works against a hand-started analysisd.
 
 ## Research knobs
 
@@ -226,8 +252,11 @@ no rebuild (`crates/pliron-ll/src/codegen_opts.rs`,
 | `CRABBIT_REGALLOC_ORACLE` | `c0`, `c2` | syntactic vs. saturated-e-graph restore oracle |
 | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `spectral-loop`, `profile`, `cmt-provider` | spill-weight frequencies: none / analytic Perron–Frobenius (optionally with the loop-aware 7/8 branch prior) / **measured perf profile** |
 | `CRABBIT_MIDEND_DISABLE` | `gvn,licm,divmagic,dse,adce,sink` | ablate individual mid-end passes |
+| `CRABBIT_MIR_CENSUS` | path | append a per-module JSON census of the imported `mir` dialect (op kinds, callee families, allocas, aggregates, loops) to that file, before lowering (`docs/MIR-CENSUS.md`) |
+| `CRABBIT_MIR_DISABLE` | `census` | skip individual `mir`-level passes (the stage between import and `lower-dialect-mir`) |
 | `CRABBIT_PROFILE`, `CRABBIT_MEASURED_COSTS` | paths | measured frequencies / per-decision costs (see backward PGO) |
-| `CRABBIT_EMIT_IR`, `CRABBIT_PTX_OUT`, `CRABBIT_LL_OUT` | paths | printed IR / PTX / textual LLVM IR side outputs |
+| `CRABBIT_EMIT_IR`, `CRABBIT_PTX_OUT`, `CRABBIT_LL_OUT` | paths | printed IR / PTX / textual LLVM IR side outputs (`CRABBIT_EMIT_IR=1`: under the project's `.crabbit-traces/ir/`) |
+| `CRABBIT_TRACE`, `CRABBIT_TRACE_DIR` | `1`, path | per-pass IR traces (`.crt`), by default under the compiled project's `.crabbit-traces/` |
 | `CRABBIT_BLOCKMAP`, `CRABBIT_PTX_LINEMAP` | `1` | provenance sidecars for profile attribution |
 
 `scripts/perf-harness/` runs the full config matrix over the fixtures, the

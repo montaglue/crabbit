@@ -10,11 +10,11 @@ use crate::{
     identifier::Identifier,
     input_err,
     ir::{
-        location::{Located, Location},
+        location::Location,
         op::{Op, OpObj},
         operation::Operation,
     },
-    parsable::{Parsable, ParseResult, StateStream},
+    parsable::{Parsable, ParseResult, StateStream, StreamLocation},
     printable::{self, Printable},
 };
 

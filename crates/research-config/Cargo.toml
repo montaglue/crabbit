@@ -14,7 +14,7 @@ serde_json.workspace = true
 
 [features]
 # Engine availability is a link-time property (see the crate docs and
-# crates/crabbit-research): the private research repositories cannot be
+# crates/crabbit-research): the private sibling repository crabbit-engines cannot be
 # referenced from this public workspace, even optionally — cargo resolves
 # optional dependencies into the lockfile regardless of features. These
 # feature names remain declared, default-off and empty, only so existing

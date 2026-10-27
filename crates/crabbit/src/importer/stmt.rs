@@ -86,7 +86,7 @@ pub(super) fn import_statement<'tcx>(
             let byte_count = scale_index(ctx, insert_block, count, elem_size)?;
 
             let memcpy: crate::identifier::Identifier = "memcpy".try_into().expect("static identifier literal");
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
                 ctx,
@@ -293,7 +293,7 @@ pub(super) fn import_terminator<'tcx>(
             // argument untupled (matching `spread_arg` on the body).
             let untuple_last = callee_value.is_none()
                 && call_fn_def(tcx, state, body, func).is_some_and(|(def_id, _)| {
-                    tcx.fn_sig(def_id).skip_binder().skip_binder().abi
+                    tcx.fn_sig(def_id).skip_binder().skip_binder().abi()
                         == rustc_abi::ExternAbi::RustCall
                 });
 
@@ -368,7 +368,7 @@ pub(super) fn import_terminator<'tcx>(
                 let fn_slot =
                     mir_dialect::ops::PtrOffsetOp::new(ctx, vtable, offset.get_result(ctx));
                 fn_slot.get_operation().insert_at_back(insert_block, ctx);
-                let ptr_ty = llvm_ptr_ty(ctx);
+                let ptr_ty = ptr_ty(ctx);
                 let fn_ptr = mir_dialect::ops::LoadOp::new(ctx, fn_slot.get_result(ctx), ptr_ty);
                 fn_ptr.get_operation().insert_at_back(insert_block, ctx);
                 mir_dialect::ops::CallOp::new_indirect(
@@ -383,6 +383,7 @@ pub(super) fn import_terminator<'tcx>(
                 let callee = call_callee(tcx, state, body, func)?;
                 let external_call = is_upstream_call(tcx, state, body, func);
                 let imported = if let Some(instance) = call_instance(tcx, state, body, func)
+                    .map(|instance| with_intrinsic_fallback(tcx, instance))
                     && should_import_instance(tcx, instance)
                 {
                     import_upstream_instance(tcx, ctx, state.module_body, instance).map_err(
@@ -488,7 +489,7 @@ pub(super) fn import_terminator<'tcx>(
                 |_| rustc_middle::ty::TypingEnv::fully_monomorphized(),
             );
             if ty.needs_drop(tcx, typing_env) {
-                let drop_instance = Instance::resolve_drop_in_place(tcx, ty);
+                let drop_instance = Instance::resolve_drop_glue(tcx, ty);
                 let mut legaliser = Legaliser::default();
                 let symbol = legaliser.legalise(tcx.symbol_name(drop_instance).name);
                 import_upstream_instance(tcx, ctx, state.module_body, drop_instance)
@@ -531,7 +532,9 @@ pub(super) fn call_fn_def<'tcx>(
     let rustc_middle::ty::TyKind::FnDef(def_id, args) = runtime_ty(func_ty).kind() else {
         return None;
     };
-    Some((*def_id, args))
+    // `FnDef` generic args are bound since 1.99 (late-bound regions of the
+    // fn item); codegen erases them.
+    Some((*def_id, tcx.instantiate_bound_regions_with_erased(*args)))
 }
 
 pub(super) fn call_instance<'tcx>(
@@ -556,7 +559,7 @@ pub(super) fn mono_generic_args<'tcx>(
         instance.instantiate_mir_and_normalize_erasing_regions(
             tcx,
             rustc_middle::ty::TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(args),
+            EarlyBinder::bind(tcx, args),
         )
     })
 }
@@ -688,15 +691,17 @@ pub(super) fn should_import_instance<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance
                 || matches!(tcx.def_kind(def_id), rustc_hir::def::DefKind::Ctor(_, _))
         }
         // Shim MIR is synthesized on demand by `tcx.instance_mir`.
-        InstanceKind::DropGlue(_, Some(_))
-        | InstanceKind::ClosureOnceShim { .. }
-        | InstanceKind::CloneShim(_, _)
-        | InstanceKind::FnPtrShim(_, _)
-        // Vtable and reify shims (receiver/ABI adapters referenced from
-        // vtables and fn-pointer casts) exist in no upstream object; their
-        // MIR is synthesized like the other shims.
-        | InstanceKind::VTableShim(_)
-        | InstanceKind::ReifyShim(_, _) => true,
+        InstanceKind::Shim(
+            ShimKind::DropGlue(_, Some(_))
+            | ShimKind::ClosureOnce { .. }
+            | ShimKind::Clone(_, _)
+            | ShimKind::FnPtr(_, _)
+            // Vtable and reify shims (receiver/ABI adapters referenced from
+            // vtables and fn-pointer casts) exist in no upstream object; their
+            // MIR is synthesized like the other shims.
+            | ShimKind::VTable(_)
+            | ShimKind::Reify(_, _),
+        ) => true,
         _ => false,
     }
 }

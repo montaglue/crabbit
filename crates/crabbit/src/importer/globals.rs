@@ -313,11 +313,11 @@ pub(super) fn llvm_decl_type(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
         return match name {
             Some(name) => {
                 let name = format!("{name}__llvm").try_into().expect("suffixing an existing legal identifier keeps it legal");
-                llvm::types::StructType::get_named(ctx, name, fields)
+                llvm::types::StructType::get_named(ctx, name, fields.map(|fields| (fields, llvm::types::StructLayout::Unpacked)))
                     .expect("the __llvm mirror name maps 1:1 to this field set")
                     .into()
             }
-            None => llvm::types::StructType::get_unnamed(ctx, fields.unwrap_or_default()).into(),
+            None => llvm::types::StructType::get_unnamed(ctx, (fields.unwrap_or_default(), llvm::types::StructLayout::Unpacked)).into(),
         };
     }
     ty
@@ -394,12 +394,9 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         Some(ptr_ty),
     );
 
-    let no_alloc = new_llvm_func_def(
-        ctx,
-        allocator_symbol(tcx, "__rust_no_alloc_shim_is_unstable_v2"),
-        no_alloc_ty,
-        LinkageAttr::ExternalLinkage,
-    );
+    let no_alloc_symbol = allocator_symbol(tcx, "__rust_no_alloc_shim_is_unstable_v2");
+    erase_llvm_declaration(ctx, module_body, &no_alloc_symbol);
+    let no_alloc = new_llvm_func_def(ctx, no_alloc_symbol, no_alloc_ty, LinkageAttr::ExternalLinkage);
     let ret = llvm::ops::ReturnOp::new(ctx, None);
     let no_alloc_entry = no_alloc
         .get_entry_block(ctx)
@@ -419,6 +416,9 @@ pub(super) fn define_allocator_call<F>(
 ) where
     F: FnOnce(&[Value], Value) -> Vec<Value>,
 {
+    // A call imported earlier may have declared the symbol from its own
+    // signature; the definition is the one declaration the module keeps.
+    erase_llvm_declaration(ctx, module_body, &name);
     let func = new_llvm_func_def(ctx, name, func_ty, LinkageAttr::ExternalLinkage);
     let entry = func
         .get_entry_block(ctx)
@@ -452,6 +452,27 @@ pub(super) fn define_allocator_call<F>(
     let ret = llvm::ops::ReturnOp::new(ctx, ret_value);
     ret.get_operation().insert_at_back(entry, ctx);
     func.get_operation().insert_at_back(module_body, ctx);
+}
+
+/// Remove the bodiless `llvm.func` named `symbol` from the module, if any.
+fn erase_llvm_declaration(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    symbol: &crate::identifier::Identifier,
+) {
+    let declaration = module_body.deref(ctx).iter(ctx).find(|op| {
+        Operation::get_op::<llvm::ops::FuncOp>(*op, ctx).is_some_and(|func| {
+            func.get_symbol_name(ctx) == *symbol
+                && func
+                    .get_operation()
+                    .deref(ctx)
+                    .regions()
+                    .all(|region| region.deref(ctx).iter(ctx).next().is_none())
+        })
+    });
+    if let Some(declaration) = declaration {
+        Operation::erase(declaration, ctx);
+    }
 }
 
 pub(super) fn allocator_symbol<'tcx>(tcx: TyCtxt<'tcx>, name: &str) -> crate::identifier::Identifier {

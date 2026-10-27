@@ -7,9 +7,8 @@ use pliron::derive::pliron_attr;
 use pliron::{
     context::Context,
     irfmt::parsers::{int_parser, spaced},
-    location::Located,
     input_err,
-    parsable::{Parsable, ParseResult, StateStream},
+    parsable::{Parsable, ParseResult, StateStream, StreamLocation},
     printable::{self, Printable},
 };
 

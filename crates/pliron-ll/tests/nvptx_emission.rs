@@ -657,7 +657,7 @@ fn struct_gep_kernel() {
     let node = StructType::get_named(
         &mut ctx,
         "node".try_into().unwrap(),
-        Some(vec![i32t, f32t, i64t]),
+        Some((vec![i32t, f32t, i64t], pliron_llvm::types::StructLayout::Unpacked)),
     )
     .expect("fresh named struct")
     .into();
@@ -713,7 +713,7 @@ fn alloca_local_kernel() {
     let out = entry.deref(&ctx).arguments().next().unwrap();
 
     let four = i64_const(&mut ctx, entry, 4);
-    let slot = AllocaOp::new(&mut ctx, i64t, four);
+    let slot = AllocaOp::new(&mut ctx, i64t, four, 0);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot_ptr = slot.get_result(&ctx);
 
@@ -1400,7 +1400,7 @@ fn struct_param_by_value_kernel() {
     let cfg = StructType::get_named(
         &ctx,
         "cfg".try_into().unwrap(),
-        Some(vec![i32t, f32t, i64t]),
+        Some((vec![i32t, f32t, i64t], pliron_llvm::types::StructLayout::Unpacked)),
     )
     .expect("fresh named struct")
     .into();
@@ -1859,4 +1859,129 @@ fn byte_loads_combine_across_dominated_blocks_only() {
         "window B has no dominating leader and must stay scalar:\n{ptx}"
     );
     ptxas_verify("byte_loads_combine_across_dominated_blocks_only", &ptx);
+}
+
+/// The LLVM-dialect shapes cuda-oxide's `mir-lower` emits for device code
+/// (docs/KERNEL-ABI.md): `llvm.atomicrmw` + `llvm.fence` for atomics,
+/// `llvm.inline_asm` with `$N` operands, `llvm.addrspacecast` around a
+/// shared address, an unsized external `.shared` global (dynamic shared
+/// memory), the `barrier.cta.sync.aligned.all` barrier spelling, and i1
+/// values stored to and loaded from memory. Assembled by ptxas.
+#[test]
+fn cuda_oxide_lowering_shapes() {
+    use pliron::builtin::attributes::StringAttr;
+    use pliron_ll::dialects::llvm::{
+        attributes::{AtomicOrderingAttr, AtomicRmwKindAttr, SyncScopeAttr},
+        ops::{AddrSpaceCastOp, AtomicRmwOp, FenceOp, InlineAsmOp, XorOp},
+    };
+
+    let mut ctx = Context::new();
+    let module = builtin::ops::ModuleOp::new(&mut ctx, "kernels".try_into().unwrap());
+    let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
+
+    // The dynamic shared-memory window: unsized, external, `.shared`.
+    let i8_ty: pliron_ll::r#type::TypeHandle =
+        IntegerType::get(&mut ctx, 8, Signedness::Signless).into();
+    let window_ty = ArrayType::get(&mut ctx, i8_ty, 0).into();
+    let window = GlobalOp::new(&mut ctx, "__dynamic_smem_k".try_into().unwrap(), window_ty);
+    window.set_attr_llvm_global_linkage(&mut ctx, LinkageAttr::ExternalLinkage);
+    pliron_ll::ll::set_global_data(
+        &ctx,
+        &window,
+        pliron_ll::ll::DataAttr { bytes: vec![], align: 16, mutable: true, relocs: vec![] },
+    );
+    pliron_ll::ll::set_global_section(&mut ctx, &window, ".shared");
+    window.get_operation().insert_at_back(body, &ctx);
+
+    let ptr = ptr_ty(&mut ctx);
+    let i32t = i32_ty(&mut ctx);
+    let i1_ty: pliron_ll::r#type::TypeHandle =
+        IntegerType::get(&mut ctx, 1, Signedness::Signless).into();
+    let func = new_kernel(&mut ctx, body, "shapes", vec![ptr, ptr, i32t, i32t]);
+    let entry = func.get_entry_block(&ctx).unwrap();
+    let (counter, flags, a, b) = {
+        let block = entry.deref(&ctx);
+        (
+            block.get_argument(0),
+            block.get_argument(1),
+            block.get_argument(2),
+            block.get_argument(3),
+        )
+    };
+
+    // atomicrmw add, device scope, monotonic, fenced acq_rel on both sides
+    // (mir-lower's NVPTX ordering split).
+    let device = SyncScopeAttr::NamedScope(StringAttr::new("device".to_string()));
+    let scope_key: pliron::identifier::Identifier = "llvm_syncscope".try_into().unwrap();
+    let fence = FenceOp::new(&mut ctx, AtomicOrderingAttr::AcqRel, device.clone());
+    fence.get_operation().insert_at_back(entry, &ctx);
+    let rmw = AtomicRmwOp::new(
+        &mut ctx,
+        counter,
+        a,
+        AtomicRmwKindAttr::Add,
+        AtomicOrderingAttr::Monotonic,
+        device.clone(),
+    );
+    let _ = scope_key;
+    rmw.get_operation().insert_at_back(entry, &ctx);
+    let old = rmw.get_result(&ctx);
+    let fence = FenceOp::new(&mut ctx, AtomicOrderingAttr::AcqRel, device);
+    fence.get_operation().insert_at_back(entry, &ctx);
+
+    // Inline PTX: `add.s32 $0, $1, $2;` with register constraints.
+    let asm = InlineAsmOp::new(&mut ctx, i32t, vec![old, b], "add.s32 $0, $1, $2;", "=r,r,r", false);
+    asm.get_operation().insert_at_back(entry, &ctx);
+    let sum = asm.get_result(&ctx);
+
+    // The shared window through an addrspacecast (mir-lower's generic view).
+    let shared_ptr_ty: pliron_ll::r#type::TypeHandle = PointerType::get(&mut ctx, 3).into();
+    let _ = shared_ptr_ty;
+    let window_addr = AddressOfOp::new(&mut ctx, "__dynamic_smem_k".try_into().unwrap(), 3);
+    window_addr.get_operation().insert_at_back(entry, &ctx);
+    let window_val = window_addr.get_result(&ctx);
+    let cast = AddrSpaceCastOp::new(&mut ctx, window_val, ptr);
+    cast.get_operation().insert_at_back(entry, &ctx);
+    let generic_window = cast.get_result(&ctx);
+    let st = StoreOp::new(&mut ctx, sum, generic_window);
+    st.get_operation().insert_at_back(entry, &ctx);
+
+    // The block barrier under its current intrinsic name.
+    let zero = i32_const(&mut ctx, entry, 0);
+    call_intrinsic(&mut ctx, entry, "llvm_nvvm_barrier_cta_sync_aligned_all", None, vec![zero]);
+
+    // An i1 stored to memory (as a byte), loaded back and negated.
+    let cmp = ICmpOp::new(&mut ctx, ICmpPredicateAttr::ULT, a, b);
+    cmp.get_operation().insert_at_back(entry, &ctx);
+    let flag = cmp.get_result(&ctx);
+    let st = StoreOp::new(&mut ctx, flag, flags);
+    st.get_operation().insert_at_back(entry, &ctx);
+    let ld = LoadOp::new(&mut ctx, flags, i1_ty);
+    ld.get_operation().insert_at_back(entry, &ctx);
+    let i1_int = IntegerType::get(&mut ctx, 1, Signedness::Signless);
+    let truth = ConstantOp::new(
+        &mut ctx,
+        Box::new(IntegerAttr::new(i1_int, APInt::from_u64(1, NonZero::new(1).unwrap()))),
+    );
+    truth.get_operation().insert_at_back(entry, &ctx);
+    let (loaded, truth_val) = (ld.get_result(&ctx), truth.get_result(&ctx));
+    let not = XorOp::new(&mut ctx, loaded, truth_val);
+    not.get_operation().insert_at_back(entry, &ctx);
+    let negated = not.get_result(&ctx);
+    let st = StoreOp::new(&mut ctx, negated, flags);
+    st.get_operation().insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+
+    let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
+        .expect("ptx emission");
+    assert!(ptx.contains(".extern .shared .align 16 .b8 __dynamic_smem_k[];"), "{ptx}");
+    assert!(ptx.contains("fence.acq_rel.gpu;"), "{ptx}");
+    assert!(ptx.contains("atom.relaxed.gpu.global.add.u32"), "{ptx}");
+    assert!(ptx.contains("add.s32 %r"), "{ptx}");
+    assert!(ptx.contains("st.shared.u32"), "{ptx}");
+    assert!(ptx.contains("bar.sync 0;"), "{ptx}");
+    assert!(ptx.contains("selp.u32"), "{ptx}");
+    assert!(ptx.contains("setp.ne.u32"), "{ptx}");
+    assert!(ptx.contains("not.pred"), "{ptx}");
+    ptxas_verify("cuda_oxide_lowering_shapes", &ptx);
 }

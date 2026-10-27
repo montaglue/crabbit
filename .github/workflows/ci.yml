@@ -50,7 +50,8 @@ jobs:
 
       # rustup on the hosted runners honors rust-toolchain.toml (channel and
       # components, incl. rustc-dev/rust-src). `rustup show` in the repo root
-      # triggers install of the pinned nightly-2026-04-03 toolchain.
+      # triggers install of the pinned 1.99.1 toolchain (RUSTC_BOOTSTRAP=1 comes
+      # from .cargo/config.toml).
       - name: Install pinned toolchain (via rust-toolchain.toml)
         run: rustup show
 

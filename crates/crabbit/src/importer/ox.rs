@@ -1,16 +1,16 @@
 //! Constructor-compatible shims over cuda-oxide's `dialect-mir` ops (plus raw
-//! [pliron_llvm] ops for aggregate values and symbol addresses), mirroring the
-//! old `cmir` op constructors so the importer body above stays line-compatible
-//! with `importer.rs` while emitting the new dialect.
+//! [pliron_llvm] ops for aggregate values, symbol addresses and indirect
+//! calls), mirroring the old `cmir` op constructors so the importer body
+//! stays line-compatible while emitting the dialect.
 //!
-//! Conventions established by the port:
-//! - Pointers are `MirPtrType` in the generic (0) address space; pointees are
-//!   advisory (the sibling branch relaxes dialect-mir to opaque-pointer mode).
-//! - `ptr_offset` keeps the old byte-addressing semantics via the
-//!   `ptr_offset_unit = "byte"` attribute understood by `mir-lower`.
+//! Conventions:
+//! - Thin pointers are the opaque byte pointer [super::ptr_ty]
+//!   (`mir.ptr<u8>`, Erased, generic address space); pointee types are
+//!   established at the uses by the typing pass (`super::typing`).
+//! - `ptr_offset` is byte-addressed: `mir.ptr_offset` over a `u8` pointee.
 //! - Aggregate values (undef/extract/insert) and symbol addresses stay in the
-//!   llvm dialect: `mir-lower` passes llvm ops through untouched and its type
-//!   converter accepts llvm aggregate types.
+//!   llvm dialect: `mir-lower` passes llvm ops through and its type converter
+//!   recurses into llvm aggregate types.
 use crate::attribute::AttrObj;
 use crate::context::{Context, Ptr};
 use crate::dialects::builtin::attributes::{
@@ -21,7 +21,7 @@ use crate::dialects::builtin::op_interfaces::{
 };
 use crate::dialects::builtin::type_interfaces::FunctionTypeInterface;
 use crate::dialects::builtin::types::{FP32Type, FP64Type, FunctionType, IntegerType, Signedness};
-use crate::dialects::dialect_mir::attributes::MirCastKindAttr;
+use crate::dialects::dialect_mir::attributes::{MirCastKindAttr, MirPointerKindAuthorityAttr};
 use crate::dialects::dialect_mir::ops as dm_ops;
 use crate::dialects::dialect_mir::types as dm_types;
 use crate::dialects::llvm as pllvm;
@@ -35,10 +35,6 @@ use crate::ir::value::Value;
 use crate::linked_list::ContainsLinkedList;
 use crate::op::Op;
 use crate::region::Region;
-
-pub fn func_linkage_key() -> Identifier {
-    "mir_func_linkage".try_into().expect("static identifier literal")
-}
 
 pub mod types {
     use super::*;
@@ -60,6 +56,41 @@ pub mod types {
             )
         }
     }
+}
+
+/// A `mir.ptr` to `pointee` shaped like `like`: the same mutability, address
+/// space and provenance kind when `like` is a `mir.ptr`, otherwise the
+/// importer's default (mutable, generic, Erased).
+pub(super) fn ptr_like(ctx: &mut Context, like: TypeHandle, pointee: TypeHandle) -> TypeHandle {
+    let shape = like
+        .deref(ctx)
+        .downcast_ref::<dm_types::MirPtrType>()
+        .map(|p| (p.is_mutable, p.address_space, p.kind));
+    match shape {
+        Some((is_mutable, address_space, kind)) => {
+            dm_types::MirPtrType::get_with_kind(ctx, pointee, is_mutable, address_space, kind).into()
+        }
+        None => dm_types::MirPtrType::get(ctx, pointee, true, dm_types::address_space::GENERIC).into(),
+    }
+}
+
+/// A `mir.cast` of `input` to `result_ty` with the given kind (detached).
+pub(super) fn mir_cast(
+    ctx: &mut Context,
+    input: Value,
+    result_ty: TypeHandle,
+    kind: MirCastKindAttr,
+) -> Ptr<Operation> {
+    let op = Operation::new(
+        ctx,
+        dm_ops::MirCastOp::get_concrete_op_info(),
+        vec![result_ty],
+        vec![input],
+        vec![],
+        0,
+    );
+    dm_ops::MirCastOp::new(op).set_attr_cast_kind(ctx, kind);
+    op
 }
 
 macro_rules! shim_common {
@@ -357,23 +388,24 @@ pub mod ops {
     }
 
     impl PtrOffsetOp {
-        /// Byte-addressed pointer arithmetic. Emitted directly as an
-        /// `llvm.getelementptr` over `i8` (the exact op both the old and
-        /// the dialect-mir lowering would produce for byte offsets):
-        /// upstream `mir.ptr_offset` is element-scaled, which is not
-        /// this op's contract.
+        /// Byte-addressed pointer arithmetic: `mir.ptr_offset` over a `u8`
+        /// pointee (the dialect scales by the pointee, so by bytes). The
+        /// result keeps the base's mutability, address space and provenance
+        /// kind; when the base points at something other than `u8` the
+        /// typing pass retypes it.
         pub fn new(ctx: &mut Context, base: Value, byte_offset: Value) -> Self {
-            let i8_ty: TypeHandle =
-                IntegerType::get(ctx, 8, Signedness::Unsigned).into();
-            let gep = pllvm::ops::GetElementPtrOp::new(
+            let byte: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+            let base_ty = base.get_type(ctx);
+            let result_ty = super::ptr_like(ctx, base_ty, byte);
+            let op = Operation::new(
                 ctx,
-                base,
-                vec![pllvm::ops::GepIndex::Value(byte_offset)],
-                i8_ty,
+                dm_ops::MirPtrOffsetOp::get_concrete_op_info(),
+                vec![result_ty],
+                vec![base, byte_offset],
+                vec![],
+                0,
             );
-            PtrOffsetOp {
-                op: gep.get_operation(),
-            }
+            PtrOffsetOp { op }
         }
     }
     shim_common!(PtrOffsetOp);
@@ -393,15 +425,39 @@ pub mod ops {
                     op: bitcast.get_operation(),
                 };
             };
-            let op = Operation::new(
-                ctx,
-                dm_ops::MirCastOp::get_concrete_op_info(),
-                vec![result_type],
-                vec![input],
-                vec![],
-                0,
-            );
-            dm_ops::MirCastOp::new(op).set_attr_cast_kind(ctx, kind);
+            // An address turned pointer is a raw pointer in the dialect's
+            // provenance model (`PointerWithExposedProvenance` may not
+            // produce Erased storage); uses that want the Erased shape get a
+            // representation-only retype from the typing pass.
+            let result_type = if kind == MirCastKindAttr::PointerWithExposedProvenance {
+                let raw = result_type
+                    .deref(ctx)
+                    .downcast_ref::<dm_types::MirPtrType>()
+                    .map(|p| (p.pointee, p.is_mutable, p.address_space));
+                match raw {
+                    Some((pointee, is_mutable, address_space)) => dm_types::MirPtrType::get_with_kind(
+                        ctx,
+                        pointee,
+                        is_mutable,
+                        address_space,
+                        dm_types::MirPointerKind::from_raw_mutability(is_mutable),
+                    )
+                    .into(),
+                    None => result_type,
+                }
+            } else {
+                result_type
+            };
+            let from_address = kind == MirCastKindAttr::PointerWithExposedProvenance;
+            let op = super::mir_cast(ctx, input, result_type, kind);
+            if from_address {
+                // Establishing a pointer kind from an integer needs the
+                // Rust cast as its authority: this is rustc's own
+                // `PointerWithExposedProvenance` cast, or the importer
+                // standing in for rustc (null pointers, encodings).
+                dm_ops::MirCastOp::new(op)
+                    .set_attr_pointer_kind_authority(ctx, MirPointerKindAuthorityAttr::RustCast);
+            }
             CastOp { op }
         }
 
@@ -412,15 +468,7 @@ pub mod ops {
         /// pins the kind so mir-lower emits its Transmute path (`bitcast`
         /// for equal-size scalars).
         pub fn transmute(ctx: &mut Context, input: Value, result_type: TypeHandle) -> Self {
-            let op = Operation::new(
-                ctx,
-                dm_ops::MirCastOp::get_concrete_op_info(),
-                vec![result_type],
-                vec![input],
-                vec![],
-                0,
-            );
-            dm_ops::MirCastOp::new(op).set_attr_cast_kind(ctx, MirCastKindAttr::Transmute);
+            let op = super::mir_cast(ctx, input, result_type, MirCastKindAttr::Transmute);
             CastOp { op }
         }
     }
@@ -641,10 +689,28 @@ pub mod ops {
 
     impl ShrOp {
         pub fn new(ctx: &mut Context, lhs: Value, rhs: Value) -> Self {
-            let lshr = pllvm::ops::LShrOp::new(ctx, lhs, rhs);
-            ShrOp {
-                op: lshr.get_operation(),
+            let ty = lhs.get_type(ctx);
+            let signed = ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.signedness() == Signedness::Signed);
+            if signed {
+                // `mir.shr` would be arithmetic here; the typing pass
+                // rewrites this `llvm.lshr` through unsigned operands.
+                let lshr = pllvm::ops::LShrOp::new(ctx, lhs, rhs);
+                return ShrOp {
+                    op: lshr.get_operation(),
+                };
             }
+            let op = Operation::new(
+                ctx,
+                dm_ops::MirShrOp::get_concrete_op_info(),
+                vec![ty],
+                vec![lhs, rhs],
+                vec![],
+                0,
+            );
+            ShrOp { op }
         }
     }
     shim_common!(ShrOp);

@@ -101,7 +101,7 @@ fn roundtrip_dir(dir: &Path) -> Vec<String> {
         // cycle, again modulo labels: upstream pliron re-uniques block
         // labels on EVERY parse (`block1v1` → `block1v1_block1v1` → …),
         // so strict textual fixpoint is unattainable without an upstream
-        // fix; value names are stable (kept through builtin_debug_info).
+        // fix; value names are stable (kept through builtin_given_names).
         // The server always parses from the stored original text, so
         // label growth never accumulates there.
         let mut ctx3 = Context::new();

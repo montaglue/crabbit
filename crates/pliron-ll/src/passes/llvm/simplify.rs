@@ -136,6 +136,7 @@ pub(crate) fn as_const_operand(ctx: &Context, value: Value) -> Option<ConstOpera
         return None;
     }
     let attr = (ConstantOp::from_operation(op)).get_value(ctx);
+    let attr = &*attr as &dyn pliron::attribute::Attribute;
     let attr = attr.downcast_ref::<IntegerAttr>()?;
     let apint = attr.value();
     Some(ConstOperand {
@@ -934,7 +935,7 @@ mod tests {
         let one = int_const(&mut ctx, 64, 1);
         one.get_operation().insert_at_back(entry, &ctx);
         let one_v = one.get_result(&ctx);
-        let alloca = llvm::ops::AllocaOp::new(&mut ctx, i64_ty, one_v);
+        let alloca = llvm::ops::AllocaOp::new(&mut ctx, i64_ty, one_v, 0);
         alloca.get_operation().insert_at_back(entry, &ctx);
         let slot = alloca.get_result(&ctx);
         StoreOp::new(&mut ctx, arg, slot)
@@ -996,7 +997,8 @@ mod tests {
             .insert_at_back(entry, &ctx);
         let text = run_simplify(&mut ctx, func);
         assert!(!text.contains("llvm.ashr"), "{text}");
-        assert!(text.contains(&format!("<{}: i64>", (-4i64) as u64)), "{text}");
+        // pliron 0.20 prints signless integer attributes as signed values.
+        assert!(text.contains("<-4: i64>"), "{text}");
     }
 
     #[test]

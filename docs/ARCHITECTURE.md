@@ -7,8 +7,9 @@ document maps the pipeline to the actual modules.
 
 ```mermaid
 flowchart TD
-    MIR["rustc MIR<br/>(CodegenBackend trait)"] -->|"crates/crabbit/src/importer_oxide.rs"| MIRD["mir dialect<br/>(crates/mir)"]
-    MIRD -->|LowerDialectMirPass| LLVMD["llvm dialect<br/>(pliron-llvm, no llvm-sys)"]
+    MIR["rustc MIR<br/>(CodegenBackend trait)"] -->|"crates/crabbit/src/importer/"| MIRD["mir dialect<br/>(cuda-oxide's dialect-mir: the typing contract)"]
+    MIRD -->|"mir-level stage<br/>crates/mir/src/passes/ (mir-census)"| MIRA["mir dialect, measured"]
+    MIRA -->|"LowerDialectMirPass (cuda-oxide's mir-lower,<br/>verification on) → apply-module-linkage<br/>→ materialize-function-addresses → erase-mir-types"| LLVMD["llvm dialect<br/>(pliron-llvm, no llvm-sys)"]
     LLVMD --> MIDEND["shared mid-end<br/>pliron-ll/src/passes/llvm/"]
     MIDEND -->|host| MACH["machine pipeline<br/>pliron-ll/src/passes/aarch64/"]
     MIDEND -->|"#[kernel] fns"| NVPTX["NVPTX translator<br/>pliron-ll/src/nvptx/"]
@@ -18,12 +19,72 @@ flowchart TD
 
 ## 1. Import: MIR → `mir` dialect
 
-`crates/crabbit/src/importer_oxide.rs` walks the crate's monomorphized MIR
-and builds a `mir`-dialect module (`crates/mir`). Constants (including
-pointer-carrying allocations), TLS, virtual calls, i128, and overflow
-intrinsics are resolved here. Functions whose symbol starts with
-`__crabbit_kernel_` go to a separate `rust_kernels` module
-(`docs/KERNEL-ABI.md`).
+One front end, crabbit's own, feeds both modules: `crates/crabbit/src/importer/`
+walks the crate's monomorphized MIR and builds a `mir`-dialect module per
+kind — the host module (`rust_crate`) and the kernel module
+(`rust_kernels`, the `__crabbit_kernel_*` entries of `docs/KERNEL-ABI.md`).
+The dialect is cuda-oxide's `dialect-mir`, consumed unpatched from NVIDIA's
+upstream repository; its verifier is the contract the importer meets, and
+`mir-lower` checks the whole module against it before lowering anything
+(`docs/MIR-DIALECT.md`). Constants (including pointer-carrying
+allocations), TLS, virtual calls, i128 and overflow intrinsics are resolved
+in the importer.
+
+The importer's output is the dialect's ops over a mixed type vocabulary:
+`mir.ptr` thin pointers, but LLVM aggregate types and llvm-dialect
+aggregate ops (`undef`/`insert_value`/`extract_value`) for structs and fat
+pointers, byte-addressed field access, and `llvm.func` declarations for
+foreign symbols. The walk builds every thin pointer as the opaque byte
+pointer `mir.ptr<u8>`; a typing pass at the end of the import
+(`importer/typing.rs`) then gives each use the pointee the verifier
+requires (representation-only `mir.cast PtrToPtr`), stamps the foreign
+signature on calls to non-`mir.func` symbols (`external_callee_type`,
+`AbiBoundary`), and bridges the two values the dialect has no producer for
+on the host — addresses of globals/thread-locals (`llvm.addressof`, crossed
+as exposed-provenance integer casts) and addresses of this module's
+functions (`ll.func_addr`, materialized after the lowering). The
+`mir-census` pass reports the remaining distance to the verifier as a
+per-rule histogram; it is zero on the fixtures.
+
+### 1a. The `mir`-level stage (`crates/mir/src/passes/`)
+
+Between the importer and `LowerDialectMirPass` sits a pass stage over the
+`mir` dialect itself (`crabbit_mir::passes::add_mir_passes`), added ahead
+of every lowering: inside `add_midend_passes` (host and kernel pipelines)
+and in the standalone `emit_lowered_ir` path that `CRABBIT_EMIT_IR` takes,
+so each module passes through it exactly once. The resident
+driver/server (`crates/inspect-driver`, `ServeHooks`) starts from
+post-lowering IR and never sees this stage.
+
+Today the stage holds one pure analysis, **`mir-census`**
+(`mir_census.rs`): per `mir.func` an op-kind histogram (full op ids, so
+the importer's `llvm.*` spellings sit next to the `mir.*` ones), calls by
+demangled callee and callee family (`core::iter`, `alloc::vec`, ...),
+alloca/assert/checked-arithmetic counts, aggregate construction via
+`mir.construct_*` versus `undef`+insert chains, natural-loop count and
+nesting depth (pliron-ll's dialect-agnostic dominator/loop analysis), and
+block/op totals, plus the module aggregation. `CRABBIT_MIR_CENSUS=<path>`
+appends one JSON object per module to that file; unset, the walk is
+skipped entirely. `CRABBIT_MIR_DISABLE=census` skips it like the mid-end
+gate. It never fails a compile (errors go to stderr, the pass returns
+unchanged). The census is the measurement behind the thin-importer plan:
+it says which Rust-semantic constructs the importer still pre-lowers
+(`docs/MIR-CENSUS.md`).
+
+Constraints on anything added here, verified against the pinned
+`mir-lower`: its conversion claims every `mir.*`/`nvvm.*` op and fails on
+one it has no arm for; attributes on `mir` ops are not carried onto the
+lowered ops, while the `builtin.module` op and its attributes survive. So
+passes in this stage must not introduce `mir.*` op kinds the lowering
+lacks, and anything that has to cross the lowering travels on the module —
+function linkage does (`crabbit_linkage`, a symbol → linkage dictionary the
+importer writes and `apply-module-linkage` stamps onto the `llvm.func`s
+right after the lowering; every lowered function then carries an explicit
+linkage, external where nothing was recorded). Two more crabbit passes
+complete the lowering for this module shape: `materialize-function-addresses`
+turns `ll.func_addr` into `llvm.addressof`, and `erase-mir-types` rewrites
+the `mir.ptr` the lowering leaves inside the importer's llvm-dialect
+aggregate ops to `llvm.ptr`.
 
 ## 2. Shared mid-end (`crates/pliron-ll/src/passes/llvm/`)
 

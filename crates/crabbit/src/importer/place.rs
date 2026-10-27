@@ -193,7 +193,7 @@ pub(super) fn dangling_zst_addr<'tcx>(
     let usize_ty: TypeHandle = usize_ty(ctx).into();
     let addr = integer_constant(ctx, usize_ty, align as u128)?;
     addr.get_operation().insert_at_back(insert_block, ctx);
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     Ok(cast_value_to_type(
         ctx,
         insert_block,
@@ -248,7 +248,7 @@ pub(super) fn place_addr<'tcx>(
                     // offsets off the data pointer; the unsized tail field
                     // keeps the metadata.
                     let fat_ty = addr.get_type(ctx);
-                    let ptr_ty = llvm_ptr_ty(ctx);
+                    let ptr_ty = ptr_ty(ctx);
                     let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
                     data.get_operation().insert_at_back(insert_block, ctx);
                     let mut data = data.get_result(ctx);
@@ -354,7 +354,7 @@ pub(super) fn place_addr<'tcx>(
                         // pointer by `from` elements and shrink the length.
                         let elem_size = indexed_elem_size(tcx, current_ty)?;
                         let fat_ty = addr.get_type(ctx);
-                        let ptr_ty = llvm_ptr_ty(ctx);
+                        let ptr_ty = ptr_ty(ctx);
                         let usize_ty: TypeHandle = usize_ty(ctx).into();
                         let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
                         data.get_operation().insert_at_back(insert_block, ctx);
@@ -431,7 +431,7 @@ fn fat_data_ptr(ctx: &mut Context, insert_block: Ptr<BasicBlock>, addr: Value) -
     {
         return addr;
     }
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
     data.get_operation().insert_at_back(insert_block, ctx);
     data.get_result(ctx)

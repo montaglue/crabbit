@@ -486,6 +486,7 @@ fn lower_function(
                 values.insert(alloca.get_result(ctx), LoweredValue::StackAddr(slot));
             } else if let Some(constant) = op_obj.downcast_ref::<ConstantOp>() {
                 let attr = constant.get_value(ctx);
+                let attr = &*attr as &dyn pliron::attribute::Attribute;
                 // FP constants carry their IEEE bit pattern in `Imm`; the
                 // result type at each use decides the register file.
                 let imm = if let Some(fp32) = attr

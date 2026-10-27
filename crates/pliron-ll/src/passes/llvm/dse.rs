@@ -380,7 +380,7 @@ mod tests {
     fn alloca_i64(ctx: &mut Context, entry: Ptr<BasicBlock>) -> Value {
         let one = const_i64(ctx, entry, 1);
         let i64_ty: TypeHandle = int_ty(ctx, 64).into();
-        let slot = crate::dialects::llvm::ops::AllocaOp::new(ctx, i64_ty, one);
+        let slot = crate::dialects::llvm::ops::AllocaOp::new(ctx, i64_ty, one, 0);
         slot.get_operation().insert_at_back(entry, ctx);
         slot.get_result(ctx)
     }

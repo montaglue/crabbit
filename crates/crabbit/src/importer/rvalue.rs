@@ -9,7 +9,7 @@ pub(super) fn import_rvalue<'tcx>(
     rvalue: &Rvalue<'tcx>,
 ) -> Result<Value, String> {
     match rvalue {
-        Rvalue::Use(operand) => import_operand(tcx, ctx, state, insert_block, body, operand),
+        Rvalue::Use(operand, _) => import_operand(tcx, ctx, state, insert_block, body, operand),
         Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
             place_addr(tcx, ctx, state, insert_block, body, place)
         }
@@ -49,6 +49,13 @@ pub(super) fn import_rvalue<'tcx>(
             }
             if matches!(op, BinOp::Div | BinOp::Rem) && is_128_bit_integer_value(ctx, lhs) {
                 return lower_i128_divrem(ctx, state.module_body, insert_block, *op, lhs, rhs);
+            }
+            if matches!(
+                op,
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            ) && fat_pointer_leaf_types(ctx, lhs).is_some()
+            {
+                return lower_fat_pointer_cmp(ctx, insert_block, *op, lhs, rhs);
             }
             let op = match op {
                 BinOp::Add | BinOp::AddUnchecked => {
@@ -92,7 +99,16 @@ pub(super) fn import_rvalue<'tcx>(
             ) {
                 return reify_fn_pointer(tcx, ctx, state, insert_block, body, operand);
             }
-            if matches!(kind, rustc_mir::CastKind::Transmute) {
+            // `BoxDerefTransmute` (rustc >= 1.99): the elaborated `Box` deref
+            // casts the box's `Unique<T>` straight to `*const T`. "Backends
+            // that do not care about UB detection can treat this like a
+            // regular transmute" (rustc_middle::mir::CastKind), and must:
+            // the generic cast path would `bitcast` the `Unique` aggregate
+            // to a fat pointer, which does not remap its pieces.
+            if matches!(
+                kind,
+                rustc_mir::CastKind::Transmute | rustc_mir::CastKind::BoxDerefTransmute
+            ) {
                 return import_transmute(tcx, ctx, state, insert_block, body, operand, *ty);
             }
             if let Some(value) =
@@ -210,7 +226,7 @@ pub(super) fn import_rvalue<'tcx>(
                     runtime_ty(pointee_ty).kind(),
                     rustc_middle::ty::TyKind::Slice(_)
                 ) {
-                    let ptr_ty = llvm_ptr_ty(ctx);
+                    let ptr_ty = ptr_ty(ctx);
                     let data = if data.get_type(ctx) == ptr_ty {
                         data
                     } else {
@@ -258,7 +274,7 @@ pub(super) fn import_rvalue<'tcx>(
                 && is_fmt_rt_argument_type(tcx, def_id)
             {
                 let variant = tcx.adt_def(def_id).variant(variant_idx).name.to_string();
-                let ptr_ty = llvm_ptr_ty(ctx);
+                let ptr_ty = ptr_ty(ctx);
                 let (value, formatter) = match variant.as_str() {
                     "Placeholder" => {
                         let mut operands = operands.iter();
@@ -430,6 +446,7 @@ pub(super) fn reify_fn_pointer<'tcx>(
         return Err(format!("unsupported reified fn pointer source: {fn_ty:?}"));
     };
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let args = tcx.instantiate_bound_regions_with_erased(*args);
     let instance = Instance::resolve_for_fn_ptr(tcx, typing_env, *def_id, args)
         .ok_or_else(|| format!("cannot resolve reified fn pointer target: {fn_ty:?}"))?;
     let mut legaliser = Legaliser::default();
@@ -443,7 +460,7 @@ pub(super) fn reify_fn_pointer<'tcx>(
         emit_fn_ptr_thunk(tcx, ctx, state.module_body, symbol, instance)?
     };
 
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     let op = mir_dialect::ops::AddressOfOp::new(ctx, target_symbol, ptr_ty);
     op.get_operation().insert_at_back(insert_block, ctx);
     Ok(op.get_result(ctx))
@@ -476,7 +493,7 @@ pub(super) fn emit_fn_ptr_thunk<'tcx>(
         let abi_ty = convert_immediate_ty(tcx, ctx, *input_ty)?;
         match arg_abi_for_ty(ctx, abi_ty)? {
             ArgAbi::Leaves(leaves) => inputs.extend(leaves.iter().map(|(_, ty)| *ty)),
-            ArgAbi::Indirect => inputs.push(llvm_ptr_ty(ctx)),
+            ArgAbi::Indirect => inputs.push(ptr_ty(ctx)),
         }
     }
     let results = convert_return_ty(tcx, ctx, fn_sig.output())?;
@@ -591,7 +608,7 @@ pub(super) fn lower_pointer_unsize_cast<'tcx>(
     };
 
     let input = import_operand(tcx, ctx, state, insert_block, body, operand)?;
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
 
     // The metadata half of the resulting fat pointer.
     let metadata_value: Value = match metadata {
@@ -822,7 +839,7 @@ pub(super) fn aggregate_result_ty<'tcx>(
                 .iter()
                 .map(|operand_ty| convert_ty(tcx, ctx, mono_ty(tcx, state, *operand_ty)))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(llvm::types::StructType::get_unnamed(ctx, fields).into())
+            Ok(llvm::types::StructType::get_unnamed(ctx, (fields, llvm::types::StructLayout::Unpacked)).into())
         }
         rustc_mir::AggregateKind::RawPtr(pointee_ty, mutability) => {
             let pointee_ty = mono_ty(tcx, state, *pointee_ty);
@@ -860,4 +877,90 @@ pub(super) fn import_operand<'tcx>(
             Ok(op.get_result(ctx))
         }
     }
+}
+
+/// The two leaf types of a fat-pointer value (`{ data ptr, metadata }`: a
+/// slice/str pointer's length or a trait object's vtable), or `None` for
+/// anything that is not this importer's two-word pointer representation.
+fn fat_pointer_leaf_types(ctx: &Context, value: Value) -> Option<(TypeHandle, TypeHandle)> {
+    let ty = value.get_type(ctx);
+    let ty_ref = ty.deref(ctx);
+    let struct_ty = ty_ref.downcast_ref::<llvm::types::StructType>()?;
+    if struct_ty.is_opaque() {
+        return None;
+    }
+    let fields: Vec<TypeHandle> = struct_ty.fields().collect();
+    let [data, meta] = fields.as_slice() else {
+        return None;
+    };
+    let is_word = |field: TypeHandle| {
+        let field_ref = field.deref(ctx);
+        field_ref.is::<llvm::types::PointerType>()
+            || field_ref
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+    };
+    (data.deref(ctx).is::<llvm::types::PointerType>() && is_word(*meta)).then_some((*data, *meta))
+}
+
+/// Compare two fat pointers the way rustc_codegen_ssa's `codegen_fat_ptr_binop`
+/// does: equality is equality of both words, ordering is lexicographic on
+/// (address, metadata). `*const [T] == *const [T]` (e.g. `Arc::ptr_eq` on
+/// unsized payloads, which std's `ArcEqIdent` reaches on 1.99) and `dyn`
+/// pointer identity land here; the words are compared as `usize`, which is
+/// what pointer comparison means.
+fn lower_fat_pointer_cmp(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    op: BinOp,
+    lhs: Value,
+    rhs: Value,
+) -> Result<Value, String> {
+    let (data_ty, meta_ty) = fat_pointer_leaf_types(ctx, lhs)
+        .ok_or_else(|| "fat-pointer comparison on a non-fat-pointer value".to_string())?;
+    let usize_ty: TypeHandle = usize_ty(ctx).into();
+    let word = |ctx: &mut Context, value: Value, index: u32, ty: TypeHandle| {
+        let leaf = mir_dialect::ops::ExtractValueOp::new(ctx, value, vec![index], ty);
+        leaf.get_operation().insert_at_back(insert_block, ctx);
+        cast_value_to_type(ctx, insert_block, leaf.get_result(ctx), usize_ty)
+    };
+    let (a0, a1) = (word(ctx, lhs, 0, data_ty), word(ctx, lhs, 1, meta_ty));
+    let (b0, b1) = (word(ctx, rhs, 0, data_ty), word(ctx, rhs, 1, meta_ty));
+    let binary = |ctx: &mut Context, kind: BinOp, a: Value, b: Value| -> Value {
+        let op = match kind {
+            BinOp::Eq => mir_dialect::ops::EqOp::new(ctx, a, b).get_operation(),
+            BinOp::Ne => mir_dialect::ops::NeOp::new(ctx, a, b).get_operation(),
+            BinOp::Lt => mir_dialect::ops::LtOp::new(ctx, a, b).get_operation(),
+            BinOp::Le => mir_dialect::ops::LeOp::new(ctx, a, b).get_operation(),
+            BinOp::Gt => mir_dialect::ops::GtOp::new(ctx, a, b).get_operation(),
+            BinOp::Ge => mir_dialect::ops::GeOp::new(ctx, a, b).get_operation(),
+            BinOp::BitAnd => mir_dialect::ops::BitAndOp::new(ctx, a, b).get_operation(),
+            _ => mir_dialect::ops::BitOrOp::new(ctx, a, b).get_operation(),
+        };
+        op.insert_at_back(insert_block, ctx);
+        op.deref(ctx).get_result(0)
+    };
+    Ok(match op {
+        BinOp::Eq => {
+            let (d, m) = (binary(ctx, BinOp::Eq, a0, b0), binary(ctx, BinOp::Eq, a1, b1));
+            binary(ctx, BinOp::BitAnd, d, m)
+        }
+        BinOp::Ne => {
+            let (d, m) = (binary(ctx, BinOp::Ne, a0, b0), binary(ctx, BinOp::Ne, a1, b1));
+            binary(ctx, BinOp::BitOr, d, m)
+        }
+        // Lexicographic: data decides unless equal, then the metadata.
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            let strict = match op {
+                BinOp::Lt | BinOp::Le => BinOp::Lt,
+                _ => BinOp::Gt,
+            };
+            let first = binary(ctx, strict, a0, b0);
+            let same = binary(ctx, BinOp::Eq, a0, b0);
+            let second = binary(ctx, op, a1, b1);
+            let tie = binary(ctx, BinOp::BitAnd, same, second);
+            binary(ctx, BinOp::BitOr, first, tie)
+        }
+        other => return Err(format!("unsupported fat-pointer comparison: {other:?}")),
+    })
 }

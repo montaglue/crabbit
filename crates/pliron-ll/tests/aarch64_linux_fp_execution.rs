@@ -701,7 +701,7 @@ fn fp_values_survive_memory_and_bitcasts() {
     );
     one.get_operation().insert_at_back(entry, &ctx);
     let one_result = one.get_result(&ctx);
-    let slot = pliron_ll::dialects::llvm::ops::AllocaOp::new(&mut ctx, f64_ty, one_result);
+    let slot = pliron_ll::dialects::llvm::ops::AllocaOp::new(&mut ctx, f64_ty, one_result, 0);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot_result = slot.get_result(&ctx);
     pliron_ll::dialects::llvm::ops::StoreOp::new(&mut ctx, args[0], slot_result)
@@ -724,7 +724,7 @@ fn fp_values_survive_memory_and_bitcasts() {
     );
     one.get_operation().insert_at_back(entry, &ctx);
     let one_result = one.get_result(&ctx);
-    let slot = pliron_ll::dialects::llvm::ops::AllocaOp::new(&mut ctx, f32_ty, one_result);
+    let slot = pliron_ll::dialects::llvm::ops::AllocaOp::new(&mut ctx, f32_ty, one_result, 0);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot_result = slot.get_result(&ctx);
     pliron_ll::dialects::llvm::ops::StoreOp::new(&mut ctx, args[0], slot_result)

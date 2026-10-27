@@ -623,7 +623,7 @@ pub(super) fn pack_overflow_result(
     let overflow_value = cast_value_to_type(ctx, insert_block, overflow_value, overflow_ty);
 
     let result_ty =
-        llvm::types::StructType::get_unnamed(ctx, vec![wrapped_value.get_type(ctx), overflow_ty])
+        llvm::types::StructType::get_unnamed(ctx, (vec![wrapped_value.get_type(ctx), overflow_ty], llvm::types::StructLayout::Unpacked))
             .into();
     let undef = mir_dialect::ops::UndefOp::new(ctx, result_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
@@ -1042,7 +1042,7 @@ pub(super) fn lower_arguments_from_str_call<'tcx>(
     }
 
     let str_value = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     let fmt_ty = fmt_arguments_ty(ctx);
 
     let template = mir_dialect::ops::ExtractValueOp::new(ctx, str_value, vec![0], ptr_ty);
@@ -1114,6 +1114,7 @@ pub(super) fn call_symbol<'tcx>(
         if let Some(symbol) = known_codegen_symbol(tcx, instance) {
             return Ok(legaliser.legalise(symbol));
         }
+        let instance = with_intrinsic_fallback(tcx, instance);
         return Ok(legaliser.legalise(tcx.symbol_name(instance).name));
     }
     Ok(legaliser.legalise(&tcx.def_path_str(def_id)))

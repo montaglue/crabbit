@@ -337,6 +337,7 @@ fn lower_function(
                 values.insert(alloca.get_result(ctx), LoweredValue::StackAddr(slot));
             } else if let Some(constant) = op_obj.downcast_ref::<ConstantOp>() {
                 let attr = constant.get_value(ctx);
+                let attr = &*attr as &dyn pliron::attribute::Attribute;
                 let attr = attr
                     .downcast_ref::<IntegerAttr>()
                     .expect("constant verified to be integer");

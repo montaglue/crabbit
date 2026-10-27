@@ -173,7 +173,7 @@ pub(super) fn import_memory_constant<'tcx>(
         .inspect_with_uninit_and_ptr_outside_interpreter(offset.bytes() as usize..alloc.len())
         .to_vec();
     let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
     addr.get_operation().insert_at_back(insert_block, ctx);
     let load = mir_dialect::ops::LoadOp::new(ctx, addr.get_result(ctx), ty);
@@ -255,7 +255,7 @@ pub(super) fn import_pointer_to_plain_data_constant<'tcx>(
                 return Ok(None);
             };
             let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let data = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             data.get_operation().insert_at_back(insert_block, ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
@@ -328,7 +328,7 @@ pub(super) fn import_pointer_constant<'tcx>(
             }
             let symbol =
                 data_global_for_alloc(tcx, ctx, state.module_body, provenance.alloc_id())?;
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             addr.get_operation().insert_at_back(insert_block, ctx);
             let mut value = addr.get_result(ctx);
@@ -339,7 +339,7 @@ pub(super) fn import_pointer_constant<'tcx>(
         }
         rustc_mir::ConstValue::Slice { alloc_id, meta } => {
             let symbol = data_global_for_alloc(tcx, ctx, state.module_body, alloc_id)?;
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let data = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             data.get_operation().insert_at_back(insert_block, ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
@@ -365,7 +365,7 @@ pub(super) fn import_pointer_constant<'tcx>(
         }
         rustc_mir::ConstValue::Indirect { alloc_id, offset } => {
             let symbol = data_global_for_alloc(tcx, ctx, state.module_body, alloc_id)?;
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             addr.get_operation().insert_at_back(insert_block, ctx);
             let mut addr_value = addr.get_result(ctx);
@@ -454,7 +454,7 @@ pub(super) fn load_value_from_real_layout<'tcx>(
                 .non_enum_variant()
                 .fields
                 .iter()
-                .map(|field| field.ty(tcx, args))
+                .map(|field| field_ty(tcx, field, args))
                 .collect::<Vec<_>>();
             field_based(ctx, fields)
         }
@@ -527,7 +527,7 @@ pub(super) fn import_enum_constant<'tcx>(
         .ok_or_else(|| format!("unsupported MIR enum constant: {:?}", constant));
     };
     let symbol = declare_anonymous_byte_global(ctx, state.module_body, &bytes);
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
     addr.get_operation().insert_at_back(insert_block, ctx);
     let load = mir_dialect::ops::LoadOp::new(ctx, addr.get_result(ctx), ty);
@@ -669,7 +669,7 @@ pub(super) fn mono_const<'tcx>(
         instance.instantiate_mir_and_normalize_erasing_regions(
             tcx,
             rustc_middle::ty::TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(constant),
+            EarlyBinder::bind(tcx, constant),
         )
     })
 }
@@ -685,7 +685,7 @@ pub(super) fn mono_ty_const<'tcx>(
         instance.instantiate_mir_and_normalize_erasing_regions(
             tcx,
             rustc_middle::ty::TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(constant),
+            EarlyBinder::bind(tcx, constant),
         )
     })
 }
@@ -710,7 +710,7 @@ pub(super) fn import_str_constant<'tcx>(
     let mut bytes = value.clone().into_bytes();
     bytes.push(0);
     let symbol = declare_anonymous_byte_global(ctx, module_body, &bytes);
-    let ptr_ty = llvm_ptr_ty(ctx);
+    let ptr_ty = ptr_ty(ctx);
     let ptr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
     ptr.get_operation().insert_at_back(insert_block, ctx);
 

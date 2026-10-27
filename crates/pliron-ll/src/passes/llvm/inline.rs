@@ -13,7 +13,7 @@ use crate::{
     arg_err,
     common_traits::Named,
     context::{Context, Ptr},
-    debug_info::{get_operation_result_name, set_operation_result_name},
+    builtin::given_names::{get_operation_result_name, set_operation_result_name},
     dialects::{
         builtin::op_interfaces::{SymbolOpInterface},
         llvm::{

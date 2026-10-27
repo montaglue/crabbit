@@ -1,4 +1,6 @@
 /target
+# Traces and emitted IR of this project (CRABBIT_TRACE=1, CRABBIT_EMIT_IR=1); pliron-inspect reads them.
+.crabbit-traces/
 crates/crabbit-research/target/
 crates/crabbit-research/Cargo.lock
 

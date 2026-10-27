@@ -6,10 +6,11 @@
 //! `libcrabbit.so` reports such configs as not linked.
 //!
 //! Engine construction lives here (not in `research-config`) because the
-//! engines are private sibling checkouts the public workspace must never
-//! resolve — see research-config's crate docs for the mechanics. The
-//! environment-variable semantics are unchanged from the integration
-//! contract (eregalloc/INTEGRATION-CONTRACT.md):
+//! engines live in the private sibling checkout `../crabbit-engines`, which
+//! the public workspace must never resolve — see research-config's crate
+//! docs for the mechanics. The environment-variable semantics are unchanged
+//! from the integration contract
+//! (crabbit-engines/docs/eregalloc/INTEGRATION-CONTRACT.md):
 //!
 //! | variable | values |
 //! |---|---|

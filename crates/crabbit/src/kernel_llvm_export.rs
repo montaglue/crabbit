@@ -123,6 +123,30 @@ pub fn export_kernel_module(ctx: &mut Context, root: Ptr<Operation>) -> Result<S
                     cast.get_operation().insert_before(ctx, inner_op);
                     let old = addr.get_result(ctx);
                     let new = cast.get_result(ctx);
+                    // A use whose own result already lives in the global's
+                    // address space (cuda-oxide's `mir-lower` types GEPs on
+                    // shared pointers as `ptr addrspace(3)`; crabbit's
+                    // device-globals bridge only retypes the `addressof`)
+                    // takes the space-typed address directly, so the
+                    // exporter sees a consistent base/result pair.
+                    old.replace_some_uses_with(
+                        ctx,
+                        |ctx, use_| {
+                            let user = use_.user_op();
+                            let result_space = user
+                                .deref(ctx)
+                                .results()
+                                .next()
+                                .and_then(|result| {
+                                    use pliron::r#type::Typed;
+                                    let ty = result.get_type(ctx);
+                                    let ty = ty.deref(ctx);
+                                    ty.downcast_ref::<PointerType>().map(|p| p.address_space())
+                                });
+                            result_space == Some(space)
+                        },
+                        &shared_val,
+                    );
                     old.replace_all_uses_with(ctx, &new);
                     Operation::erase(inner_op, ctx);
                 }

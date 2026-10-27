@@ -116,6 +116,8 @@ pub fn import_crate<'tcx>(tcx: TyCtxt<'tcx>) -> ImportedCrate {
     }
 
     declare_default_allocator_shims(tcx, &mut ctx, module_body);
+    typing::normalize_module(&mut ctx, module_body);
+    typing::normalize_module(&mut ctx, kernel_module_body);
 
     ImportedCrate {
         ctx,
@@ -216,7 +218,7 @@ pub(super) fn mono_ty<'tcx>(tcx: TyCtxt<'tcx>, state: &FunctionImportState<'tcx>
         instance.instantiate_mir_and_normalize_erasing_regions(
             tcx,
             rustc_middle::ty::TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(ty),
+            EarlyBinder::bind(tcx, ty),
         )
     })
 }
@@ -265,7 +267,7 @@ pub(super) fn import_function<'tcx>(
                 let abi = arg_abi_for_ty(ctx, elem_abi_ty)?;
                 match &abi {
                     ArgAbi::Leaves(leaves) => inputs.extend(leaves.iter().map(|(_, ty)| *ty)),
-                    ArgAbi::Indirect => inputs.push(llvm_ptr_ty(ctx)),
+                    ArgAbi::Indirect => inputs.push(ptr_ty(ctx)),
                 }
                 elements.push((elem_storage_ty, abi));
             }
@@ -280,7 +282,7 @@ pub(super) fn import_function<'tcx>(
         };
         match &group {
             ArgAbi::Leaves(leaves) => inputs.extend(leaves.iter().map(|(_, ty)| *ty)),
-            ArgAbi::Indirect => inputs.push(llvm_ptr_ty(ctx)),
+            ArgAbi::Indirect => inputs.push(ptr_ty(ctx)),
         }
         input_groups.push((local, storage_ty, ParamAbi::Single(group)));
     }

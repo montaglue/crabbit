@@ -38,8 +38,9 @@ use crate::{
     context::{Context, Ptr},
     dialects::llvm::{
         ops::{
-            AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, GepIndex,
-            GetElementPtrOp, IntToPtrOp, LoadOp, PtrToIntOp, SelectOp, StoreOp,
+            AddrSpaceCastOp, AddressOfOp, AllocaOp, AtomicCmpxchgOp, AtomicRmwOp, BitcastOp,
+            BrOp, CallOp, CondBrOp, FreezeOp, GepIndex, GetElementPtrOp, InlineAsmOp,
+            IntToPtrOp, LoadOp, PtrToIntOp, SelectOp, StoreOp,
         },
         types::PointerType,
     },
@@ -188,6 +189,23 @@ fn transfer(
         }
     } else if let Some(cast) = op_obj.downcast_ref::<BitcastOp>() {
         changed |= alias(spaces, forced, cast.get_operand(ctx), cast.get_result(ctx));
+    } else if let Some(cast) = op_obj.downcast_ref::<AddrSpaceCastOp>() {
+        // mir-lower's state-space casts: provenance, not a value change.
+        changed |= alias(spaces, forced, cast.get_operand(ctx), cast.get_result(ctx));
+    } else if let Some(freeze) = op_obj.downcast_ref::<FreezeOp>() {
+        changed |= alias(spaces, forced, freeze.get_operand(ctx), freeze.get_result(ctx));
+    } else if op_obj.downcast_ref::<AtomicRmwOp>().is_some()
+        || op_obj.downcast_ref::<AtomicCmpxchgOp>().is_some()
+    {
+        // The address operand gets space-qualified like a load's; the
+        // value operands escape; the result is a loaded value.
+        let op = op_ptr.deref(ctx);
+        for i in 1..op.get_num_operands() {
+            changed |= escape(spaces, forced, op.get_operand(i));
+        }
+        for result in op.results() {
+            changed |= set_result(spaces, forced, result, PtrSpace::Generic);
+        }
     } else if let Some(cast) = op_obj.downcast_ref::<IntToPtrOp>() {
         changed |= alias(spaces, forced, cast.get_operand(ctx), cast.get_result(ctx));
     } else if let Some(cast) = op_obj.downcast_ref::<PtrToIntOp>() {
@@ -405,6 +423,14 @@ pub(super) fn readonly_values(
                     if let Some(p) = prov.get(&cast.get_operand(ctx)).copied() {
                         changed |= raise_prov(&mut prov, cast.get_result(ctx), p);
                     }
+                } else if let Some(cast) = op_obj.downcast_ref::<AddrSpaceCastOp>() {
+                    if let Some(p) = prov.get(&cast.get_operand(ctx)).copied() {
+                        changed |= raise_prov(&mut prov, cast.get_result(ctx), p);
+                    }
+                } else if let Some(freeze) = op_obj.downcast_ref::<FreezeOp>() {
+                    if let Some(p) = prov.get(&freeze.get_operand(ctx)).copied() {
+                        changed |= raise_prov(&mut prov, freeze.get_result(ctx), p);
+                    }
                 } else if let Some(cast) = op_obj.downcast_ref::<IntToPtrOp>() {
                     if let Some(p) = prov.get(&cast.get_operand(ctx)).copied() {
                         changed |= raise_prov(&mut prov, cast.get_result(ctx), p);
@@ -494,6 +520,18 @@ pub(super) fn readonly_values(
                     Some(Prov::Roots(mask)) => dirty |= mask,
                     _ => dirty_all = true,
                 }
+            } else if op_obj.downcast_ref::<AtomicRmwOp>().is_some()
+                || op_obj.downcast_ref::<AtomicCmpxchgOp>().is_some()
+            {
+                // An atomic writes through its pointer operand (index 0).
+                let ptr_arg = op_ptr.deref(ctx).get_operand(0);
+                match prov.get(&ptr_arg) {
+                    Some(Prov::Roots(mask)) => dirty |= mask,
+                    _ => dirty_all = true,
+                }
+            } else if op_obj.downcast_ref::<InlineAsmOp>().is_some() {
+                // Opaque text: may write through anything it can reach.
+                dirty_all = true;
             } else if let Some(call) = op_obj.downcast_ref::<CallOp>() {
                 let canonical = match call.callee(ctx) {
                     CallOpCallable::Direct(name) => nvvm_intrinsic_name(name.as_ref()),

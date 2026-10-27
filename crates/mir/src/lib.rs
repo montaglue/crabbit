@@ -2,9 +2,6 @@
 //! [LowerDialectMirPass](passes::lower_dialect_mir::LowerDialectMirPass)
 //! wrapper plus re-exports. A plain rlib so tooling (inspect drivers) can
 //! link it without the rustc-plugin dylib machinery.
-//!
-//! The legacy `cmir` dialect this crate used to define is retired; its
-//! sources are detached from the build pending deletion.
 
 pub mod passes;
 
@@ -13,31 +10,7 @@ pub use mir_lower;
 
 pub mod dialects {
     pub use dialect_mir;
-    pub use pliron_llvm as llvm;
     pub use pliron::builtin;
+    pub use pliron_llvm as llvm;
     pub use pliron_ll::{aarch64, macho, x86_64};
 }
-// ---- compatibility re-exports over the pliron core (cleanup pending) ----
-pub use pliron::{
-    attribute, basic_block, builtin, common_traits, context, debug_info, dialect,
-    graph, identifier, irbuild, irfmt, linked_list, location, op, operation, opts,
-    parsable, printable, region, storage_uniquer, symbol_table, r#type,
-    uniqued_any, utils, value,
-};
-pub mod result {
-    pub use pliron::result::*;
-    /// Old crabbit name for [Result].
-    pub type CrabbitResult<T> = pliron::result::Result<T>;
-}
-pub mod ir {
-    pub use pliron::{
-        attribute, basic_block, dialect, irfmt, location, op, operation, region, value,
-    };
-    pub use pliron::r#type;
-}
-pub use pliron::{
-    arg_err, arg_err_noloc, arg_error, arg_error_noloc, create_err, create_error,
-    dict_key, indented_block, input_err, input_err_noloc,
-    input_error, input_error_noloc, type_to_trait, verify_err, verify_err_noloc,
-    verify_error, verify_error_noloc,
-};

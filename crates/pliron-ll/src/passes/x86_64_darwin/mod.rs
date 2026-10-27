@@ -274,7 +274,7 @@ mod tests {
         let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(entry, &ctx);
         let one_result = one.get_result(&ctx);
-        let alloca = AllocaOp::new(&mut ctx, i64_ty.into(), one_result);
+        let alloca = AllocaOp::new(&mut ctx, i64_ty.into(), one_result, 0);
         alloca.get_operation().insert_at_back(entry, &ctx);
         let slot = alloca.get_result(&ctx);
         StoreOp::new(&mut ctx, arg, slot)
@@ -496,7 +496,7 @@ mod tests {
         let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(entry, &ctx);
         let one_result = one.get_result(&ctx);
-        let slot = AllocaOp::new(&mut ctx, array_ty.into(), one_result);
+        let slot = AllocaOp::new(&mut ctx, array_ty.into(), one_result, 0);
         slot.get_operation().insert_at_back(entry, &ctx);
         let value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(99, NonZero::new(64).unwrap()))));
         value.get_operation().insert_at_back(entry, &ctx);

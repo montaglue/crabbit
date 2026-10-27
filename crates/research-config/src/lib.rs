@@ -1,4 +1,4 @@
-//! Register-allocation engine selection (eregalloc/INTEGRATION-CONTRACT.md).
+//! Register-allocation engine selection (crabbit-engines/docs/eregalloc/INTEGRATION-CONTRACT.md).
 //!
 //! | variable | values | default | effect |
 //! |---|---|---|---|
@@ -17,8 +17,9 @@
 //! crate, so the resident driver/server can share it.
 //!
 //! Engine availability is a LINK-TIME property, not a feature: the
-//! research engines live in private sibling repositories, and cargo
-//! resolves even optional dependencies into the lockfile, so the public
+//! research engines live in the private sibling repository
+//! `crabbit-engines`, and cargo resolves even optional dependencies into the
+//! lockfile, so the public
 //! workspace cannot reference them at all. Instead the workspace-excluded
 //! `crates/crabbit-research` composition dylib registers its engines here
 //! ([register_engine]) before delegating to the ordinary backend; the
@@ -113,7 +114,7 @@ pub enum ConfigError {
     /// composition dylib, not the backend currently running.
     #[error(
         "the `{engine}` engine is not linked into this backend: it lives in \
-         crates/crabbit-research (which needs the private research checkouts); \
+         crates/crabbit-research (which needs the private sibling checkout ../crabbit-engines); \
          build that crate and point -Zcodegen-backend at libcrabbit_research.so"
     )]
     EngineNotLinked { engine: String },

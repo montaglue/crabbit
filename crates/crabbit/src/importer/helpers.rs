@@ -43,37 +43,49 @@ pub(super) fn usize_ty(ctx: &mut Context) -> TypedHandle<IntegerType> {
     IntegerType::get(ctx, 64, Signedness::Unsigned)
 }
 
-pub(super) fn llvm_ptr_ty(ctx: &mut Context) -> TypeHandle {
-    llvm::types::PointerType::get(ctx, 0).into()
+/// The importer's thin pointer: an opaque, byte-addressed pointer in
+/// dialect-mir's terms — `mir.ptr<u8>`, mutable, generic address space,
+/// Erased provenance. Every thin pointer the walk builds has this type;
+/// the typing pass (`super::typing`) retypes it at the uses whose verifier
+/// rule names a pointee (loads, stores, callee parameters, offsets).
+pub(super) fn ptr_ty(ctx: &mut Context) -> TypeHandle {
+    let byte: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+    crate::dialects::dialect_mir::types::MirPtrType::get(
+        ctx,
+        byte,
+        true,
+        crate::dialects::dialect_mir::types::address_space::GENERIC,
+    )
+    .into()
 }
 
 pub(super) fn str_ref_ty(ctx: &mut Context) -> TypeHandle {
-    let ptr = llvm_ptr_ty(ctx);
+    let ptr = ptr_ty(ctx);
     let usize: TypeHandle = usize_ty(ctx).into();
-    llvm::types::StructType::get_unnamed(ctx, vec![ptr, usize]).into()
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, usize], llvm::types::StructLayout::Unpacked)).into()
 }
 
 pub(super) fn slice_ref_ty(ctx: &mut Context, _elem: TypeHandle) -> TypeHandle {
-    let ptr = llvm_ptr_ty(ctx);
+    let ptr = ptr_ty(ctx);
     let usize: TypeHandle = usize_ty(ctx).into();
-    llvm::types::StructType::get_unnamed(ctx, vec![ptr, usize]).into()
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, usize], llvm::types::StructLayout::Unpacked)).into()
 }
 
 pub(super) fn trait_object_ref_ty(ctx: &mut Context) -> TypeHandle {
-    let ptr = llvm_ptr_ty(ctx);
-    llvm::types::StructType::get_unnamed(ctx, vec![ptr, ptr]).into()
+    let ptr = ptr_ty(ctx);
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, ptr], llvm::types::StructLayout::Unpacked)).into()
 }
 
 pub(super) fn fmt_arguments_ty(ctx: &mut Context) -> TypeHandle {
-    let ptr = llvm_ptr_ty(ctx);
-    llvm::types::StructType::get_unnamed(ctx, vec![ptr, ptr]).into()
+    let ptr = ptr_ty(ctx);
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, ptr], llvm::types::StructLayout::Unpacked)).into()
 }
 
 pub(super) fn device_slice_ty(ctx: &mut Context, elem: TypeHandle, mutable: bool) -> TypeHandle {
     let _ = (elem, mutable);
-    let ptr: TypeHandle = llvm_ptr_ty(ctx);
+    let ptr: TypeHandle = ptr_ty(ctx);
     let usize: TypeHandle = usize_ty(ctx).into();
-    llvm::types::StructType::get_unnamed(ctx, vec![ptr, usize]).into()
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, usize], llvm::types::StructLayout::Unpacked)).into()
 }
 
 /// Memory-order permutation of a struct-like type's fields per the real
@@ -135,12 +147,24 @@ pub(super) fn struct_like_source_fields<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -
                     .non_enum_variant()
                     .fields
                     .iter()
-                    .map(|field| field.ty(tcx, args))
+                    .map(|field| field_ty(tcx, field, args))
                     .collect(),
             )
         }
         _ => None,
     }
+}
+
+/// A field's type instantiated with `args`. Since 1.99 `FieldDef::ty` hands
+/// back an [rustc_middle::ty::Unnormalized] wrapper; this importer keeps its
+/// pre-1.99 behaviour of instantiating only and normalizing lazily
+/// ([normalize_ty] at conversion time), so the wrapper is unwrapped as is.
+pub(super) fn field_ty<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    field: &rustc_middle::ty::FieldDef,
+    args: rustc_middle::ty::GenericArgsRef<'tcx>,
+) -> Ty<'tcx> {
+    field.ty(tcx, args).skip_normalization()
 }
 
 pub(super) fn runtime_ty<'tcx>(mut ty: Ty<'tcx>) -> Ty<'tcx> {
@@ -157,7 +181,7 @@ pub(super) fn normalize_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
         return ty;
     }
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
-    tcx.try_normalize_erasing_regions(typing_env, ty)
+    tcx.try_normalize_erasing_regions(typing_env, rustc_middle::ty::Unnormalized::new(ty))
         .unwrap_or(ty)
 }
 

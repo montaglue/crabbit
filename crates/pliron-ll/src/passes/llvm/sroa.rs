@@ -18,7 +18,7 @@ use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
 use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 use crate::{
     context::{Context, Ptr},
-    debug_info::{get_operation_result_name, set_operation_result_name},
+    builtin::given_names::{get_operation_result_name, set_operation_result_name},
     dialects::{
         builtin::{
             attributes::IntegerAttr,
@@ -188,7 +188,7 @@ fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> CrabbitResult<()> {
         one.get_operation().insert_after(ctx, insert_after);
         insert_after = one.get_operation();
         let one_val = one.get_result(ctx);
-        let slot_alloca = AllocaOp::new(ctx, leaf.ty, one_val);
+        let slot_alloca = AllocaOp::new(ctx, leaf.ty, one_val, 0);
         slot_alloca.get_operation().insert_after(ctx, insert_after);
         crate::passes::aarch64::opmap::derive_new_from(
             ctx,
@@ -339,6 +339,7 @@ fn constant_byte_offset(ctx: &Context, gep: GetElementPtrOp) -> Option<u64> {
                 return None;
             }
             let value = (ConstantOp::from_operation(op)).get_value(ctx);
+            let value = &*value as &dyn pliron::attribute::Attribute;
             Some(value.downcast_ref::<IntegerAttr>()?.value().to_u64())
         }
     }
@@ -536,7 +537,7 @@ mod tests {
         let mut ctx = test_context();
         let u64_ty: TypeHandle = IntegerType::get(&mut ctx, 64, Signedness::Signless).into();
         let pair_ty: TypeHandle =
-            StructType::get_unnamed(&mut ctx, vec![u64_ty, u64_ty]).into();
+            StructType::get_unnamed(&mut ctx, (vec![u64_ty, u64_ty], crate::dialects::llvm::types::StructLayout::Unpacked)).into();
         let fn_ty: TypedHandle<FuncType> =
             FuncType::get(&mut ctx, pair_ty, vec![pair_ty], false);
         let func = FuncOp::new(&mut ctx, "split".try_into().unwrap(), fn_ty);
@@ -549,7 +550,7 @@ mod tests {
         let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
         one.get_operation().insert_at_back(entry, &ctx);
         let one_val = one.get_result(&ctx);
-        let alloca = AllocaOp::new(&mut ctx, pair_ty, one_val);
+        let alloca = AllocaOp::new(&mut ctx, pair_ty, one_val, 0);
         alloca.get_operation().insert_at_back(entry, &ctx);
         let slot = alloca.get_result(&ctx);
         StoreOp::new(&mut ctx, arg, slot)

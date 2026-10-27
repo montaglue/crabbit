@@ -1,5 +1,9 @@
 [toolchain]
-# Pinned to the same nightly NVlabs/cuda-oxide pins at the rev this
-# workspace depends on; crabbit's rustc_private code tracks this API.
-channel = "nightly-2026-04-03"
-components = ["rustc-dev", "llvm-tools-preview", "rust-src", "rustfmt", "clippy"]
+# Pinned to the same stable release NVlabs/cuda-oxide pins (their
+# `rust-toolchain.toml`); crabbit's rustc_private code tracks this API, and
+# `cuda-oxide`'s `mir-importer` (the device-path translator) uses this
+# release's `rustc_public`. `RUSTC_BOOTSTRAP=1` (.cargo/config.toml) unlocks
+# `#![feature(rustc_private)]` and `-Z` flags on the stable release, exactly
+# as upstream does.
+channel = "1.99.1"
+components = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]

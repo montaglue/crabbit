@@ -1,11 +1,8 @@
 //! rustc MIR importer targeting cuda-oxide's `dialect-mir` (the `mir`
-//! dialect) instead of crabbit's own `cmir`.
-//!
-//! Forked from [importer](crate::importer); emission sites are being swapped
-//! from `cmir` ops to `dialect_mir` ops one construct at a time. Selected at
-//! runtime via `CRABBIT_PIPELINE=oxide`. Once every emission site is swapped
-//! and the fixtures are green under the oxide pipeline, this file replaces
-//! `importer.rs` and the `cmir` dialect is deleted.
+//! dialect). Walks the crate's monomorphized MIR (`rustc_middle::mir`) and
+//! emits one `mir` module (plus the `rust_kernels` module for device
+//! entries); `crabbit_mir::passes::lower_dialect_mir` then hands the module
+//! to cuda-oxide's `mir-lower`.
 
 use std::num::NonZero;
 
@@ -15,7 +12,7 @@ use rustc_middle::{
         self as rustc_mir, BasicBlock as RustBasicBlock, BinOp, Body, ConstOperand, Local, Operand,
         Place, Rvalue, StatementKind, TerminatorKind,
     },
-    ty::{EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypeVisitableExt},
+    ty::{EarlyBinder, Instance, InstanceKind, ShimKind, Ty, TyCtxt, TypeVisitableExt},
 };
 use crate::{
     context::{Context, Ptr},
@@ -61,6 +58,7 @@ mod layout;      // field offsets, size/align computation
 mod helpers;     // slot/block lookup, cached types, ty predicates
 mod convert;     // rustc Ty -> dialect type conversion, enum layout
 mod ox;          // constructor shims over dialect-mir / llvm ops
+mod typing;      // pointer typing + foreign-call signatures, after the walk
 #[cfg(test)]
 mod tests;
 

@@ -6,16 +6,16 @@ use combine::{Parser, token};
 use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use pliron::{
     builtin::{
-        attributes::StringAttr,
+        attributes::{IdentifierAttr, StringAttr},
         op_interfaces::{NOpdsInterface, NResultsInterface, OneResultInterface},
     },
     context::Context,
     identifier::Identifier,
     irfmt::parsers::{process_parsed_ssa_defs, spaced, ssa_opd_parser, type_parser},
-    location::{Located, Location},
+    location::Location,
     op::{Op, OpObj},
     operation::Operation,
-    parsable::{Parsable, ParseResult, StateStream},
+    parsable::{Parsable, ParseResult, StateStream, StreamLocation},
     printable::{self, Printable},
     r#type::{TypeHandle, Typed},
     value::Value,
@@ -26,6 +26,7 @@ use pliron_llvm::types::PointerType;
 use super::attributes::{VBinOpKindAttr, VReduceKindAttr};
 
 pliron::dict_key!(ATTR_KEY_LL_CSTR_VALUE, "ll_cstr_value");
+pliron::dict_key!(ATTR_KEY_LL_FUNC_ADDR_SYMBOL, "ll_func_addr_symbol");
 pliron::dict_key!(ATTR_KEY_LL_VBINOP_KIND, "ll_vbinop_kind");
 pliron::dict_key!(ATTR_KEY_LL_VREDUCE_KIND, "ll_vreduce_kind");
 
@@ -94,6 +95,93 @@ impl Parsable for CStrOp {
             .map(|attr| -> OpObj {
                 let ctx = &mut *state_stream.state.ctx;
                 let op = CStrOp::new(ctx, attr.into());
+                if !results.is_empty() {
+                    process_parsed_ssa_defs(state_stream, &results, op.get_operation()).ok();
+                }
+                OpObj::new(op)
+            })
+            .into()
+    }
+}
+
+/// The address of a function of this module, taken before the module's
+/// functions are in the llvm dialect.
+///
+/// The MIR importer reifies `fn` items (function pointers, vtable slots
+/// built in code) while the functions themselves are still `mir.func`s;
+/// an `llvm.addressof` may only name an `llvm.func` or `llvm.global`, so
+/// it cannot be used before the lowering. This op names the symbol and
+/// carries the pointer type the importer wants; right after the lowering
+/// `materialize-function-addresses` (crabbit-mir) turns it into the
+/// `llvm.addressof` it stands for.
+///
+/// Form: `<res> = ll.func_addr @<symbol> : <pointer type>`
+#[verify_succ]
+#[def_op("ll.func_addr")]
+#[derive_op_interface_impl(NResultsInterface<1>, OneResultInterface)]
+pub struct FuncAddrOp;
+
+impl FuncAddrOp {
+    pub fn new(ctx: &mut Context, symbol: Identifier, result_ty: TypeHandle) -> Self {
+        let op = Operation::new(
+            ctx,
+            Self::get_concrete_op_info(),
+            vec![result_ty],
+            vec![],
+            vec![],
+            0,
+        );
+        let func_addr = FuncAddrOp { op };
+        func_addr
+            .get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(ATTR_KEY_LL_FUNC_ADDR_SYMBOL.clone(), IdentifierAttr::new(symbol));
+        func_addr
+    }
+
+    /// The function the address is of.
+    pub fn symbol(&self, ctx: &Context) -> Identifier {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .get::<IdentifierAttr>(&ATTR_KEY_LL_FUNC_ADDR_SYMBOL)
+            .cloned()
+            .map(Identifier::from)
+            .expect("ll.func_addr carries its symbol")
+    }
+}
+
+impl Printable for FuncAddrOp {
+    fn fmt(
+        &self,
+        ctx: &Context,
+        state: &printable::State,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        self.get_result(ctx).fmt(ctx, state, f)?;
+        write!(f, " = {} @{} : ", self.get_opid().disp(ctx), self.symbol(ctx))?;
+        self.get_result(ctx).get_type(ctx).fmt(ctx, state, f)
+    }
+}
+
+impl Parsable for FuncAddrOp {
+    type Arg = Vec<(Identifier, Location)>;
+    type Parsed = OpObj;
+
+    fn parse<'a>(
+        state_stream: &mut StateStream<'a>,
+        results: Self::Arg,
+    ) -> ParseResult<'a, Self::Parsed> {
+        let mut parser = (
+            spaced(token('@')).with(Identifier::parser(())),
+            spaced(token(':')).with(type_parser()),
+        );
+        parser
+            .parse_stream(state_stream)
+            .map(|(symbol, ty)| -> OpObj {
+                let ctx = &mut *state_stream.state.ctx;
+                let op = FuncAddrOp::new(ctx, symbol, ty);
                 if !results.is_empty() {
                     process_parsed_ssa_defs(state_stream, &results, op.get_operation()).ok();
                 }

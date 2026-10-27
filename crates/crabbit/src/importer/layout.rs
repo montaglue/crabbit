@@ -32,14 +32,14 @@ pub(super) fn field_offset_of<'tcx>(
             .non_enum_variant()
             .fields
             .iter()
-            .map(|field| field.ty(tcx, args))
+            .map(|field| field_ty(tcx, field, args))
             .collect::<Vec<_>>(),
         rustc_middle::ty::TyKind::Adt(adt_def, args) if adt_def.is_union() => {
             let fields = adt_def
                 .non_enum_variant()
                 .fields
                 .iter()
-                .map(|field| field.ty(tcx, args))
+                .map(|field| field_ty(tcx, field, args))
                 .collect::<Vec<_>>();
             if index >= fields.len() {
                 return Err(format!(
@@ -157,7 +157,7 @@ pub(super) fn layout_align_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Resul
                 .non_enum_variant()
                 .fields
                 .iter()
-                .map(|field| field.ty(tcx, args))
+                .map(|field| field_ty(tcx, field, args))
                 .collect();
             struct_like_align(tcx, &fields)
         }
@@ -228,7 +228,7 @@ pub(super) fn layout_size_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Result
             .fields
             .iter()
             .try_fold(0u64, |size, field| {
-                Ok(size.max(layout_size_of_ty(tcx, field.ty(tcx, args))?))
+                Ok(size.max(layout_size_of_ty(tcx, field_ty(tcx, field, args))?))
             }),
         rustc_middle::ty::TyKind::Adt(adt_def, _) if adt_def.is_enum() => {
             let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
@@ -258,7 +258,7 @@ pub(super) fn array_len<'tcx>(tcx: TyCtxt<'tcx>, len: rustc_middle::ty::Const<'t
     }
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
     let normalized = tcx
-        .try_normalize_erasing_regions(typing_env, len)
+        .try_normalize_erasing_regions(typing_env, rustc_middle::ty::Unnormalized::new(len))
         .map_err(|error| format!("unsupported non-constant array length: {len:?}: {error:?}"))?;
     normalized
         .try_to_target_usize(tcx)

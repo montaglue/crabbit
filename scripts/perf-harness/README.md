@@ -106,6 +106,11 @@ CRABBIT_REGALLOC=eregalloc CRABBIT_BLOCK_FREQ=profile \
   built `--no-default-features` answers `CRABBIT_REGALLOC=eregalloc` /
   `CRABBIT_BLOCK_FREQ=cmt-provider` with "crabbit was built without the
   `<feature>` feature".
+  Update (2026-10-26): those features are now declared no-ops; the engines
+  are link-time only. The harness builds `crates/crabbit-research`, whose
+  path deps point at the private sibling checkout `../crabbit-engines`
+  (eregalloc + CMT crates), and falls back to the engine-less
+  `libcrabbit.so` when that checkout is missing.
 
 ## Mid-end backward-dataflow round (2026-08-31)
 

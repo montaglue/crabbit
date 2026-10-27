@@ -164,16 +164,14 @@ impl AddrFolder {
         for block in blocks {
             for op_ptr in block.deref(ctx).iter(ctx) {
                 let op_obj = Operation::get_op_dyn(op_ptr, ctx);
-                let Some(constant) =
-                    op_obj.downcast_ref::<crate::dialects::builtin::ops::ConstantOp>()
-                else {
+                let Some(attr) = super::constant_value(ctx, &*op_obj) else {
                     continue;
                 };
-                let result = constant.get_result(ctx);
+                let result = op_ptr.deref(ctx).get_result(0);
                 let Ok(width) = width_of(ctx, result.get_type(ctx)) else {
                     continue;
                 };
-                if let Some(int) = constant.get_value(ctx).downcast_ref::<IntegerAttr>() {
+                if let Some(int) = (&*attr as &dyn pliron::attribute::Attribute).downcast_ref::<IntegerAttr>() {
                     let mask = if width >= 128 {
                         u128::MAX
                     } else {

@@ -22,13 +22,23 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
         // Both explicit `ptr::drop_in_place` calls and drop-glue shims
         // resolve to this instance kind (the shim was named `ptr::drop_glue`
         // on newer nightlies; matching the kind covers both spellings).
-        InstanceKind::DropGlue(..) => "drop_glue".to_string(),
+        InstanceKind::Shim(ShimKind::DropGlue(..)) => "drop_glue".to_string(),
         _ => return Ok(false),
     };
 
     match name.as_str() {
         // Pure optimization hints with no runtime semantics.
         "cold_path" => Ok(true),
+        // The backend never proves a value statically known; `false` is the
+        // intrinsic's documented fallback and keeps the generic path (std's
+        // `fmt` adapters on 1.99 call this) off the call-a-symbol route.
+        "is_val_statically_known" => {
+            let bool_ty = bool_immediate_ty(ctx);
+            let value = integer_constant(ctx, bool_ty, 0)?;
+            value.get_operation().insert_at_back(insert_block, ctx);
+            store_place(tcx, ctx, state, insert_block, body, destination, value.get_result(ctx))?;
+            Ok(true)
+        }
         "black_box" => {
             if args.len() != 1 {
                 return Err(format!(
@@ -134,7 +144,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             }
             let helper: crate::identifier::Identifier =
                 format!("__aarch64_swp{size}_acq_rel").try_into().expect("size digits are legal identifier characters");
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             declare_external_function(
                 ctx,
                 state.module_body,
@@ -146,6 +156,149 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let value = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
             let value = normalize_bool_for_storage(tcx, ctx, state, insert_block, value_ty, value)?;
             let value = cast_value_to_type(ctx, insert_block, value, storage_ty);
+            let mut call_args = Vec::new();
+            lower_abi_call_arg(ctx, insert_block, value, &mut call_args)?;
+            lower_abi_call_arg(ctx, insert_block, ptr, &mut call_args)?;
+            let call =
+                mir_dialect::ops::CallOp::new_direct(ctx, helper, call_args, Some(storage_ty));
+            call.get_operation().insert_at_back(insert_block, ctx);
+            let old = call.get_result(ctx);
+            store_place(tcx, ctx, state, insert_block, body, destination, old)?;
+            Ok(true)
+        }
+        // Fences (ordering is a const generic since 1.99, so the names carry
+        // no suffix). The atomic loads/stores above already drop ordering
+        // (this backend targets single-threaded programs; its outline-atomic
+        // RMWs are acq_rel anyway), so a fence emits nothing.
+        "atomic_fence" | "atomic_singlethreadfence" => Ok(true),
+        // `core::intrinsics::abort`: rustc lowers it to `llvm.trap`; the C
+        // runtime's `abort()` is the host equivalent (a diverging call, so
+        // the caller's missing return target becomes `unreachable`).
+        "abort" => {
+            let abort: crate::identifier::Identifier =
+                "abort".try_into().expect("static identifier literal");
+            declare_external_function(ctx, state.module_body, abort.clone(), vec![], None);
+            let call = mir_dialect::ops::CallOp::new_direct(ctx, abort, vec![], None);
+            call.get_operation().insert_at_back(insert_block, ctx);
+            Ok(true)
+        }
+        // The atomic read-modify-write family (since 1.99 the ordering is a
+        // const generic, so the names carry no `_relaxed`/`_acqrel`
+        // suffix), through the same aarch64-linux outline-atomic helpers as
+        // `atomic_xchg`: `__aarch64_ldadd/ldclr/ldset/ldeor<N>_acq_rel`
+        // (`fetch_sub` is ldadd of the negation, `fetch_and` ldclr of the
+        // complement) and `__aarch64_cas<N>_acq_rel` for compare-exchange.
+        // Orderings are strengthened to acq_rel, which is always sound.
+        "atomic_xadd" | "atomic_xsub" | "atomic_and" | "atomic_or" | "atomic_xor"
+        | "atomic_cxchg" | "atomic_cxchgweak" => {
+            if !(tcx.sess.target.arch.to_string() == "aarch64"
+                && tcx.sess.target.os.to_string() == "linux")
+            {
+                return Ok(false);
+            }
+            let is_cas = name.starts_with("atomic_cxchg");
+            if args.len() != if is_cas { 3 } else { 2 } {
+                return Err(format!("unsupported {name} intrinsic arity: {}", args.len()));
+            }
+            let value_ty = mono_ty(tcx, state, instance.args.type_at(0));
+            let Some(storage_ty) = convert_storage_ty(tcx, ctx, value_ty)? else {
+                return Ok(true);
+            };
+            let size = layout_size_of_ty(tcx, value_ty)?;
+            if !matches!(size, 1 | 2 | 4 | 8) {
+                return Err(format!("unsupported {name} operand size: {size} bytes"));
+            }
+            let ptr_ty = ptr_ty(ctx);
+            let ptr = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
+            let operand = |ctx: &mut Context, index: usize| -> Result<Value, String> {
+                let value = import_operand(tcx, ctx, state, insert_block, body, &args[index].node)?;
+                let value =
+                    normalize_bool_for_storage(tcx, ctx, state, insert_block, value_ty, value)?;
+                Ok(cast_value_to_type(ctx, insert_block, value, storage_ty))
+            };
+            if is_cas {
+                let expected = operand(ctx, 1)?;
+                let desired = operand(ctx, 2)?;
+                let helper: crate::identifier::Identifier = format!("__aarch64_cas{size}_acq_rel")
+                    .try_into()
+                    .expect("size digits are legal identifier characters");
+                declare_external_function(
+                    ctx,
+                    state.module_body,
+                    helper.clone(),
+                    vec![storage_ty, storage_ty, ptr_ty],
+                    Some(storage_ty),
+                );
+                let mut call_args = Vec::new();
+                lower_abi_call_arg(ctx, insert_block, expected, &mut call_args)?;
+                lower_abi_call_arg(ctx, insert_block, desired, &mut call_args)?;
+                lower_abi_call_arg(ctx, insert_block, ptr, &mut call_args)?;
+                let call =
+                    mir_dialect::ops::CallOp::new_direct(ctx, helper, call_args, Some(storage_ty));
+                call.get_operation().insert_at_back(insert_block, ctx);
+                let old = call.get_result(ctx);
+                // The result is `(old, old == expected)`.
+                let pair_ty = mono_ty(tcx, state, body.local_decls[destination.local].ty);
+                let Some(pair_storage) = convert_storage_ty(tcx, ctx, pair_ty)? else {
+                    return Ok(true);
+                };
+                let success = mir_dialect::ops::EqOp::new(ctx, old, expected);
+                success.get_operation().insert_at_back(insert_block, ctx);
+                let success = normalize_bool_for_storage(
+                    tcx,
+                    ctx,
+                    state,
+                    insert_block,
+                    tcx.types.bool,
+                    success.get_result(ctx),
+                )?;
+                let undef = mir_dialect::ops::UndefOp::new(ctx, pair_storage);
+                undef.get_operation().insert_at_back(insert_block, ctx);
+                let old_index = converted_field_index(tcx, pair_ty, 0)?;
+                let ok_index = converted_field_index(tcx, pair_ty, 1)?;
+                let with_old =
+                    mir_dialect::ops::InsertValueOp::new(ctx, old, undef.get_result(ctx), vec![old_index]);
+                with_old.get_operation().insert_at_back(insert_block, ctx);
+                let pair = mir_dialect::ops::InsertValueOp::new(
+                    ctx,
+                    success,
+                    with_old.get_result(ctx),
+                    vec![ok_index],
+                );
+                pair.get_operation().insert_at_back(insert_block, ctx);
+                store_place(tcx, ctx, state, insert_block, body, destination, pair.get_result(ctx))?;
+                return Ok(true);
+            }
+            let value = operand(ctx, 1)?;
+            let (helper_op, value) = match name.as_str() {
+                "atomic_xadd" => ("ldadd", value),
+                "atomic_xsub" => {
+                    let neg = mir_dialect::ops::NegOp::new(ctx, value);
+                    neg.get_operation().insert_at_back(insert_block, ctx);
+                    ("ldadd", neg.get_result(ctx))
+                }
+                "atomic_and" => {
+                    // ldclr clears the set bits: and(x, v) == clr(x, !v).
+                    let ones = integer_constant(ctx, storage_ty, u128::MAX)?;
+                    ones.get_operation().insert_at_back(insert_block, ctx);
+                    let not = mir_dialect::ops::BitXorOp::new(ctx, value, ones.get_result(ctx));
+                    not.get_operation().insert_at_back(insert_block, ctx);
+                    ("ldclr", not.get_result(ctx))
+                }
+                "atomic_or" => ("ldset", value),
+                _ => ("ldeor", value),
+            };
+            let helper: crate::identifier::Identifier =
+                format!("__aarch64_{helper_op}{size}_acq_rel")
+                    .try_into()
+                    .expect("size digits are legal identifier characters");
+            declare_external_function(
+                ctx,
+                state.module_body,
+                helper.clone(),
+                vec![storage_ty, ptr_ty],
+                Some(storage_ty),
+            );
             let mut call_args = Vec::new();
             lower_abi_call_arg(ctx, insert_block, value, &mut call_args)?;
             lower_abi_call_arg(ctx, insert_block, ptr, &mut call_args)?;
@@ -173,7 +326,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let val = cast_value_to_type(ctx, insert_block, val, val_ty);
 
             let memset: crate::identifier::Identifier = "memset".try_into().expect("static identifier literal");
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
                 ctx,
@@ -533,7 +686,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             } else {
                 "memcpy".try_into().expect("static identifier literal")
             };
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
                 ctx,
@@ -572,7 +725,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             temp.get_operation().insert_at_back(insert_block, ctx);
             let temp_ptr = temp.get_result(ctx);
             let memcpy: crate::identifier::Identifier = "memcpy".try_into().expect("static identifier literal");
-            let ptr_ty = llvm_ptr_ty(ctx);
+            let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
                 ctx,
@@ -985,7 +1138,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                     // Fat pointer {data, vtable}; the real vtable stores size
                     // at +8 and align at +16.
                     let fat = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
-                    let ptr_ty = llvm_ptr_ty(ctx);
+                    let ptr_ty = ptr_ty(ctx);
                     let vtable = mir_dialect::ops::ExtractValueOp::new(ctx, fat, vec![1], ptr_ty);
                     vtable.get_operation().insert_at_back(insert_block, ctx);
                     let offset = if name == "size_of_val" { 8 } else { 16 };
@@ -1034,7 +1187,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                     args.len()
                 ));
             }
-            let drop_instance = Instance::resolve_drop_in_place(tcx, ty);
+            let drop_instance = Instance::resolve_drop_glue(tcx, ty);
             let mut legaliser = Legaliser::default();
             let symbol = legaliser.legalise(tcx.symbol_name(drop_instance).name);
             import_upstream_instance(tcx, ctx, state.module_body, drop_instance)
@@ -1553,6 +1706,27 @@ pub(super) fn emit_bitreverse64(
     Ok(x)
 }
 
+/// The instance a direct call to `instance` is emitted against. An intrinsic
+/// no arm of [lower_known_intrinsic_call] handles is called as its fallback
+/// body when it has one (`tcx.intrinsic(..).must_be_overridden == false`):
+/// the plain item instance `Instance::new_raw(def_id, args)`, whose MIR
+/// `tcx.instance_mir` provides, exactly as rustc_codegen_ssa falls back.
+/// Intrinsics without a body (`must_be_overridden`) are left alone and keep
+/// surfacing as unresolved symbols rather than being silently mis-compiled.
+pub(super) fn with_intrinsic_fallback<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+) -> Instance<'tcx> {
+    if let InstanceKind::Intrinsic(def_id) = instance.def
+        && tcx
+            .intrinsic(def_id)
+            .is_some_and(|intrinsic| !intrinsic.must_be_overridden)
+    {
+        return Instance::new_raw(def_id, instance.args);
+    }
+    instance
+}
+
 pub(super) fn import_upstream_instance<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,
@@ -1606,11 +1780,15 @@ pub(super) fn set_function_linkage(
         if let Some(llvm_func) = Operation::get_op::<llvm::ops::FuncOp>(func, ctx) {
             llvm_func.set_attr_llvm_function_linkage(ctx, linkage);
         } else {
-            // A `mir.func`: mir-lower's propagate_linkage_attr carries this
-            // key onto the lowered `llvm.func`.
-            func.deref_mut(ctx)
-                .attributes
-                .set(ox::func_linkage_key(), linkage);
+            // A `mir.func`: the lowering builds its `llvm.func` fresh and
+            // carries no custom attribute across, so the linkage travels on
+            // the module and is stamped after `lower-dialect-mir`
+            // (`crabbit_mir::passes::linkage`).
+            let module = module_body
+                .deref(ctx)
+                .get_parent_op(ctx)
+                .expect("a module body block belongs to its module op");
+            crabbit_mir::passes::linkage::record_linkage(ctx, module, symbol, linkage);
         }
     }
 }

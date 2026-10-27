@@ -499,7 +499,7 @@ fn vectorized_slot_loaded_byte_gep_matches_scalar_semantics() {
     let ptr_ty: TypeHandle =
         pliron_llvm::types::PointerType::get(&mut ctx, 0).into();
     let fat_ty: TypeHandle =
-        pliron_llvm::types::StructType::get_unnamed(&mut ctx, vec![ptr_ty, i64t]).into();
+        pliron_llvm::types::StructType::get_unnamed(&mut ctx, (vec![ptr_ty, i64t], pliron_llvm::types::StructLayout::Unpacked)).into();
     let func_ty = FuncType::get(&mut ctx, i64t, vec![], false);
     let func = FuncOp::new(&mut ctx, "main".try_into().unwrap(), func_ty);
     func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
@@ -523,10 +523,10 @@ fn vectorized_slot_loaded_byte_gep_matches_scalar_semantics() {
 
     // entry: two fat-pointer slots, stored once (the slots never escape).
     let one_i32 = const_int(&mut ctx, entry, 1, 32);
-    let slot_a = pliron_llvm::ops::AllocaOp::new(&mut ctx, fat_ty, one_i32);
+    let slot_a = pliron_llvm::ops::AllocaOp::new(&mut ctx, fat_ty, one_i32, 0);
     slot_a.get_operation().insert_at_back(entry, &ctx);
     let slot_a_v = slot_a.get_result(&ctx);
-    let slot_out = pliron_llvm::ops::AllocaOp::new(&mut ctx, fat_ty, one_i32);
+    let slot_out = pliron_llvm::ops::AllocaOp::new(&mut ctx, fat_ty, one_i32, 0);
     slot_out.get_operation().insert_at_back(entry, &ctx);
     let slot_out_v = slot_out.get_result(&ctx);
     let a = address_of(&mut ctx, entry, "sa");

@@ -61,7 +61,7 @@ pub(super) fn convert_ty<'tcx>(
         TyKind::Char => IntegerType::get(ctx, 32, Signedness::Unsigned),
         TyKind::Float(rustc_middle::ty::FloatTy::F32) => return Ok(FP32Type::get(ctx).into()),
         TyKind::Float(rustc_middle::ty::FloatTy::F64) => return Ok(FP64Type::get(ctx).into()),
-        TyKind::FnPtr(_, _) => return Ok(llvm_ptr_ty(ctx)),
+        TyKind::FnPtr(_, _) => return Ok(ptr_ty(ctx)),
         TyKind::FnDef(_, _) => return Ok(unit_ty(ctx)),
         TyKind::Never => return Ok(unit_ty(ctx)),
         TyKind::Tuple(fields) if fields.is_empty() => return Ok(unit_ty(ctx)),
@@ -72,7 +72,7 @@ pub(super) fn convert_ty<'tcx>(
                 .into_iter()
                 .map(|idx| convert_ty(tcx, ctx, source[idx]))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(llvm::types::StructType::get_unnamed(ctx, fields).into());
+            return Ok(llvm::types::StructType::get_unnamed(ctx, (fields, llvm::types::StructLayout::Unpacked)).into());
         }
         TyKind::Array(elem, len) => {
             let elem = convert_ty(tcx, ctx, *elem)?;
@@ -94,7 +94,7 @@ pub(super) fn convert_ty<'tcx>(
                     TyKind::Dynamic(_, _) => Ok(trait_object_ref_ty(ctx)),
                     other => Err(format!("unsupported unsized pointee tail: {other:?}")),
                 },
-                None => Ok(llvm_ptr_ty(ctx)),
+                None => Ok(ptr_ty(ctx)),
             };
         }
         TyKind::Adt(_, _)
@@ -117,14 +117,14 @@ pub(super) fn convert_ty<'tcx>(
                 .non_enum_variant()
                 .fields
                 .iter()
-                .map(|field| field.ty(tcx, args))
+                .map(|field| field_ty(tcx, field, args))
                 .collect();
             let order = struct_memory_order(tcx, ty, source.len());
             let fields = order
                 .into_iter()
                 .map(|idx| convert_ty(tcx, ctx, source[idx]))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(llvm::types::StructType::get_named(ctx, name, Some(fields))
+            return Ok(llvm::types::StructType::get_named(ctx, name, Some((fields, llvm::types::StructLayout::Unpacked)))
                 .map_err(|error| error.to_string())?
                 .into());
         }
@@ -147,7 +147,7 @@ pub(super) fn convert_ty<'tcx>(
             };
             let _ = args;
             return Ok(
-                llvm::types::StructType::get_named(ctx, name, Some(vec![storage]))
+                llvm::types::StructType::get_named(ctx, name, Some((vec![storage], llvm::types::StructLayout::Unpacked)))
                     .map_err(|error| error.to_string())?
                     .into(),
             );
@@ -189,7 +189,7 @@ pub(super) fn convert_ty<'tcx>(
                 .into_iter()
                 .map(|idx| convert_ty(tcx, ctx, source[idx]))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(llvm::types::StructType::get_named(ctx, name, Some(fields))
+            return Ok(llvm::types::StructType::get_named(ctx, name, Some((fields, llvm::types::StructLayout::Unpacked)))
                 .map_err(|error| error.to_string())?
                 .into());
         }
@@ -225,7 +225,7 @@ pub(super) fn enum_blob_ty<'tcx>(
     let elem: TypeHandle = IntegerType::get(ctx, (align * 8) as u32, Signedness::Unsigned).into();
     let blob: TypeHandle = llvm::types::ArrayType::get(ctx, elem, size / align).into();
     Ok(
-        llvm::types::StructType::get_named(ctx, name, Some(vec![blob]))
+        llvm::types::StructType::get_named(ctx, name, Some((vec![blob], llvm::types::StructLayout::Unpacked)))
             .map_err(|error| error.to_string())?
             .into(),
     )
@@ -318,7 +318,7 @@ pub(super) fn read_enum_discriminant<'tcx>(
                         (1u128 << tag_bits) - 1
                     };
                     let relative_max =
-                        niche_variants.end().as_u32() - niche_variants.start().as_u32();
+                        niche_variants.last.as_u32() - niche_variants.start.as_u32();
 
                     // relative_tag = tag - niche_start, wrapping in the tag width
                     // so the comparison below matches rustc's niche decoding.
@@ -358,7 +358,7 @@ pub(super) fn read_enum_discriminant<'tcx>(
                     let niche_base = integer_constant(
                         ctx,
                         discr_ty,
-                        niche_variants.start().as_u32() as u128 & discr_mask,
+                        niche_variants.start.as_u32() as u128 & discr_mask,
                     )?;
                     niche_base.get_operation().insert_at_back(insert_block, ctx);
                     let tagged =

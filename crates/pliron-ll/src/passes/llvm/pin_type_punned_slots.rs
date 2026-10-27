@@ -150,7 +150,7 @@ mod tests {
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
         let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
         let pair_ty =
-            StructType::get_unnamed(&ctx, vec![i64_ty.into(), i64_ty.into()]);
+            StructType::get_unnamed(&ctx, (vec![i64_ty.into(), i64_ty.into()], crate::dialects::llvm::types::StructLayout::Unpacked));
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
         let func = FuncOp::new(&mut ctx, "f".try_into().unwrap(), func_ty);
         func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
@@ -166,7 +166,7 @@ mod tests {
         );
         one.get_operation().insert_at_back(entry, &ctx);
         let one_val = one.get_result(&ctx);
-        let slot = AllocaOp::new(&mut ctx, pair_ty.into(), one_val);
+        let slot = AllocaOp::new(&mut ctx, pair_ty.into(), one_val, 0);
         slot.get_operation().insert_at_back(entry, &ctx);
         let slot_val = slot.get_result(&ctx);
         // Type-punned discriminant-style read: i64 from a {i64, i64} slot.

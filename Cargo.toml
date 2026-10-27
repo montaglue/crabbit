@@ -13,43 +13,43 @@ repository = "https://github.com/montaglue/crabbit"
 # `version` is required alongside `path` so that `cargo publish` can resolve
 # this dependency against crates.io once the local path is stripped from the
 # packaged manifest. Locally, cargo still prefers the path.
-# Upstream pliron from crates.io (0.17.0), unpatched: fork independence,
-# and it matches the version combinatorial-matrix-theory uses. The sibling
-# cuda-oxide clone must agree on this exact crates.io version (both
-# workspaces must resolve one pliron or types do not unify).
-pliron = "0.17.0"
+# Upstream pliron from crates.io (0.20.0), unpatched. cuda-oxide's crates
+# below pin the same release ("=0.20.0"), as does crabbit-engines; every
+# consumer must resolve one pliron or types do not unify.
+pliron = "0.20.0"
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
-pliron-llvm = { version = "0.17.0", default-features = false }
+pliron-llvm = { version = "0.20.0", default-features = false }
 # Our own sibling repo (github.com/montaglue/pliron-inspect), pinned by
 # rev; bump the pin after pushing changes there.
-pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "934b52b7c36a2802edfd7673e59f216d0d2baf74" }
-pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "934b52b7c36a2802edfd7673e59f216d0d2baf74" }
-# cuda-oxide's MIR-on-pliron port, consumed from the sibling clone's
-# `crabbit-patches` branch: NVlabs upstream rev b099f64c plus a minimal,
-# upstreamable patch series (see that branch's log; discipline: every patch
-# is either submitted upstream or carries a written why-not). The clone's
-# pliron pin must stay identical to ours or types do not unify. Their
-# dialect also registers as `mir`, so a Context can hold either this
-# dialect or crabbit's own `cmir`, never both.
-# The crabbit-patches branch of our fork of NVlabs/cuda-oxide: upstream
-# rev b099f64c plus two patches (function-linkage propagation through the
-# lowering; port to crates.io pliron 0.17). Both written to be
-# upstreamable; drop the fork when they land there.
-dialect-mir = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad357fffa26cd5801f110cea286d4a5c92a032" }
-mir-lower = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad357fffa26cd5801f110cea286d4a5c92a032" }
-# cuda-oxide's textual LLVM IR exporter: the bridge from crabbit's kernel
-# module to the LLVM NVPTX toolchain (the "rust-llvm" comparison arm).
-llvm-export = { git = "https://github.com/montaglue/cuda-oxide.git", rev = "c8ad357fffa26cd5801f110cea286d4a5c92a032" }
+pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "f560c782ccdc5eb38f7de0d51bbd340657798a22" }
+pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "f560c782ccdc5eb38f7de0d51bbd340657798a22" }
+# cuda-oxide's MIR-on-pliron stack, consumed unpatched from NVIDIA's
+# upstream repository at one pinned revision (the "CUDA Rust" monorepo
+# nests these crates under cuda-oxide/crates/; cargo resolves them by
+# package name, and their transitive crates come along). No fork and no
+# vendored copy: what the lowering lacks for crabbit is done by crabbit
+# passes around it (function linkage: crates/mir/src/passes/linkage.rs)
+# or proposed upstream.
+#   dialect-mir  the `mir` dialect: types, ops and their verifier -- the
+#                typing contract crabbit's importer must meet
+#   mir-lower    `mir` -> LLVM dialect lowering; verifies its input first
+#   llvm-export  LLVM dialect -> textual LLVM IR, for the kernel comparison
+#                arm (the "rust-llvm" PTX path)
+# Their pliron pin ("=0.20.0") must equal ours or types do not unify.
+dialect-mir = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+mir-lower = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+llvm-export = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }
 # The research engines (eregalloc, combinatorial-matrix-theory) are NOT
-# dependencies of this workspace: they live in private repositories, and
+# dependencies of this workspace: they live in the private sibling repository
+# `crabbit-engines` (checked out next to this one), and
 # cargo resolves even optional dependencies into the lockfile, so any
 # reference here would break a fresh public checkout. They are composed
 # into a research build by the workspace-excluded crates/crabbit-research
-# dylib (path deps on the sibling checkouts; engines registered at load).
+# dylib (path deps on ../crabbit-engines; engines registered at load).
 crabbit-core = { path = "crates/crabbit", version = "0.1.0" }
 research-config = { path = "crates/research-config", version = "0.1.0", default-features = false }
 crabbit-mir = { path = "crates/mir", version = "0.1.0" }
@@ -57,6 +57,8 @@ awint = "0"
 combine = "4"
 thiserror = "2"
 rustc-hash = "2"
+# Symbol demangling for the mir-level census (callee families).
+rustc-demangle = "0.1"
 log = "0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -65,3 +67,11 @@ expect-test = "1"
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 assert_cmd = "2"
+
+# pliron-inspect opens this workspace as a project (from its UI): the render
+# driver and the resident analysis server are built here, and traces,
+# emitted modules and profiles are read from .crabbit-traces/.
+[workspace.metadata.pliron-inspect]
+driver = "crabbit-inspect-driver"
+analysisd = "crabbit-analysisd"
+traces = [".crabbit-traces"]

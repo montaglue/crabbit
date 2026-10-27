@@ -1,10 +1,5 @@
 //! pliron [Pass] wrapper over cuda-oxide's `mir-lower` (dialect-mir → llvm
-//! dialect lowering).
-//!
-//! [dialect_mir] and crabbit's own `mir` dialect (`crate::mir`) both register
-//! under the dialect name `mir` with overlapping op names, so a [Context] can
-//! hold only one of them. This pass belongs to a dialect-mir pipeline; running
-//! it in a context where crabbit's dialect is registered is a logic error.
+//! dialect lowering), consumed unpatched from upstream.
 
 use pliron::{
     context::{Context, Ptr},
@@ -14,7 +9,11 @@ use pliron::{
 use pliron_ll::conversion::pass::{AnalysisManager, Pass, PassResult, changed};
 
 /// Lowers a module of [dialect_mir] ops to the [pliron_llvm] dialect by
-/// delegating to [mir_lower::lower_mir_to_llvm].
+/// delegating to [mir_lower::lower_mir_to_llvm]. That entry point verifies
+/// the whole module against dialect-mir's typing contract before it
+/// lowers anything, so the importer's output must meet the contract
+/// (docs/MIR-DIALECT.md); there is no lenient mode. Linkage is restored
+/// afterwards by [super::linkage::ApplyModuleLinkagePass].
 pub struct LowerDialectMirPass;
 
 impl Pass for LowerDialectMirPass {
@@ -32,7 +31,3 @@ impl Pass for LowerDialectMirPass {
         Ok(changed())
     }
 }
-
-// Linkage is carried across the lowering by mir-lower itself (the
-// `crabbit-patches` series propagates the `mir_func_linkage` attribute onto
-// the lowered `llvm.func`), so no stamp pass is needed here anymore.

@@ -133,6 +133,7 @@ use spaces::PtrSpace;
 
 use thiserror::Error;
 
+use pliron::builtin::attr_interfaces::TypedAttrInterface;
 use pliron::builtin::op_interfaces::{
     AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpCallable, CallOpInterface as _,
     OneOpdInterface as _, OneRegionInterface, OneResultInterface, SymbolOpInterface,
@@ -149,14 +150,16 @@ use crate::{
         },
         llvm::{
             attributes::{FCmpPredicateAttr, ICmpPredicateAttr},
+            attributes::{AtomicOrderingAttr, AtomicRmwKindAttr, LinkageAttr, SyncScopeAttr},
             ops::{
-                AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
+                AShrOp, AddOp, AddrSpaceCastOp, AddressOfOp, AllocaOp, AndOp, AtomicCmpxchgOp,
+                AtomicRmwOp, BitcastOp, BrOp, CallOp, CondBrOp, ConstantOp as LlvmConstantOp,
                 FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp,
-                ExtractValueOp, FRemOp, FSubOp, FuncOp as LlvmFuncOp, GepIndex, GetElementPtrOp,
-                GlobalOp, ICmpOp, InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp,
-                PoisonOp, PtrToIntOp, ReturnOp,
+                ExtractValueOp, FRemOp, FSubOp, FenceOp, FreezeOp, FuncOp as LlvmFuncOp,
+                GepIndex, GetElementPtrOp, GlobalOp, ICmpOp, InlineAsmOp, InsertValueOp,
+                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp,
                 SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp,
-                UDivOp, UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp,
+                UDivOp, UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp, ZeroOp,
             },
             types::{ArrayType, PointerType, StructType, VoidType},
         },
@@ -420,13 +423,41 @@ fn emit_global(
             "`{name}` holds pointers (relocations are not supported in kernels)"
         ))));
     }
+    // cuda-oxide's lowering records a global's alignment in its own
+    // attribute (`cuda_oxide_global_alignment`); honour it alongside the
+    // `ll.data` alignment so an `.align 16` dynamic window stays aligned.
+    let cuda_align_key: pliron::identifier::Identifier =
+        "cuda_oxide_global_alignment".try_into().expect("static identifier literal");
+    let cuda_align = global
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<crate::dialects::llvm::attributes::AlignmentAttr>(&cuda_align_key)
+        .map(|attr| attr.0 as u64)
+        .unwrap_or(1);
     let align = data
         .align
         .max(1)
+        .max(cuda_align)
         .max(align_raises.get(&name).copied().unwrap_or(1));
     let len = data.bytes.len().max(1);
     let section = crate::ll::global_section(ctx, global);
+    let is_extern = data.bytes.is_empty()
+        && global
+            .get_attr_llvm_global_linkage(ctx)
+            .is_some_and(|linkage| matches!(*linkage, LinkageAttr::ExternalLinkage));
     match section.as_deref() {
+        Some(".shared") if is_extern => {
+            // An unsized external shared global is the dynamic shared-memory
+            // window (`extern __shared__`; cuda-oxide's `DynamicSharedArray`
+            // lowers to one per kernel): sized by the launch, declared
+            // `.extern`.
+            Ok((
+                name.clone(),
+                GlobalSpace::Shared,
+                format!(".extern .shared .align {align} .b8 {name}[];\n"),
+            ))
+        }
         Some(".shared") => {
             if data.bytes.iter().any(|&b| b != 0) {
                 return Err(input_error_noloc!(NvptxErr::UnsupportedGlobal(format!(
@@ -792,6 +823,25 @@ fn struct_field_offset(
     ))))
 }
 
+// Constants ------------------------------------------------------------------
+
+/// The value attribute of a constant-producing op, whichever dialect spells
+/// it: pliron's `builtin.constant` (crabbit's importer and mid-end) or
+/// pliron-llvm's `llvm.constant` (what cuda-oxide's `mir-lower` emits on the
+/// device path). Both carry one typed attribute.
+pub(super) fn constant_value<'a>(
+    ctx: &'a Context,
+    op_obj: &dyn Op,
+) -> Option<std::cell::Ref<'a, dyn TypedAttrInterface>> {
+    if let Some(constant) = op_obj.downcast_ref::<crate::dialects::builtin::ops::ConstantOp>() {
+        return Some(constant.get_value(ctx));
+    }
+    if let Some(constant) = op_obj.downcast_ref::<LlvmConstantOp>() {
+        return Some(constant.get_value(ctx));
+    }
+    None
+}
+
 // NVVM intrinsic calls ------------------------------------------------------
 
 /// The canonical (underscored, prefix-stripped) form of an NVVM intrinsic
@@ -953,9 +1003,12 @@ fn call_mem_effect(canonical: &str) -> CallMemEffect {
         || vote_intrinsic(canonical).is_some()
         || math_intrinsic(canonical).is_some()
         || canonical == DYN_SHARED_INTRINSIC
+        || canonical.starts_with("nvvm_isspacep_")
         || matches!(
             canonical,
             "nvvm_barrier0"
+                | "nvvm_barrier_cta_sync_aligned_all"
+                | "trap"
                 | "nvvm_bar_warp_sync"
                 | "nvvm_membar_gl"
                 | "nvvm_membar_cta"
@@ -1694,12 +1747,11 @@ impl<'c> FuncEmitter<'c> {
         for block in blocks {
             for op_ptr in block.deref(ctx).iter(ctx) {
                 let op_obj = Operation::get_op_dyn(op_ptr, ctx);
-                if let Some(constant) =
-                    op_obj.downcast_ref::<crate::dialects::builtin::ops::ConstantOp>()
-                {
-                    if let Some(int) = constant.get_value(ctx).downcast_ref::<IntegerAttr>() {
+                if let Some(attr) = constant_value(ctx, &*op_obj) {
+                    let constant_result = op_ptr.deref(ctx).get_result(0);
+                    if let Some(int) = (&*attr as &dyn pliron::attribute::Attribute).downcast_ref::<IntegerAttr>() {
                         known_consts
-                            .insert(constant.get_result(ctx), int.value().to_u128() as u64);
+                            .insert(constant_result, int.value().to_u128() as u64);
                     }
                 } else if let Some(alloca) = op_obj.downcast_ref::<AllocaOp>() {
                     let elem_ty = alloca.result_pointee_type(ctx);
@@ -1740,6 +1792,19 @@ impl<'c> FuncEmitter<'c> {
             PtrSpace::Shared => ".shared",
             PtrSpace::Generic => "",
         }
+    }
+
+    /// A predicate as the 32-bit integer 0/1 (its memory representation).
+    fn pred_to_byte(&mut self, pred: Reg) -> CrabbitResult<Reg> {
+        if pred.class != RegClass::Pred {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                "i1 value held in a {:?} register",
+                pred.class
+            ))));
+        }
+        let byte = self.fresh(RegClass::B32);
+        self.inst(format!("selp.u32 {byte}, 1, 0, {pred};"));
+        Ok(byte)
     }
 
     /// Materialize `imm` (already truncated to its width) into a fresh
@@ -1830,9 +1895,9 @@ impl<'c> FuncEmitter<'c> {
         };
         let op_obj = Operation::get_op_dyn(op_ptr, ctx);
 
-        if let Some(constant) = op_obj.downcast_ref::<crate::dialects::builtin::ops::ConstantOp>() {
-            let attr = constant.get_value(ctx);
-            let result = constant.get_result(ctx);
+        if let Some(attr) = constant_value(ctx, &*op_obj) {
+            let attr = &*attr as &dyn pliron::attribute::Attribute;
+            let result = op_ptr.deref(ctx).get_result(0);
             let width = width_of(ctx, result.get_type(ctx))?;
             let class = classify(ctx, result.get_type(ctx))?;
             // FP constants carry their IEEE bit pattern.
@@ -1983,6 +2048,24 @@ impl<'c> FuncEmitter<'c> {
             self.emit_store(store)?;
         } else if let Some(call) = op_obj.downcast_ref::<CallOp>() {
             self.emit_call(call)?;
+        } else if let Some(cast) = op_obj.downcast_ref::<AddrSpaceCastOp>() {
+            // Address spaces are a provenance fact here, not a value change:
+            // the same register serves (emission qualifies state spaces
+            // from the inferred provenance, not from the pointer type).
+            self.emit_reg_alias(cast.get_operand(ctx), cast.get_result(ctx))?;
+        } else if let Some(freeze) = op_obj.downcast_ref::<FreezeOp>() {
+            self.emit_reg_alias(freeze.get_operand(ctx), freeze.get_result(ctx))?;
+        } else if let Some(zero) = op_obj.downcast_ref::<ZeroOp>() {
+            // All-zero value: the undef path materializes zero leaves.
+            self.emit_undef_like(zero.get_result(ctx))?;
+        } else if let Some(asm) = op_obj.downcast_ref::<InlineAsmOp>() {
+            self.emit_inline_asm(asm)?;
+        } else if let Some(rmw) = op_obj.downcast_ref::<AtomicRmwOp>() {
+            self.emit_atomic_rmw(rmw)?;
+        } else if let Some(cas) = op_obj.downcast_ref::<AtomicCmpxchgOp>() {
+            self.emit_atomic_cmpxchg(cas)?;
+        } else if let Some(fence) = op_obj.downcast_ref::<FenceOp>() {
+            self.emit_fence(fence)?;
         } else if let Some(br) = op_obj.downcast_ref::<BrOp>() {
             let dest = br.get_operation().deref(ctx).get_successor(0);
             let args = br.successor_operands(ctx, 0);
@@ -2057,9 +2140,33 @@ impl<'c> FuncEmitter<'c> {
 
         let width = width_of(ctx, result.get_type(ctx))?;
         if width == 1 {
-            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                "i1 arithmetic is not supported in NVPTX emission".to_string()
-            )));
+            // Predicate logic (`xor i1 %x, true` is how mir-lower spells
+            // boolean `not`); the other integer ops have no i1 meaning.
+            let a = self.lookup(lhs)?;
+            let rhs_imm = self.consts.get(&rhs).map(|c| c.imm & 1);
+            let dst = self.fresh(RegClass::Pred);
+            match (kind, rhs_imm) {
+                (BinaryIntKind::Xor, Some(1)) => self.inst(format!("not.pred {dst}, {a};")),
+                (BinaryIntKind::Xor, Some(0)) | (BinaryIntKind::And, Some(1)) | (BinaryIntKind::Or, Some(0)) => {
+                    self.inst(format!("mov.pred {dst}, {a};"))
+                }
+                (BinaryIntKind::And | BinaryIntKind::Or | BinaryIntKind::Xor, _) => {
+                    let b = self.lookup(rhs)?;
+                    let mnemonic = match kind {
+                        BinaryIntKind::And => "and.pred",
+                        BinaryIntKind::Or => "or.pred",
+                        _ => "xor.pred",
+                    };
+                    self.inst(format!("{mnemonic} {dst}, {a}, {b};"));
+                }
+                _ => {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "i1 {kind:?} is not supported in NVPTX emission"
+                    ))));
+                }
+            }
+            self.values.insert(result, dst);
+            return Ok(());
         }
         let class = classify(ctx, result.get_type(ctx))?;
         let bits = if class == RegClass::B64 { 64 } else { 32 };
@@ -3042,16 +3149,20 @@ impl<'c> FuncEmitter<'c> {
         }
         let (base, off) = self.mem_operand(load.get_operand_address(ctx))?;
         let width = width_of(ctx, result.get_type(ctx))?;
-        if width == 1 {
-            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                "i1 load is not supported in NVPTX emission".to_string()
-            )));
-        }
         let class = classify(ctx, result.get_type(ctx))?;
         let space = self.space_qualifier(load.get_operand_address(ctx));
         let nc = self.nc_suffix(load.get_operand_address(ctx));
-        let dst = self.fresh(class);
         let at = fmt_mem(base, off);
+        if width == 1 {
+            // The byte 0/1 back to a predicate.
+            let byte = self.fresh(RegClass::B32);
+            self.inst(format!("ld{space}{nc}.u8 {byte}, {at};"));
+            let dst = self.fresh(RegClass::Pred);
+            self.inst(format!("setp.ne.u32 {dst}, {byte}, 0;"));
+            self.values.insert(result, dst);
+            return Ok(());
+        }
+        let dst = self.fresh(class);
         if class.is_float() {
             self.inst(format!("ld{space}{nc}.{} {dst}, {at};", class.float_ty()));
         } else {
@@ -3079,13 +3190,12 @@ impl<'c> FuncEmitter<'c> {
             for ((offset, leaf_ty), reg) in leaves.into_iter().zip(regs) {
                 let Some(reg) = reg else { continue };
                 let width = width_of(ctx, leaf_ty)?;
-                if width == 1 {
-                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                        "i1 aggregate field store is not supported in NVPTX emission"
-                            .to_string()
-                    )));
-                }
                 let at = fmt_mem(base, base_off + offset as i64);
+                if width == 1 {
+                    let byte = self.pred_to_byte(reg)?;
+                    self.inst(format!("st{space}.u8 {at}, {byte};"));
+                    continue;
+                }
                 if reg.class.is_float() {
                     self.inst(format!("st{space}.{} {at}, {reg};", reg.class.float_ty()));
                 } else {
@@ -3095,15 +3205,17 @@ impl<'c> FuncEmitter<'c> {
             return Ok(());
         }
         let width = width_of(ctx, value.get_type(ctx))?;
-        if width == 1 {
-            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                "i1 store is not supported in NVPTX emission".to_string()
-            )));
-        }
         let src = self.lookup(value)?;
         let (base, off) = self.mem_operand(store.get_operand_address(ctx))?;
         let space = self.space_qualifier(store.get_operand_address(ctx));
         let at = fmt_mem(base, off);
+        if width == 1 {
+            // A predicate has no memory form: store it as the byte 0/1
+            // (Rust's `bool` representation), via a 32-bit temporary.
+            let byte = self.pred_to_byte(src)?;
+            self.inst(format!("st{space}.u8 {at}, {byte};"));
+            return Ok(());
+        }
         if src.class.is_float() {
             self.inst(format!("st{space}.{} {at}, {src};", src.class.float_ty()));
         } else {
@@ -3143,6 +3255,25 @@ impl<'c> FuncEmitter<'c> {
                 self.inst("bar.sync 0;".to_string());
                 return Ok(());
             }
+            // `llvm.nvvm.barrier.cta.sync.aligned.all(id)`: the spelling
+            // cuda-oxide's mir-lower uses for `__syncthreads` (barrier id 0).
+            "nvvm_barrier_cta_sync_aligned_all" => {
+                if args.len() != 1 {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "`{callee}` expects (barrier id), got {} operands",
+                        args.len()
+                    ))));
+                }
+                let id = self.b32_operand(args[0])?;
+                self.inst(format!("bar.sync {id};"));
+                return Ok(());
+            }
+            // `llvm.trap`: mir-lower's assertion-failure arm (followed by
+            // `llvm.unreachable`, which traps again; harmless).
+            "trap" => {
+                self.inst("trap;".to_string());
+                return Ok(());
+            }
             // `__syncwarp(mask)`.
             "nvvm_bar_warp_sync" => {
                 if args.len() != 1 {
@@ -3168,6 +3299,21 @@ impl<'c> FuncEmitter<'c> {
                 return Ok(());
             }
             _ => {}
+        }
+
+        // `llvm.nvvm.isspacep.{local,shared,global,const}(ptr) -> i1`:
+        // mir-lower's address-space assertions on generic pointers.
+        if let Some(space) = canonical.strip_prefix("nvvm_isspacep_") {
+            if !matches!(space, "local" | "shared" | "global" | "const") || args.len() != 1 {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "`{callee}` is not a known isspacep form"
+                ))));
+            }
+            let addr = self.lookup(args[0])?;
+            let dst = self.fresh(RegClass::Pred);
+            self.inst(format!("isspacep.{space} {dst}, {addr};"));
+            self.values.insert(result(), dst);
+            return Ok(());
         }
 
         // Warp shuffles: `shfl.sync.<mode>.b32 d, a, b, c, membermask` (the
@@ -3328,6 +3474,341 @@ impl<'c> FuncEmitter<'c> {
             "call to `{callee}` (only NVVM intrinsics are supported in kernels; \
              device function calls are not implemented)"
         ))))
+    }
+
+    /// The PTX `.scope` qualifier of an LLVM sync scope: cuda-oxide's
+    /// mir-lower names CUDA scopes (`"block"`, `"device"`, `"cluster"`);
+    /// LLVM's unnamed system scope is `.sys`.
+    fn ptx_scope(&self, op: Ptr<Operation>) -> CrabbitResult<&'static str> {
+        let key: pliron::identifier::Identifier = "llvm_syncscope".try_into().unwrap();
+        let scope = op.deref(self.ctx).attributes.get::<SyncScopeAttr>(&key).cloned();
+        Ok(match scope {
+            None | Some(SyncScopeAttr::System) => ".sys",
+            Some(SyncScopeAttr::NamedScope(name)) => match String::from(name).as_str() {
+                "block" | "cta" | "workgroup" => ".cta",
+                "device" | "gpu" | "agent" => ".gpu",
+                "cluster" => ".cluster",
+                other => {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "unknown atomic sync scope `{other}`"
+                    ))));
+                }
+            },
+            Some(SyncScopeAttr::SingleThread) => {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                    "single-thread atomics have no PTX form".to_string()
+                )));
+            }
+        })
+    }
+
+    /// `llvm.atomicrmw` → `atom{.sem}{.scope}{.space}.<op>.<ty> d, [a], b;`.
+    /// Orderings beyond `monotonic` are expressed by the fences mir-lower
+    /// splits around the operation (its NVPTX fence-splitting rule), so the
+    /// operation itself is always `.relaxed`.
+    fn emit_atomic_rmw(&mut self, rmw: &AtomicRmwOp) -> CrabbitResult<()> {
+        let ctx = self.ctx;
+        let op = rmw.get_operation();
+        let (ptr, val) = {
+            let o = op.deref(ctx);
+            (o.get_operand(0), o.get_operand(1))
+        };
+        let kind = rmw
+            .get_attr_llvm_rmw_kind(ctx)
+            .map(|k| (*k).clone())
+            .ok_or_else(|| {
+                input_error_noloc!(NvptxErr::UnsupportedOp("atomicrmw without a kind".to_string()))
+            })?;
+        let ordering = rmw.get_attr_llvm_rmw_ordering(ctx).map(|o| (*o).clone());
+        if let Some(ordering) = &ordering
+            && !matches!(ordering, AtomicOrderingAttr::Monotonic)
+        {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                "atomicrmw with ordering {ordering:?}: only monotonic (fence-split) atomics are lowered"
+            ))));
+        }
+        let scope = self.ptx_scope(op)?;
+        let space = self.space_qualifier(ptr);
+        let addr = self.lookup(ptr)?;
+        let mut value = self.lookup(val)?;
+        let class = value.class;
+        let (mnemonic, ty) = match (kind.clone(), class) {
+            (AtomicRmwKindAttr::Add, RegClass::B32) => ("add", "u32"),
+            (AtomicRmwKindAttr::Add, RegClass::B64) => ("add", "u64"),
+            (AtomicRmwKindAttr::Sub, RegClass::B32) => {
+                let neg = self.fresh(RegClass::B32);
+                self.inst(format!("neg.s32 {neg}, {value};"));
+                value = neg;
+                ("add", "u32")
+            }
+            (AtomicRmwKindAttr::Sub, RegClass::B64) => {
+                let neg = self.fresh(RegClass::B64);
+                self.inst(format!("neg.s64 {neg}, {value};"));
+                value = neg;
+                ("add", "u64")
+            }
+            (AtomicRmwKindAttr::FAdd, RegClass::F32) => ("add", "f32"),
+            (AtomicRmwKindAttr::FAdd, RegClass::F64) => ("add", "f64"),
+            (AtomicRmwKindAttr::FSub, RegClass::F32) => {
+                let neg = self.fresh(RegClass::F32);
+                self.inst(format!("neg.f32 {neg}, {value};"));
+                value = neg;
+                ("add", "f32")
+            }
+            (AtomicRmwKindAttr::And, RegClass::B32) => ("and", "b32"),
+            (AtomicRmwKindAttr::And, RegClass::B64) => ("and", "b64"),
+            (AtomicRmwKindAttr::Or, RegClass::B32) => ("or", "b32"),
+            (AtomicRmwKindAttr::Or, RegClass::B64) => ("or", "b64"),
+            (AtomicRmwKindAttr::Xor, RegClass::B32) => ("xor", "b32"),
+            (AtomicRmwKindAttr::Xor, RegClass::B64) => ("xor", "b64"),
+            (AtomicRmwKindAttr::Xchg, RegClass::B32) => ("exch", "b32"),
+            (AtomicRmwKindAttr::Xchg, RegClass::B64) => ("exch", "b64"),
+            (AtomicRmwKindAttr::Max, RegClass::B32) => ("max", "s32"),
+            (AtomicRmwKindAttr::Max, RegClass::B64) => ("max", "s64"),
+            (AtomicRmwKindAttr::Min, RegClass::B32) => ("min", "s32"),
+            (AtomicRmwKindAttr::Min, RegClass::B64) => ("min", "s64"),
+            (AtomicRmwKindAttr::UMax, RegClass::B32) => ("max", "u32"),
+            (AtomicRmwKindAttr::UMax, RegClass::B64) => ("max", "u64"),
+            (AtomicRmwKindAttr::UMin, RegClass::B32) => ("min", "u32"),
+            (AtomicRmwKindAttr::UMin, RegClass::B64) => ("min", "u64"),
+            (kind, class) => {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "atomicrmw {kind:?} on a {class:?} value"
+                ))));
+            }
+        };
+        let dst = self.fresh(class);
+        self.inst(format!(
+            "atom.relaxed{scope}{space}.{mnemonic}.{ty} {dst}, [{addr}], {value};"
+        ));
+        self.values.insert(rmw.get_result(ctx), dst);
+        Ok(())
+    }
+
+    /// `llvm.cmpxchg` → `atom.cas` plus the success predicate; the result is
+    /// the `{old, i1}` pair LLVM defines.
+    fn emit_atomic_cmpxchg(&mut self, cas: &AtomicCmpxchgOp) -> CrabbitResult<()> {
+        let ctx = self.ctx;
+        let op = cas.get_operation();
+        let (ptr, cmp, new_val) = {
+            let o = op.deref(ctx);
+            (o.get_operand(0), o.get_operand(1), o.get_operand(2))
+        };
+        let scope = self.ptx_scope(op)?;
+        let space = self.space_qualifier(ptr);
+        let addr = self.lookup(ptr)?;
+        let cmp = self.lookup(cmp)?;
+        let new_val = self.lookup(new_val)?;
+        let (ty, class) = match cmp.class {
+            RegClass::B32 => ("b32", RegClass::B32),
+            RegClass::B64 => ("b64", RegClass::B64),
+            other => {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "cmpxchg on a {other:?} value"
+                ))));
+            }
+        };
+        let old = self.fresh(class);
+        self.inst(format!(
+            "atom.relaxed{scope}{space}.cas.{ty} {old}, [{addr}], {cmp}, {new_val};"
+        ));
+        let success = self.fresh(RegClass::Pred);
+        self.inst(format!("setp.eq.{ty} {success}, {old}, {cmp};"));
+        let result = cas.get_result(ctx);
+        if is_aggregate(ctx, result.get_type(ctx)) {
+            self.aggs.insert(result, vec![Some(old), Some(success)]);
+        } else {
+            self.values.insert(result, old);
+        }
+        Ok(())
+    }
+
+    /// `llvm.fence` → `fence.{acq_rel,sc}{.scope};` (the orderings
+    /// mir-lower splits off its atomics).
+    fn emit_fence(&mut self, fence: &FenceOp) -> CrabbitResult<()> {
+        let ctx = self.ctx;
+        let op = fence.get_operation();
+        let ordering = fence.get_attr_llvm_fence_ordering(ctx).map(|o| (*o).clone());
+        let sem = match ordering {
+            Some(AtomicOrderingAttr::SeqCst) => "sc",
+            Some(AtomicOrderingAttr::Acquire)
+            | Some(AtomicOrderingAttr::Release)
+            | Some(AtomicOrderingAttr::AcqRel) => "acq_rel",
+            other => {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                    "fence with ordering {other:?}"
+                ))));
+            }
+        };
+        let scope = self.ptx_scope(op)?;
+        self.inst(format!("fence.{sem}{scope};"));
+        Ok(())
+    }
+
+    /// `llvm.inline_asm`: PTX text with LLVM's `$N` operand placeholders
+    /// (cuda-oxide's mir-lower spells many device operations this way).
+    /// Constraints are the LLVM NVPTX letters: outputs `=r/=l/=f/=d/=b`
+    /// first, then inputs `r/l/f/d/b` (registers) or `n`/`i` (immediates);
+    /// `~{memory}` clobbers are ordering facts already implied by the op's
+    /// side-effect flag. `h` (16-bit) and explicit `{reg}` constraints have
+    /// no register class here and are refused.
+    fn emit_inline_asm(&mut self, asm: &InlineAsmOp) -> CrabbitResult<()> {
+        let ctx = self.ctx;
+        let op = asm.get_operation();
+        let template = asm
+            .get_attr_llvm_inline_asm_template(ctx)
+            .map(|a| String::from((*a).clone()))
+            .unwrap_or_default();
+        let constraints = asm
+            .get_attr_llvm_inline_asm_constraints(ctx)
+            .map(|a| String::from((*a).clone()))
+            .unwrap_or_default();
+        let operands: Vec<Value> = {
+            let o = op.deref(ctx);
+            (0..o.get_num_operands()).map(|i| o.get_operand(i)).collect()
+        };
+        let result = op.deref(ctx).get_result(0);
+        let result_ty = result.get_type(ctx);
+        let result_is_void = result_ty.deref(ctx).is::<VoidType>();
+        // Output register classes: one per leaf of the result.
+        let mut output_classes: Vec<RegClass> = Vec::new();
+        if !result_is_void {
+            if is_aggregate(ctx, result_ty) {
+                let mut leaves = Vec::new();
+                agg_leaves(ctx, result_ty, 0, &mut leaves)?;
+                for (_, leaf_ty) in leaves {
+                    output_classes.push(classify(ctx, leaf_ty)?);
+                }
+            } else {
+                output_classes.push(classify(ctx, result_ty)?);
+            }
+        }
+        let class_of = |letter: &str| -> Option<RegClass> {
+            Some(match letter {
+                "r" => RegClass::B32,
+                "l" => RegClass::B64,
+                "f" => RegClass::F32,
+                "d" => RegClass::F64,
+                "b" => RegClass::Pred,
+                _ => return None,
+            })
+        };
+        let mut slots: Vec<String> = Vec::new();
+        let mut output_regs: Vec<Reg> = Vec::new();
+        let mut input_idx = 0usize;
+        for constraint in constraints.split(',') {
+            let constraint = constraint.trim();
+            if constraint.is_empty() || constraint.starts_with('~') {
+                continue;
+            }
+            if let Some(letter) = constraint.strip_prefix('=') {
+                let Some(class) = class_of(letter) else {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "inline asm output constraint `{constraint}`"
+                    ))));
+                };
+                let expected = output_classes.get(output_regs.len()).copied();
+                if expected != Some(class) {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "inline asm output `{constraint}` does not match the result type"
+                    ))));
+                }
+                let reg = self.fresh(class);
+                output_regs.push(reg);
+                slots.push(reg.to_string());
+                continue;
+            }
+            let Some(&value) = operands.get(input_idx) else {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                    "inline asm has more input constraints than operands".to_string()
+                )));
+            };
+            input_idx += 1;
+            match constraint {
+                "n" | "i" => {
+                    let Some((imm, width)) = self.int_imm(value) else {
+                        return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                            "inline asm immediate constraint on a non-constant operand".to_string()
+                        )));
+                    };
+                    slots.push(format!("{}", sext_from(imm, width)));
+                }
+                letter => {
+                    let Some(class) = class_of(letter) else {
+                        return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                            "inline asm input constraint `{constraint}`"
+                        ))));
+                    };
+                    let reg = self.lookup(value)?;
+                    if reg.class != class {
+                        return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                            "inline asm input `{constraint}` given a {:?} register",
+                            reg.class
+                        ))));
+                    }
+                    slots.push(reg.to_string());
+                }
+            }
+        }
+        if input_idx != operands.len() {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                "inline asm has more operands than input constraints".to_string()
+            )));
+        }
+        if output_regs.len() != output_classes.len() {
+            return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                "inline asm result has more leaves than output constraints".to_string()
+            )));
+        }
+        // Substitute `$N` (and `$$` → `$`), then emit line by line so
+        // multi-instruction templates keep one PTX statement per line.
+        let mut text = String::new();
+        let bytes: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == '$' {
+                if i + 1 < bytes.len() && bytes[i + 1] == '$' {
+                    text.push('$');
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j == i + 1 {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "inline asm template uses an unsupported `$` form: {template}"
+                    ))));
+                }
+                let index: usize = bytes[i + 1..j].iter().collect::<String>().parse().unwrap();
+                let Some(slot) = slots.get(index) else {
+                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(format!(
+                        "inline asm template references operand ${index}, which has no constraint"
+                    ))));
+                };
+                text.push_str(slot);
+                i = j;
+                continue;
+            }
+            text.push(bytes[i]);
+            i += 1;
+        }
+        for line in text.split('\n') {
+            let line = line.trim();
+            if !line.is_empty() {
+                self.inst(line.to_string());
+            }
+        }
+        if !result_is_void {
+            if output_regs.len() == 1 && !is_aggregate(ctx, result_ty) {
+                self.values.insert(result, output_regs[0]);
+            } else {
+                self.aggs
+                    .insert(result, output_regs.into_iter().map(Some).collect());
+            }
+        }
+        Ok(())
     }
 
     fn emit_float_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryFloatKind) -> CrabbitResult<()> {

@@ -864,16 +864,16 @@ fn stamp_clone(ctx: &mut Context, clone: Ptr<Operation>, original: Ptr<Operation
     let sources = opmap::effective_sources(ctx, original);
     {
         let mut clone_ref = clone.deref_mut(ctx);
-        clone_ref.attributes.0.remove(&*opmap::ATTR_KEY_AARCH64_OP_ID);
+        clone_ref.attributes.0.remove(&opmap::ATTR_KEY_AARCH64_OP_ID);
         clone_ref
             .attributes
             .0
-            .remove(&*opmap::ATTR_KEY_AARCH64_DERIVED_FROM);
+            .remove(&opmap::ATTR_KEY_AARCH64_DERIVED_FROM);
         clone_ref
             .attributes
             .0
-            .remove(&*opmap::ATTR_KEY_DERIVED_FROM_MANY);
-        clone_ref.attributes.0.remove(&*opmap::ATTR_KEY_INLINED_FROM);
+            .remove(&opmap::ATTR_KEY_DERIVED_FROM_MANY);
+        clone_ref.attributes.0.remove(&opmap::ATTR_KEY_INLINED_FROM);
     }
     if !sources.is_empty() {
         opmap::set_derived_from_many(ctx, clone, sources);

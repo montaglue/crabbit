@@ -1173,7 +1173,7 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
     // value is added back after the horizontal reduce.
     let mut vacc_inits: Vec<Value> = Vec::new();
     for (_, _, add_op) in &plan.reductions {
-        let zero: Box<dyn pliron::attribute::Attribute> = match plan.elem {
+        let zero: Box<dyn pliron::builtin::attr_interfaces::TypedAttrInterface> = match plan.elem {
             ElemKind::I32 | ElemKind::I64 => {
                 let elem_int = {
                     let ty_ref = plan.elem_ty.deref(ctx);
@@ -1350,7 +1350,7 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
                 }
                 // Clone the body-local constant into the preheader; the
                 // original stays for the scalar epilogue.
-                let attr = ConstantOp::from_operation(*c).get_value(ctx);
+                let attr = pliron::dyn_clone::clone_box(&*ConstantOp::from_operation(*c).get_value(ctx));
                 let cloned = ConstantOp::new(ctx, attr);
                 let cloned_op = cloned.get_operation();
                 cloned_op.insert_before(ctx, pre_term);

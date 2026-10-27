@@ -38,7 +38,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-TOOLCHAIN = "nightly-2026-04-03"
+# cuda-oxide's pin (stable 1.99.1 + RUSTC_BOOTSTRAP=1), the same as
+# rust-toolchain.toml; the fixtures and arrow crates are compiled with it.
+# CRABBIT_HARNESS_TOOLCHAIN overrides it (A/B against a dylib built on
+# another toolchain, e.g. the pre-move nightly).
+TOOLCHAIN = os.environ.get("CRABBIT_HARNESS_TOOLCHAIN", "1.99.1")
 # A durable checkout (the original lived in a session scratchpad that may be
 # cleaned): apache/arrow-rs v59.2.0 copied under the harness workdir.
 DEFAULT_ARROW_RS = str(Path.home() / ".cache/crabbit-perf-harness/arrow-rs")
@@ -138,6 +142,8 @@ def log(msg):
 def base_env(extra=None):
     env = dict(os.environ)
     env["RUSTUP_TOOLCHAIN"] = TOOLCHAIN
+    # `-Zcodegen-backend` on the stable release.
+    env["RUSTC_BOOTSTRAP"] = "1"
     # Make sure stale policy vars in the ambient environment never leak in.
     for key in list(env):
         if key.startswith("CRABBIT_"):
@@ -414,7 +420,7 @@ def check_run(proc_out, case, baseline_stdout):
 def build_backend():
     # Research dylib first: the engine axes (CRABBIT_REGALLOC=eregalloc,
     # cmt-provider frequencies) only exist in the composition build, which
-    # needs the private sibling checkouts (crates/crabbit-research).
+    # needs the private sibling checkout ../crabbit-engines (crates/crabbit-research).
     research = REPO / "crates" / "crabbit-research"
     if (research / "Cargo.toml").exists():
         log("building research backend (crates/crabbit-research)...")
@@ -423,8 +429,8 @@ def build_backend():
         backend = research / "target" / "debug" / "libcrabbit_research.so"
         if proc.returncode == 0 and backend.exists():
             return backend
-        log("WARNING: crabbit-research build failed (missing private "
-            "research checkouts?); falling back to the engine-less "
+        log("WARNING: crabbit-research build failed (missing the private "
+            "sibling checkout ../crabbit-engines?); falling back to the engine-less "
             "libcrabbit.so -- eregalloc/cmt configs will error")
     log("building crabbit backend (cargo build -p crabbit)...")
     proc = run_cmd(["cargo", "build", "-p", "crabbit"], env=base_env(),

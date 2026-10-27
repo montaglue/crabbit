@@ -930,9 +930,9 @@ mod tests {
         let field1_unsigned: TypeHandle =
             IntegerType::get(ctx, store_field1_width, Signedness::Unsigned).into();
         let slot_struct_ty: TypeHandle =
-            StructType::get_unnamed(ctx, vec![ptr_ty, i64_signed]).into();
+            StructType::get_unnamed(ctx, (vec![ptr_ty, i64_signed], crate::dialects::llvm::types::StructLayout::Unpacked)).into();
         let stored_struct_ty: TypeHandle =
-            StructType::get_unnamed(ctx, vec![ptr_ty, field1_unsigned]).into();
+            StructType::get_unnamed(ctx, (vec![ptr_ty, field1_unsigned], crate::dialects::llvm::types::StructLayout::Unpacked)).into();
 
         let i64_typed = int_ty(ctx, 64);
         let one = ConstantOp::new(
@@ -944,7 +944,7 @@ mod tests {
         );
         one.get_operation().insert_at_back(entry, ctx);
         let one_v = one.get_result(ctx);
-        let alloca = AllocaOp::new(ctx, slot_struct_ty, one_v);
+        let alloca = AllocaOp::new(ctx, slot_struct_ty, one_v, 0);
         alloca.get_operation().insert_at_back(entry, ctx);
         let slot = alloca.get_result(ctx);
         // The pinned shape: the store's address is a bitcast of the slot.
