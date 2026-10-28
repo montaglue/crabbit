@@ -90,19 +90,19 @@ aggregate ops to `llvm.ptr`.
 
 ## 2. Shared mid-end (`crates/pliron-ll/src/passes/llvm/`)
 
-One pass list (`add_llvm_midend_passes`) serves the host pipeline, the
-kernel pipeline, and the analysis server, so they cannot drift:
+One default order (`passes::llvm::DEFAULT_ORDER`) serves the host
+pipeline, the kernel pipeline, and the analysis server, so they cannot
+drift (section 3.1 for how an order is built and replaced):
 
 ```
-inline → simplify/simplify-cfg → 2 × (SROA → mem2reg → simplify rounds)
-→ gvn → div-strength-reduce → licm → gvn
+op-ids → inline → simplify/simplify-cfg → 2 × (SROA → mem2reg → simplify rounds)
+→ gvn → div-strength-reduce → licm → gvn → loop-carried-fwd → unroll
 → global-dse → adce → sink
-→ final simplify/simplify-cfg/simplify
+→ final simplify/simplify-cfg/simplify → vectorize
 ```
 
 - `analysis.rs`: dominators (pliron's CHK), post-dominators, natural loops,
-  a generic backward bitset dataflow — differential-tested against the
-  `combinatorial-matrix-theory` boolean-matrix formulations (dev-dep only).
+  a generic backward bitset dataflow.
 - `gvn.rs` / `dse.rs` share one conservative syntactic alias model
   (`AddrKey`).
 - Profitability is parameterized by **`TargetProfile`**
@@ -111,34 +111,54 @@ inline → simplify/simplify-cfg → 2 × (SROA → mem2reg → simplify rounds)
   `has_branch_divergence` (SIMT executes both sides of a divergent guard;
   measured +10% regression on `gemm_tiled` before the rule, see
   `MIDEND-PLAN.md`).
-- Each research pass self-ablates via `CRABBIT_MIDEND_DISABLE`
+- Each optimization pass self-ablates via `CRABBIT_MIDEND_DISABLE`
   (`midend_gate.rs`).
 
 ## 3. Machine pipelines and the target registry
 
 `pliron-ll/src/targets.rs` is an LLVM-style registry: a `Triple` resolves
-to a `TargetBackend` bundling a pipeline and an object writer. The aarch64
-pipeline (`passes/aarch64/mod.rs`):
+to a `TargetBackend` bundling the default order of its machine pipeline,
+its machine passes by name, and an object writer. The aarch64 order
+(`passes/aarch64/mod.rs`):
 
 ```
 verify → abi → isel (llvm_to_aarch64_isel.rs) → legalize
 → machine-cfg-cleanup → target-opts-pre-ra
 → [blockmap/op-id stamping]
-→ REGISTER ALLOCATION        ← swappable slot (pipeline_with_allocator)
-→ frame-lower → post-ra-opts → block-placement → branch-relax
-→ asm-lower → encode
+→ register allocation (aarch64-register-allocate)
+→ frame-lower → post-ra-opts → block-placement
+→ branch-relax → asm-lower → encode
 ```
 
 ELF/Mach-O translation happens outside the pass pipeline
 (`aarch64_object_lower.rs`, `elf.rs`, `macho.rs`), like the PTX writer.
-
-**Allocator swap**: the RA slot accepts any pass meeting the baseline's
-postconditions. `crates/research-config` (features `eregalloc`, `cmt`)
-parses `CRABBIT_REGALLOC`/`_ORACLE`/`CRABBIT_BLOCK_FREQ` and constructs the
-`eregalloc-passes` allocator (e-graph availability oracle) with a frequency
-source: uniform, analytic spectral (Perron–Frobenius,
-`passes/spectral_freq.rs`), or a **measured profile**
+The linear allocator's spill policy and block frequencies are options
+(`codegen_opts.rs`): uniform, analytic spectral
+(`passes/spectral_freq.rs`), or a **measured profile**
 (`passes/profile_freq.rs`, fed by `CRABBIT_PROFILE`).
+
+### 3.1 Pipelines as orders of named passes (`crates/config`)
+
+A compilation is described by a `CrabbitConfig`: the host target (the
+triple rustc compiles for), the device target (`nvptx64-nvidia-cuda` for
+the kernel module) and the crate name. Each pipeline stage — `MirToLlvm`,
+`Midend`, and on the host side `Machine` — is an order of pass names;
+the crates that define passes also define the default orders
+(`crabbit_mir::passes::DEFAULT_ORDER`, `passes::llvm::DEFAULT_ORDER`, each
+backend's machine order) and build passes by name. crabbit-config builds
+a stage from its effective order, and any crate can extend it:
+`register_pass(name, factory)` adds a pass (a factory gets the config and
+the side it builds for), `register_order(f)` decides every stage's order —
+`f` receives crabbit's default and may insert, remove, reorder or replace
+passes, crabbit's own included (replacing `aarch64-register-allocate`
+swaps the allocator). The registrations happen in the codegen-backend
+dylib rustc loads; `docs/EXTENDING.md` shows the whole recipe. The plain
+`libcrabbit.so` registers nothing and runs the defaults.
+
+Running a pipeline is pliron's pass manager (`Passes`, `PassManager`
+hooks: `PMConfig` printing, verification, timing, skipping by name);
+crabbit adds only building from an order and, for the analysis server, an
+observer between passes (`conversion::pass::run_observed`).
 
 ## 4. GPU kernel path
 
@@ -171,7 +191,7 @@ The substrate of [BACKWARD-PGO.md](BACKWARD-PGO.md):
 - Ingest: `scripts/perf-harness/profile_ingest.py` (perf) and
   `kernel-corpus/tools/ncu_ingest.py` (Nsight Compute) both emit one
   `op_costs.json` shape with costs at machine, lifted, and source levels.
-- Consumers: the eregalloc oracle (`CRABBIT_MEASURED_COSTS`), the server's
+- Consumers: allocators that read measured per-decision costs, the server's
   `run_costs` heat tables, and the analyses under `kernel-corpus/results/`.
 
 ## 6. The analysis server

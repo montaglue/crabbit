@@ -23,12 +23,10 @@ rustc + `-Zcodegen-backend` stays the front door for real builds.
   printed IR immediately after LowerDialectMir (pure llvm dialect, so the
   server never needs the mir dialect or rustc), plus the kernel module.
 - New crate `crates/serverd` (bin `crabbit-serverd`) — depends on
-  pliron-ll, eregalloc-passes, cmt-spectral-cfg; NOT on `crabbit` (that
-  crate is rustc_private-tainted). The engine/config selection code moves
-  from `crabbit::regalloc_engine` into a new tiny shared crate
-  `crates/research-config` (no rustc deps) consumed by both, so server
-  and backend can never drift on flag semantics. Mid-end pass list: same
-  move or re-export from pliron-ll.
+  pliron-ll; NOT on `crabbit` (that crate is rustc_private-tainted). The
+  configuration and pipeline-building code lives in a small shared crate
+  with no rustc deps (today `crates/config`, crabbit-config) consumed by
+  both, so server and backend can never drift on flag semantics.
 - API (HTTP+JSON, minimal deps — tiny_http or axum, agent's choice):
   POST /modules (.plir text) → id (parsed+verified);
   POST /runs {module, target-triple, config axes (regalloc/oracle/freq/
@@ -51,8 +49,8 @@ rustc + `-Zcodegen-backend` stays the front door for real builds.
   (CRABBIT_EMIT_IR) parses back and re-prints identically (print→parse→
   print fixpoint); any op/attr that fails gets its Parsable fixed.
 - Pipeline equivalence: for a fixture CGU, the server's object bytes ==
-  the rustc-path object bytes for the same config (baseline AND
-  eregalloc-c2+spectral).
+  the rustc-path object bytes for the same config (baseline AND a
+  non-default allocator configuration).
 - Progress/cancel: a run on arrow-schema's largest CGU reports per-pass
   progress and can be cancelled mid-pipeline.
 - No commits. Server is Linux/localhost, no auth, binds 127.0.0.1 only.

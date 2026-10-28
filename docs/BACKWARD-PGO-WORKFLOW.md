@@ -49,11 +49,12 @@ their PTX text and dominant stall reason. Counters and samples only: ncu
 serializes launches, so timings stay with `run_all.py`.
 
 **CPU — `kernel-corpus/tools/cpu_pgo_campaign.py`** (the E1-v2 protocol as
-a reusable tool; needs the research dylib with the engines linked):
+a reusable tool; `--backend` is the backend dylib whose configurations it
+compares):
 
 ```sh
 python3 tools/cpu_pgo_campaign.py \
-    --backend ~/projects/montaglue/crabbit/crates/crabbit-research/target/debug/libcrabbit_research.so \
+    --backend <backend dylib> \
     --corpus ../kernel-corpus-real --runs 10 --cpu 7
 ```
 
@@ -101,8 +102,8 @@ no binaries except the snapshotted backend dylib, which can be excluded).
 
 ## What the loop can and cannot feed today
 
-Consumers that exist: the eregalloc restore oracle (`CRABBIT_MEASURED_COSTS`),
-block frequencies in both allocators (`CRABBIT_BLOCK_FREQ=profile`), and
+Consumers that exist: measured per-decision costs for allocators that
+read them, block frequencies (`CRABBIT_BLOCK_FREQ=profile`), and
 the hot-line views at the `source`/`ra` boundaries. On GPU no pass consumes
 a profile yet (ptxas allocates registers; the mid-end decisions that matter
 there — unroll factors, sinking under divergence, state spaces — are

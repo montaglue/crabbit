@@ -1,4 +1,4 @@
-//! CFG analyses shared by the research mid-end passes (docs/MIDEND-PLAN.md):
+//! CFG analyses shared by the mid-end passes (docs/MIDEND-PLAN.md):
 //! dominators (pliron's Cooper–Harvey–Kennedy implementation, re-exported
 //! with region-CFG types fixed), natural-loop detection, post-dominators
 //! (the same iterative algorithm on the reversed CFG with a synthetic
@@ -589,12 +589,6 @@ mod tests {
         }
         (ctx, region)
     }
-
-    // The differential tests against combinatorial-matrix-theory's
-    // boolean-dataflow oracle (dominators + post-dominators over these
-    // same CFG shapes) live in crates/crabbit-research/tests/
-    // cmt_differential.rs — the oracle is a private research checkout the
-    // public workspace must not resolve.
 
     /// Backward fixpoint sanity on a diamond: a bit gen'd in one arm is
     /// live-out of the entry but not of the other arm.

@@ -4,7 +4,7 @@
 //! ingestion tool. Also the "every final op is attributed" audit.
 
 use pliron::builtin::op_interfaces::{OneRegionInterface, OneResultInterface};
-use pliron_ll::conversion::pass::{AnalysisManager, Passes};
+use pliron_ll::conversion::pass::{AnalysisManager, Pass as _, Passes};
 use pliron_ll::dialects::builtin::ops::ModuleOp;
 use pliron_ll::dialects::builtin::types::{IntegerType, Signedness};
 use pliron_ll::dialects::llvm::op_interfaces::IntBinArithOpWithOverflowFlag as _;
@@ -216,8 +216,8 @@ fn two_hop_lift_recovers_source_ops_with_gvn_split() {
     use pliron_ll::dialects::llvm::op_interfaces::BinArithOp as _;
     use pliron_ll::dialects::llvm::ops::SDivOp;
     use pliron_ll::passes::aarch64::opmap::assign_boundary_ids;
-    use pliron_ll::passes::llvm::add_llvm_midend_passes;
-    use pliron_ll::target_profile::TargetProfile;
+    use pliron_ll::passes::llvm::default_midend;
+    use pliron_ll::target_profile::{PipelineTarget, TargetProfile};
     use pliron_ll::utils::apint::APInt;
     use std::num::NonZero;
 
@@ -271,8 +271,13 @@ fn two_hop_lift_recovers_source_ops_with_gvn_split() {
     let mut analyses = AnalysisManager::default();
 
     // Real mid-end (head stamping + adjoints), then the machine front.
-    let mut midend = Passes::default();
-    add_llvm_midend_passes(&mut midend, &TargetProfile::host_cpu());
+    // The plain host CPU profile (no SIMD): the audit's expectations
+    // predate the vectorizer.
+    let target = PipelineTarget {
+        triple: pliron_ll::triple::Triple::parse("aarch64-unknown-linux-gnu"),
+        profile: TargetProfile::host_cpu(),
+    };
+    let mut midend = default_midend(&target);
     midend.run(root, &mut ctx, &mut analyses).unwrap();
 
     let mut prefix = Passes::default();

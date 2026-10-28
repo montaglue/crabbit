@@ -25,15 +25,16 @@ linear-scan register allocation, encoding — down to native **aarch64 ELF**
                                  │  gvn · licm · div-magic · unroll │
                                  │  dse · adce · sink · vectorize   └──► (registers incl. NEON,
                                  │                                        frames, encodings: all ours)
- device: MIR ──► mir dialect (cuda-oxide's translator + transforms, mir-lower)
+ device: MIR ──► mir dialect (our importer; cuda_device calls ──► nvvm ops) ──► llvm dialect
                                  └────────► native NVPTX ──► PTX ──► runs on real GPUs
 ```
 
 Kernels are written in [cuda-oxide](https://github.com/NVlabs/cuda-oxide)'s
 own device conventions (`#[kernel]`, `cuda_device::{thread, SharedArray,
-warp, atomic}`); NVIDIA's `mir-importer` translates them and `mir-lower`
-takes them to the LLVM dialect (input verification on), then crabbit's
-mid-end and NVPTX translator finish the job — `docs/KERNEL-ABI.md`.
+warp, atomic}`); crabbit's importer translates them (the `cuda_device` API
+becomes `nvvm` dialect ops) and NVIDIA's `mir-lower` takes them to the
+LLVM dialect (input verification on), then crabbit's mid-end and NVPTX
+translator finish the job — `docs/KERNEL-ABI.md`.
 
 ![A compiled function's control-flow graph in pliron-inspect's CFG view:
 per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
@@ -41,13 +42,13 @@ per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
 ![mem2reg before/after in the IR-diff view: allocas and stores deleted
 (red), SSA values taking their place (green)](docs/images/inspect-ir-diff.png)
 
-The same dialect stack emits **native NVPTX**: `#[no_mangle]
-`#[kernel]` Rust functions (cuda-oxide's device API) become PTX — no LLVM, no NVVM — measured at
+The same dialect stack emits **native NVPTX**: `#[kernel]` Rust functions
+(cuda-oxide's device API) become PTX — no LLVM, no NVVM — measured at
 geomean **1.01× nvcc** across a 14-kernel corpus (dead tie on tiled gemm at
 35 vs 35 registers), and racing 17 production kernels sourced from real
 codebases at parity, ahead of nvcc on 6 of them.
 
-And underneath sits the research it was built to carry — **backward PGO**:
+And underneath sits what it was built to carry — **backward PGO**:
 every emitted instruction carries provenance through every lowering level,
 so `perf` samples and Nsight stalls flow *backward through the same pipeline
 the program flowed forward through*, each pass interpreting measured cost
@@ -62,12 +63,14 @@ Around the compiler:
   after any pass, ask hover/definition/references questions about it — over
   stdio or loopback HTTP, with a web UI in the sibling
   [`pliron-inspect`](https://github.com/montaglue/pliron-inspect) project.
-- **Swappable research register allocators** (an availability-aware e-graph
-  oracle among them), composed by the workspace-excluded
-  [`crates/crabbit-research`](crates/crabbit-research) dylib, and an A/B
-  perf harness — policies compared on real programs, not synthetic corpora.
+- **Extensible pipelines** — every pass has a name and every pipeline stage
+  is an order of names; a backend built with extensions registers its own
+  passes and edits crabbit's orders: insert, remove, reorder or replace any
+  pass, crabbit's own included ([docs/EXTENDING.md](docs/EXTENDING.md)).
+- **An A/B perf harness** — policies compared on real programs, not
+  synthetic corpora.
 
-> **Status: research project.** Correctness is enforced by an executable
+> **Status: experimental.** Correctness is enforced by an executable
 > fixture suite and a 14-kernel CPU/GPU corpus with checksum gates, not by a
 > stability guarantee. Expect gaps against arbitrary Rust input.
 
@@ -115,9 +118,7 @@ Around the compiler:
   With that and a repaired cost model, measured profile frequencies became
   the best-performing linear-allocator configuration — winning exactly
   where the analytic model mis-predicts
-  (`kernel-corpus/results/cpu-feedback/20260920-pgo/`); earlier nulls are
-  kept on the record
-  (E1: `kernel-corpus/results/cpu-feedback/20260831/E1-ANALYSIS.md`).
+  (`kernel-corpus/results/cpu-feedback/20260920-pgo/`).
 
 ![arrow-schema IR at the llvm-gvn boundary in the pliron-inspect UI: the
 24 MB module compiled by crabbit, replayed per pass, browsable with
@@ -184,10 +185,7 @@ the server command and the data path above are live today.)
 > (`crates/crabbit/src/importer/`) produces the dialect and must satisfy
 > its verifier, which `mir-lower` runs before lowering anything (see
 > `docs/MIR-DIALECT.md`). The analysis tooling comes from
-> [pliron-inspect](https://github.com/montaglue/pliron-inspect). The
-> research *engines* are private and live outside this workspace entirely:
-> see **Research build** below.
->
+> [pliron-inspect](https://github.com/montaglue/pliron-inspect).
 
 ### Mode 1 — codegen backend
 
@@ -218,7 +216,7 @@ Then over plain HTTP (same JSON over stdio):
 # get a module: any crabbit compile with CRABBIT_EMIT_IR=<dir> writes .plir
 curl -d '{"cmd":"load_module","name":"m","text":"<contents of the .plir>"}' 127.0.0.1:8177
 curl -d '{"cmd":"start_run","moduleId":1,"target":"aarch64-linux",
-          "config":{"CRABBIT_REGALLOC":"eregalloc","CRABBIT_REGALLOC_ORACLE":"c2"}}' 127.0.0.1:8177
+          "config":{"CRABBIT_SPILL_POLICY":"weighted","CRABBIT_BLOCK_FREQ":"spectral-loop"}}' 127.0.0.1:8177
 curl -d '{"cmd":"run_status","runId":1}' 127.0.0.1:8177      # per-pass progress
 curl -d '{"cmd":"run_ir","runId":1,"pass":"aarch64-register-allocate"}' 127.0.0.1:8177
 curl -d '{"cmd":"run_artifact","runId":1}' 127.0.0.1:8177    # the ELF object
@@ -240,21 +238,21 @@ references and diagnostics from a pliron-lsp engine built from this
 workspace's dialect crates. `pliron-inspect --server 127.0.0.1:8177`
 still works against a hand-started analysisd.
 
-## Research knobs
+## Configuration knobs
 
 Every policy is an environment variable read at compile time, so A/B needs
-no rebuild (`crates/pliron-ll/src/codegen_opts.rs`,
-`crates/research-config/`):
+no rebuild (`crates/pliron-ll/src/codegen_opts.rs` and the passes
+themselves):
 
 | Variable | Values | What it selects |
 | --- | --- | --- |
-| `CRABBIT_REGALLOC` | `linear`, `eregalloc` | baseline linear scan vs. the e-graph availability-oracle allocator |
-| `CRABBIT_REGALLOC_ORACLE` | `c0`, `c2` | syntactic vs. saturated-e-graph restore oracle |
-| `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `spectral-loop`, `profile`, `cmt-provider` | spill-weight frequencies: none / analytic Perron–Frobenius (optionally with the loop-aware 7/8 branch prior) / **measured perf profile** |
-| `CRABBIT_MIDEND_DISABLE` | `gvn,licm,divmagic,dse,adce,sink` | ablate individual mid-end passes |
+| `CRABBIT_SPILL_POLICY` | `furthest`, `weighted` | linear-scan victim choice: Poletto–Sarkar furthest use / cheapest frequency-weighted restore |
+| `CRABBIT_RESTORE_ESTIMATE` | `reload`, `remat` | restores as reloads / constant defs rematerialized |
+| `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `spectral-loop`, `profile` | spill-weight frequencies: none / analytic Perron–Frobenius (optionally with the loop-aware 7/8 branch prior) / **measured perf profile** |
+| `CRABBIT_MIDEND_DISABLE` | `gvn,licm,divmagic,unroll,lcfwd,dse,adce,sink,vectorize` | ablate individual mid-end passes |
 | `CRABBIT_MIR_CENSUS` | path | append a per-module JSON census of the imported `mir` dialect (op kinds, callee families, allocas, aggregates, loops) to that file, before lowering (`docs/MIR-CENSUS.md`) |
 | `CRABBIT_MIR_DISABLE` | `census` | skip individual `mir`-level passes (the stage between import and `lower-dialect-mir`) |
-| `CRABBIT_PROFILE`, `CRABBIT_MEASURED_COSTS` | paths | measured frequencies / per-decision costs (see backward PGO) |
+| `CRABBIT_PROFILE` | path | measured block frequencies (see backward PGO) |
 | `CRABBIT_EMIT_IR`, `CRABBIT_PTX_OUT`, `CRABBIT_LL_OUT` | paths | printed IR / PTX / textual LLVM IR side outputs (`CRABBIT_EMIT_IR=1`: under the project's `.crabbit-traces/ir/`) |
 | `CRABBIT_TRACE`, `CRABBIT_TRACE_DIR` | `1`, path | per-pass IR traces (`.crt`), by default under the compiled project's `.crabbit-traces/` |
 | `CRABBIT_BLOCKMAP`, `CRABBIT_PTX_LINEMAP` | `1` | provenance sidecars for profile attribution |
@@ -269,10 +267,9 @@ metrics.
 | --- | --- | --- |
 | [`crabbit-core`](crates/crabbit) | rlib | The rustc backend: MIR import, pipeline driving, object + PTX + IR emission. |
 | [`crabbit`](crates/crabbit-backend) | `dylib` | Thin loadable wrapper over `crabbit-core`: `cargo build -p crabbit` → `target/debug/libcrabbit.so`. |
-| [`crabbit-mir`](crates/mir) | lib | The `mir` dialect and its lowering into the `llvm` dialect. |
+| [`crabbit-mir`](crates/mir) | lib | crabbit's passes on NVIDIA's `mir` dialect and around its lowering to the `llvm` dialect (census, linkage, function addresses). |
+| [`crabbit-config`](crates/config) | lib | Compilation configuration (host and device targets) and the pipeline API: passes by name, stages as editable orders ([docs/EXTENDING.md](docs/EXTENDING.md)). |
 | [`pliron-ll`](crates/pliron-ll) | lib | The heart: LLVM-dialect mid-end (GVN, LICM, DSE, ADCE, sink, div strength reduction, `TargetProfile`), aarch64/x86_64 machine dialects and pipelines, ELF/Mach-O writers, native NVPTX emission, profile/blockmap infrastructure. |
-| [`research-config`](crates/research-config) | lib | Engine/flag parsing + the engine registry, shared by the backend and the server. |
-| [`crabbit-research`](crates/crabbit-research) | `dylib`, excluded | The backend + the private research engines (eregalloc, CMT) in one `libcrabbit_research.so`; needs the sibling research checkouts. |
 | [`crabbit-inspect-driver`](crates/inspect-driver) | bins | `crabbit-inspect-driver` (one-shot pipeline CLI) and `crabbit-analysisd` (resident server). |
 | [`backend-tests`](crates/backend-tests) | tests | Builds the dylib and compiles+**runs** fixture crates through it; round-trip, kernel-on-GPU, and server-equivalence gates. |
 
@@ -284,35 +281,39 @@ effect, regressions included). The sibling `kernel-corpus` repository holds
 the 14-kernel CPU/GPU corpus, the three-arm comparison pipeline, and all
 result CSVs.
 
-The project was previously developed under the name **crabbit**; a few
-internal symbols and trace strings still carry that name.
-
 ## Testing
 
 ```sh
-cargo test --workspace          # ~230 tests
-# fixtures under the research allocator (research build, see below):
-CRABBIT_TEST_BACKEND=$PWD/crates/crabbit-research/target/debug/libcrabbit_research.so \
-  CRABBIT_REGALLOC=eregalloc cargo test -p backend-tests --test backend_smoke
+cargo test --workspace          # ~330 tests
+# the fixtures under another backend dylib (e.g. one built with extensions):
+CRABBIT_TEST_BACKEND=/path/to/backend.so cargo test -p backend-tests --test backend_smoke
 ```
-
-### Research build
-
-The research engines live in private repositories, composed in by the
-workspace-excluded `crates/crabbit-research` (path-deps on
-`../eregalloc` and `../combinatorial-matrix-theory` checkouts):
-
-```sh
-cd crates/crabbit-research && cargo build   # -> target/debug/libcrabbit_research.so
-```
-
-Point `-Zcodegen-backend` (or the perf harness, which prefers it
-automatically) at that dylib and the `CRABBIT_REGALLOC=eregalloc` /
-`CRABBIT_BLOCK_FREQ=cmt-provider` axes come alive; the public
-`libcrabbit.so` reports them as not linked.
 
 Every fixture executes and is output-checked; the kernel corpus adds
 checksum gates for both CPU and GPU artifacts.
+
+## Extending crabbit
+
+Every pass has a name and every pipeline stage — `mir` to LLVM dialect,
+mid-end, machine — is an order of names with a default. A backend built
+with extensions is a small dylib crate that links crabbit's library,
+registers its passes (`crabbit_config::register_pass`) and one order
+function (`crabbit_config::register_order`, which receives crabbit's
+default order and may insert, remove, reorder or replace passes), then
+returns crabbit's backend; rustc loads it with `-Zcodegen-backend`.
+[docs/EXTENDING.md](docs/EXTENDING.md) has the complete recipe.
+
+## Engines
+
+Three closed-source engines are built on that API. Gains are against
+crabbit's own default pipeline (linear-scan allocation), measured on the
+14-kernel CPU corpus (Cortex-X925, pinned core, 2026-09-20):
+
+| Engine | Direction | Gain |
+| --- | --- | --- |
+| Register allocation as e-graph materialization | spilling decided by an availability-aware oracle over each value's derivations: a restore is the cheapest of a reload or a recomputation | **1.6% faster** geomean with the loop-aware frequency prior below (histogram −14%, transpose −9%, worst dot_product +4%); 1.9% slower without it |
+| Analytical models (combinatorial matrix theory) | spectral block frequencies with a loop-aware branch prior; max-plus scheduling bounds; unimodular loop transforms | the frequency prior inside the allocator above: **3.4% faster** geomean (gemm_tiled −25%); its frequencies' rank correlation with measured profiles 0.002 → 0.742 |
+| Kernel fusion | fusing separately written GPU kernels (and CPU loops) through their iteration domains, with legality proven on affine access maps | none yet: it summarizes kernels (12 of 31 corpus kernels fully affine) and fuses nothing so far |
 
 ## License
 

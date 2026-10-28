@@ -36,14 +36,14 @@ level re-derives meaning from it heuristically.
    division-lowering cost, bounds-check cost) is not a feature, it is
    what the costs look like at each level.
 4. **Consumers, each at its own level**:
-   - eregalloc oracle (RA boundary): measured restore/spill cost of its
-     own PAST decisions replaces `restore_estimate` where present —
-     decision-level feedback, the first experiment.
+   - register allocation (RA boundary): measured restore/spill cost of
+     the allocator's own PAST decisions replaces its estimate where
+     present — decision-level feedback, the first experiment.
    - mid-end passes (llvm level): e.g. divmagic consults measured cost of
      its previous expansion vs a hardware divide per site (settles the
      X925-vs-GPU per-target question empirically, per site).
-   - CMT calibration: spectral-vs-measured error attributed per CFG shape
-     and per level.
+   - frequency-model calibration: spectral-vs-measured error attributed
+     per CFG shape and per level.
    - UI / hot lines: the top of the lift is source-construct cost for
      crabbit binaries with no DWARF needed by our own tooling.
 
@@ -60,30 +60,16 @@ overhead is visible as that pass's own cost.
 
 ## Experiments (in order)
 
-E1: measured vs estimated oracle costs (eregalloc c0/c2 × {estimate,
-measured}) on the corpus CPU variants — runtime + spill traffic.
+E1: measured vs estimated allocator restore costs ({estimate, measured})
+on the corpus CPU variants — runtime + spill traffic.
 E2: per-site divmagic decisions from measured costs vs always-on/off.
 E3: attribution-fidelity audit: inject a known-cost synthetic op at the
 llvm level, verify the backward lift recovers its cost within noise
 through the full stack (the correctness gate for the whole mechanism).
-E4: spectral-model error maps (CMT calibration).
+E4: spectral-model error maps.
 
-## Experiment results (E1 + E4, 2026-08-31, real perf samples)
+## Experiment results (E4, 2026-08-31, real perf samples)
 
-**E1 — measured oracle costs: NULL on this corpus.** All 14 corpus CPU
-kernels, real per-kernel profiles (CRABBIT_MEASURED_COSTS from lifted
-op costs): the kernel-function code is byte-identical with and without
-measured costs under BOTH oracles (c0, c2) on all 14 kernels; runtime
-deltas are pure noise (geomean −0.1%/+0.1%, no |Δ|>1%). The seam is
-proven live by test (inverted costs change the stream), so the null
-means the corpus kernels present no spill-choice points where measured
-restore costs re-rank victims — small kernel fns, 4-GPR pool, whole-
-interval spilling. Follow-up: rerun E1 on pressure-rich host code
-(arrow compiles) before concluding anything about the idea itself.
-**Profile FREQUENCIES (c2-meas-prof vs c2-meas): decisions changed on
-13/14 kernels (rms_norm the null) but runtime geomean +0.7% with two
-losses (prefix_sum +4.7%, worst) and no wins — measured frequencies
-re-rank eregalloc's choices on this corpus without improving them.
 **E4 — spectral model vs measured frequencies: the analytic model
 cannot see iteration counts.** Median Spearman 0.002, median Pearson
 −0.209 over the 14 kernel functions; the measured-hottest block's
@@ -93,9 +79,9 @@ often ranks the loop HEADER above the BODY, hence the negative
 correlations: uniform branch priors give a backedge probability 0.5, so
 loop mass saturates at O(1) instead of O(N)). Scope caveat: this judges
 the uniform-prior Perron model as crabbit consumes it, on small
-loop-dominated kernel CFGs; relative within-loop weighting (its CMT
-role) is a weaker claim not tested here. Full tables:
-kernel-corpus/results/cpu-feedback/20260831/{E1,E4}-ANALYSIS.md +
+loop-dominated kernel CFGs; relative within-loop weighting is a weaker
+claim not tested here. Full tables:
+kernel-corpus/results/cpu-feedback/20260831/E4-ANALYSIS.md +
 results.csv; profiles under profiles/. Support added:
 `CRABBIT_DUMP_FREQS=<path>` (JSONL, RA order) in the aarch64 allocator.
 
@@ -128,11 +114,10 @@ machine → LLVM level):
 - E3-lite audit test (`crates/pliron-ll/tests/opmap_audit.rs`): synthetic
   samples on a known machine range lift onto the correct LLVM op id
   through the real pipeline + real ingest.
-- Consumer seam: `eregalloc_passes::MeasuredCosts`
-  (`EregallocRegisterAllocatePass::with_measured_costs`, keyed by the def
-  op's `derived_from`) replaces the oracle's restore estimate where
-  present; tested to change eviction decisions. Not yet wired to env/
-  crabbit config — experiment E1 does that.
+- Consumer seam: the `lifted` costs are keyed by the def op's
+  `derived_from` id at the RA boundary, so an allocator (registered as an
+  extension, docs/EXTENDING.md) can replace its restore estimates with
+  them where present.
 
 **Mid-end adjoints + server lift — landed 2026-08-31 (round 2):**
 - `llvm-op-ids` (head of the shared mid-end) stamps the SOURCE numbering;
@@ -157,13 +142,9 @@ machine → LLVM level):
   op_costs payload with the ops at the `source` (default) or `ra`
   boundary — per-op cost + line + snippet for heat-mapping any pass view,
   plus per-synthetic-root semantic accounting; cached per (run, level).
-- `CRABBIT_MEASURED_COSTS=<op_costs.json>` (research-config): per-symbol
-  `lifted` costs feed the eregalloc oracle via
-  `with_measured_costs_provider` (fallback to estimates, never errors).
 
-Still not started: experiments E1/E2/E4 (the `CRABBIT_MEASURED_COSTS`
-knob is E1's mechanism, unexercised on real profiles); real sampling
-remains blocked on `kernel.perf_event_paranoid=4`; intermediate
+Still not started (at the time of this round): experiments E2/E4; real
+sampling was blocked on `kernel.perf_event_paranoid=4`; intermediate
 (per-mid-end-pass) boundary views — ids exist only at the two numbered
 boundaries by design (eager collapse); cross-function lift INTO callee
 bodies (callee-local ids are preserved but unconsumed).

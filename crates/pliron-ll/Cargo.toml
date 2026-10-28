@@ -24,7 +24,3 @@ serde_json.workspace = true
 [dev-dependencies]
 expect-test.workspace = true
 tempfile.workspace = true
-# The differential dominator/post-dominator tests against combinatorial-
-# matrix-theory's boolean-dataflow oracle live in the workspace-excluded
-# crates/crabbit-research (private research checkouts; even dev path deps
-# on them would break a fresh public checkout at resolution time).

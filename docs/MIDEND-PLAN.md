@@ -7,7 +7,7 @@ vs 1.05× (kernel-corpus/ANALYSIS.md Part A). CPU: crabbit-built corpus
 binaries are 3–57× slower than rustc/LLVM builds (gemm_tiled 21 s vs
 0.37 s). Beyond raw speed, the gaps *confound the RA experiments*: junk
 memory traffic and recomputed addresses inflate live ranges and spill
-counts that eregalloc/CMT are then measured against.
+counts that register-allocation experiments are then measured against.
 
 Current mid-end (crates/pliron-ll/src/passes/llvm/): inline, simplify
 (constant folding, insert/extract forwarding, BLOCK-LOCAL store-to-load
@@ -52,10 +52,7 @@ merging.
   dominance internally); else implement Cooper–Harvey–Kennedy (~100
   lines) in `pliron-ll/src/passes/llvm/analysis.rs` with natural-loop
   detection (back edge t→h where h dominates t; loop body by reverse
-  reachability). Differential-test dominators against
-  `cmt-boolean-dataflow::DomMatrix` as a *dev-dependency* only
-  (pliron-ll is published; a path dep would break `cargo publish`, a
-  dev-dep is stripped).
+  reachability).
 - **Placement**: the shared `add_midend_passes` list in
   `crates/crabbit/src/lib.rs` — host and kernel pipelines both gain the
   passes (GPU arms improve too). Order: inline → simplify-cfg → sroa/
@@ -64,16 +61,16 @@ merging.
 - **Ablation**: `CRABBIT_MIDEND_DISABLE=gvn,licm,divmagic` (comma list,
   parsed like CodegenOpts, unknown names error). Default all-on. This
   gives the harness a mid-end axis for free.
-- **Research note**: landing these *changes the RA experiments' baseline*.
+- **Note**: landing these *changes the RA experiments' baseline*.
   The 20260831-clean-full sweep is the pre-midend reference (backend
   df2122f6…); after landing, re-sweep and ask a genuinely new question:
-  does the engine/policy ranking survive a real mid-end? (Less junk
+  does the allocation-policy ranking survive a real mid-end? (Less junk
   pressure → different spill decisions.)
 
 ## Gates (every pass, before it lands)
 
-- `cargo test --workspace` green; backend-tests under
-  `CRABBIT_REGALLOC=eregalloc` too.
+- `cargo test --workspace` green; backend-tests under every allocator
+  configuration too.
 - All 14 corpus CPU variants: crabbit-built checksums == spec (both sizes).
 - GPU: `tools/run_all.py --arms rust-crabbit,rust-llvm` all-correct, and
   record the before/after ratio table (expect seidel & gemm to move).
@@ -86,8 +83,7 @@ merging.
 The existing mid-end is forward-only except block-local DSE/DCE in
 simplify.rs. Backward-analysis passes to add, on top of M1's analysis.rs
 (shared CFG utilities; generic backward bitset worklist over the region
-CFG, differential-tested against cmt-boolean-dataflow, whose boolean-matrix
-formulation is exactly the A^T of the forward problems — the CMT tie-in):
+CFG):
 
 6. **global-dse** — backward memory liveness: delete a store when every
    path to exit hits another store to the same (syntactic-model) address

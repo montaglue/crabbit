@@ -1,31 +1,27 @@
-//! Research codegen options.
+//! Register-allocation codegen options.
 //!
-//! crabbit doubles as a testbed for register-allocation and cost-model
-//! research (the eregalloc availability-aware spilling line and the
-//! combinatorial-matrix-theory analytical models). Their published numbers
-//! come from synthetic corpora, so every policy here is an *option*, chosen
-//! per build via environment variables, to let the same real program be
-//! compiled under each policy and compared — no crabbit rebuild required.
+//! Every spill/restore/frequency policy of the linear allocator is an
+//! *option*, chosen per build via environment variables, so the same real
+//! program can be compiled under each policy and compared — no crabbit
+//! rebuild required.
 //!
 //! | variable | values | default |
 //! |---|---|---|
 //! | `CRABBIT_SPILL_POLICY` | `furthest`, `weighted` | `furthest` |
-//! | `CRABBIT_RESTORE_ESTIMATE` | `reload`, `remat`, `egraph` | `reload` |
+//! | `CRABBIT_RESTORE_ESTIMATE` | `reload`, `remat` | `reload` |
 //! | `CRABBIT_BLOCK_FREQ` | `uniform`, `spectral`, `profile` | `uniform` |
 //! | `CRABBIT_PROFILE` | path to a `profile.json` | unset |
 //!
 //! `furthest` is the classic Poletto–Sarkar victim choice and the exact
 //! pre-options behavior. `weighted` scores candidates by
 //! `restore_estimate × Σ execution frequency of uses` and evicts the
-//! cheapest — the shape of eregalloc's eviction score. `remat` prices
+//! cheapest. `remat` prices
 //! trivially rematerializable values (constant defs) below a reload and
 //! also rewrites their restores to re-execute the def instead of loading
-//! the slot — eregalloc's "safe form": store once, recompute at uses when
-//! cheaper. `egraph` (the full availability-aware e-graph oracle) is
-//! reserved and errors until the vendored oracle is wired in. `spectral`
+//! the slot ("safe form": store once, recompute at uses when cheaper).
+//! `spectral`
 //! computes analytical block frequencies via Perron–Frobenius power
-//! iteration ([crate::passes::spectral_freq], from
-//! combinatorial-matrix-theory Experiment A); `uniform` weights every
+//! iteration ([crate::passes::spectral_freq]); `uniform` weights every
 //! block equally. `profile` reads *measured* frequencies from the
 //! `CRABBIT_PROFILE` JSON (produced by
 //! `scripts/perf-harness/profile_ingest.py` from `perf` samples and the
@@ -49,8 +45,6 @@ pub enum CodegenOptsErr {
         value: String,
         expected: &'static str,
     },
-    #[error("{0} is not wired in yet")]
-    NotWired(&'static str),
 }
 
 /// How the linear scan picks a spill victim under pressure.
@@ -73,8 +67,6 @@ pub enum RestoreEstimate {
     /// Trivially rematerializable values (single-def constants) are priced
     /// below a reload and restored by re-executing their def.
     TrivialRemat,
-    // Reserved: the availability-aware e-graph oracle (eregalloc C1/C2).
-    // Parsing `egraph` errors until it is vendored and wired.
 }
 
 /// Where block execution frequencies come from.
@@ -120,16 +112,11 @@ impl CodegenOpts {
         let restore = match env("CRABBIT_RESTORE_ESTIMATE").as_deref() {
             None | Some("reload") => RestoreEstimate::Reload,
             Some("remat") => RestoreEstimate::TrivialRemat,
-            Some("egraph") => {
-                return Err(input_error_noloc!(CodegenOptsErr::NotWired(
-                    "CRABBIT_RESTORE_ESTIMATE=egraph (availability-aware e-graph oracle)"
-                )));
-            }
             Some(other) => {
                 return Err(input_error_noloc!(CodegenOptsErr::UnknownValue {
                     var: "CRABBIT_RESTORE_ESTIMATE",
                     value: other.to_string(),
-                    expected: "reload, remat, egraph",
+                    expected: "reload, remat",
                 }));
             }
         };

@@ -28,7 +28,7 @@ pub mod verify_llvm_for_aarch64;
 use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
-    conversion::pass::{AnalysisManager, Pass, Passes},
+    conversion::pass::{AnalysisManager, Pass, Passes, into_passes, passes_from_order},
     result::CrabbitResult,
 };
 
@@ -47,47 +47,87 @@ use self::{
 };
 pub use self::target::TargetOs;
 
-/// The aarch64 lowering pipeline for `os`: every step is a [Pass] on the
-/// `builtin.module`, from LLVM-dialect verification down to encoded machine
-/// code. Only verification and ABI assignment differ per OS; the machine
-/// passes are shared. Translation to object-container bytes happens outside
-/// the pipeline, in [write_macho_object_from_ir] / [write_elf_object_from_ir].
-pub fn pipeline(os: TargetOs) -> Passes {
-    pipeline_with_allocator(os, Aarch64RegisterAllocatePass)
+/// The default order of the aarch64 lowering pipeline for `os`: every step
+/// is a pass on the `builtin.module`, from LLVM-dialect verification down
+/// to encoded machine code. Only verification and ABI assignment differ per
+/// OS; the machine passes are shared. Translation to object-container
+/// bytes happens outside the pipeline, in [write_macho_object_from_ir] /
+/// [write_elf_object_from_ir]. The register allocator
+/// (`aarch64-register-allocate`) can be replaced in an order by any pass
+/// meeting its post-conditions: every virtual register rewritten to a
+/// physical register or a spill-slot access through the reserved scratch
+/// registers, and `FuncOp::stack_size` raised by the spill area.
+pub const fn default_order(os: TargetOs) -> &'static [&'static str] {
+    macro_rules! order {
+        ($verify:literal, $abi:literal) => {
+            &[
+                $verify,
+                $abi,
+                // Stamp LLVM-level op ids at the LLVM→machine boundary so
+                // isel can record what each machine op was lowered from
+                // (backward profile attribution). No-op unless the
+                // blockmap/profile-map gate is set.
+                "aarch64-op-ids",
+                "llvm-to-aarch64-isel",
+                "aarch64-legalize",
+                "aarch64-machine-cfg-cleanup",
+                "aarch64-target-opts-pre-ra",
+                // Stamp stable block ids at the RA position (the CFG the
+                // frequency models describe) so the blockmap sidecar can
+                // map final .text ranges back to RA-order blocks. No-op
+                // unless CRABBIT_BLOCKMAP is set.
+                "aarch64-blockmap-ids",
+                "aarch64-register-allocate",
+                "aarch64-frame-lower",
+                "aarch64-post-ra-opts",
+                "aarch64-block-placement",
+                "aarch64-branch-relax",
+                "aarch64-asm-lower",
+                "aarch64-encode",
+            ]
+        };
+    }
+    match os {
+        TargetOs::Darwin => order!("verify-llvm-for-aarch64-darwin", "llvm-aarch64-darwin-abi"),
+        TargetOs::Linux => order!("verify-llvm-for-aarch64-linux", "llvm-aarch64-linux-abi"),
+    }
 }
 
-/// [pipeline] with `allocator` in the register-allocation slot (between
-/// `aarch64-target-opts-pre-ra` and `aarch64-frame-lower`). `allocator`
-/// must satisfy [Aarch64RegisterAllocatePass]'s post-conditions: every
-/// virtual register rewritten to a physical register or a spill-slot access
-/// through the reserved scratch registers, and `FuncOp::stack_size` raised
-/// by the spill area. This is the seam through which research allocators
-/// (e.g. the eregalloc engine, which lives in a crate that depends on this
-/// one and so cannot be named here) enter the pipeline.
-pub fn pipeline_with_allocator(os: TargetOs, allocator: impl Pass + 'static) -> Passes {
-    let mut passes = Passes::default();
-    passes.add_pass(VerifyLlvmForAarch64Pass::new(os));
-    passes.add_pass(LlvmAarch64AbiPass::new(os));
-    // Stamp LLVM-level op ids at the LLVM→machine boundary so isel can
-    // record what each machine op was lowered from (backward profile
-    // attribution). No-op unless the blockmap/profile-map gate is set.
-    passes.add_pass(opmap::Aarch64OpIdPass);
-    passes.add_pass(LlvmToAarch64IselPass);
-    passes.add_pass(Aarch64LegalizePass);
-    passes.add_pass(Aarch64MachineCfgCleanupPass);
-    passes.add_pass(Aarch64TargetOptsPreRaPass);
-    // Stamp stable block ids at the RA position (the CFG the frequency
-    // models describe) so the blockmap sidecar can map final .text ranges
-    // back to RA-order blocks. No-op unless CRABBIT_BLOCKMAP is set.
-    passes.add_pass(blockmap::Aarch64BlockmapIdPass);
-    passes.add_pass(allocator);
-    passes.add_pass(Aarch64FrameLowerPass);
-    passes.add_pass(Aarch64PostRaOptsPass);
-    passes.add_pass(Aarch64BlockPlacementPass);
-    passes.add_pass(Aarch64BranchRelaxPass);
-    passes.add_pass(Aarch64AsmLowerPass);
-    passes.add_pass(Aarch64EncodePass);
-    passes
+/// The aarch64 machine pass called `name` for `os`; `None` for a name that
+/// is not one (or names the other OS's verifier/ABI pass).
+pub fn construct(name: &str, os: TargetOs) -> Option<Box<dyn Pass>> {
+    Some(match name {
+        "verify-llvm-for-aarch64-darwin" if os == TargetOs::Darwin => {
+            Box::new(VerifyLlvmForAarch64Pass::new(os))
+        }
+        "verify-llvm-for-aarch64-linux" if os == TargetOs::Linux => {
+            Box::new(VerifyLlvmForAarch64Pass::new(os))
+        }
+        "llvm-aarch64-darwin-abi" if os == TargetOs::Darwin => Box::new(LlvmAarch64AbiPass::new(os)),
+        "llvm-aarch64-linux-abi" if os == TargetOs::Linux => Box::new(LlvmAarch64AbiPass::new(os)),
+        "aarch64-op-ids" => Box::new(opmap::Aarch64OpIdPass),
+        "llvm-to-aarch64-isel" => Box::new(LlvmToAarch64IselPass),
+        "aarch64-legalize" => Box::new(Aarch64LegalizePass),
+        "aarch64-machine-cfg-cleanup" => Box::new(Aarch64MachineCfgCleanupPass),
+        "aarch64-target-opts-pre-ra" => Box::new(Aarch64TargetOptsPreRaPass),
+        "aarch64-blockmap-ids" => Box::new(blockmap::Aarch64BlockmapIdPass),
+        "aarch64-register-allocate" => Box::new(Aarch64RegisterAllocatePass),
+        "aarch64-frame-lower" => Box::new(Aarch64FrameLowerPass),
+        "aarch64-post-ra-opts" => Box::new(Aarch64PostRaOptsPass),
+        "aarch64-block-placement" => Box::new(Aarch64BlockPlacementPass),
+        "aarch64-branch-relax" => Box::new(Aarch64BranchRelaxPass),
+        "aarch64-asm-lower" => Box::new(Aarch64AsmLowerPass),
+        "aarch64-encode" => Box::new(Aarch64EncodePass),
+        _ => return None,
+    })
+}
+
+/// The default aarch64 pipeline for `os` ([default_order]).
+pub fn pipeline(os: TargetOs) -> Passes {
+    into_passes(
+        passes_from_order(default_order(os), |name| construct(name, os))
+            .expect("default_order names only passes construct knows"),
+    )
 }
 
 /// Runs [pipeline] on `root` (a `builtin.module`) in place.
@@ -164,6 +204,19 @@ mod tests {
         aarch64::register(&mut ctx);
         macho::register(&mut ctx);
         ctx
+    }
+
+    /// Pipelines are orders of names: every name in a default order must
+    /// construct, for its OS only, a pass that reports exactly that name.
+    #[test]
+    fn default_orders_construct_passes_by_their_names() {
+        for (os, other) in [(TargetOs::Linux, TargetOs::Darwin), (TargetOs::Darwin, TargetOs::Linux)] {
+            for name in default_order(os) {
+                let pass = construct(name, os).unwrap_or_else(|| panic!("`{name}` does not construct"));
+                assert_eq!(pass.name(), *name);
+            }
+            assert!(construct(default_order(os)[0], other).is_none(), "{os:?} verifier built for {other:?}");
+        }
     }
 
     #[test]

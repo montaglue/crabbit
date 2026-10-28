@@ -1604,7 +1604,7 @@ mod tests {
     }
 
     /// The mid-end prefix that runs before this pass in
-    /// [add_llvm_midend_passes](super::super::add_llvm_midend_passes)
+    /// [DEFAULT_ORDER](super::super::DEFAULT_ORDER)
     /// (everything up to and including the second gvn).
     fn run_midend_prefix(ctx: &mut Context, root: Ptr<Operation>) {
         use super::super::{

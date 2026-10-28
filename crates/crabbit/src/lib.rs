@@ -16,9 +16,6 @@ extern crate rustc_driver;
 /// The rustc-MIR importer: walks the crate's monomorphized MIR and builds
 /// a module of cuda-oxide's `mir` dialect (dialect-mir).
 pub mod importer;
-/// The cuda-oxide device path: `#[kernel]` crates get their `rust_kernels`
-/// module from cuda-oxide's own translator.
-pub mod regalloc_engine;
 pub mod kernel_llvm_export;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
@@ -30,10 +27,11 @@ use rustc_session::config::{OutputFilenames, OutputType};
 
 
 use crate::{
-    conversion::pass::{AnalysisManager, PMConfig, Passes},
+    conversion::pass::{AnalysisManager, PMConfig, Pass as _, PassList, Passes, into_passes},
     printable::Printable,
     trace::{CrabbitTraceFile, CrabbitTraceMeta},
 };
+use crabbit_config::{CrabbitConfig, Side, Stage};
 use pliron_ll::{
     targets::{self, TargetBackend},
     triple::Triple,
@@ -147,7 +145,7 @@ impl CodegenBackend for CrabbitBackend {
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
     #[error(transparent)]
-    Config(#[from] research_config::ConfigError),
+    Config(#[from] crabbit_config::ConfigError),
     #[error(
         "no crabbit object backend is registered for target `{target}` \
          (parsed as `{triple}`); registered backends: {registered}"
@@ -189,97 +187,45 @@ fn backend_for_session(sess: &Session) -> Result<&'static TargetBackend, EmitErr
     })
 }
 
-/// The full MIR-to-machine-code pipeline for `target`, as pliron [Passes].
-/// The CFG stays in pliron's block-argument form throughout; pliron's own
-/// [Mem2RegPass] promotes the importer's alloca-per-local pattern to SSA
-/// values directly in that form.
-fn pipeline(target: &TargetBackend, already_lowered: bool, crate_name: &str) -> Result<Passes, EmitError> {
-    let mut passes = Passes::default();
-    // Only the aarch64 backends lower the mid-end's vector ops.
-    let profile = pliron_ll::target_profile::TargetProfile::host_cpu()
-        .with_simd128(target.name.starts_with("aarch64"));
-    if already_lowered {
-        // CRABBIT_EMIT_IR ran lower-dialect-mir standalone (to print the
-        // module in its pure-LLVM-dialect form); continue from there.
-        pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
-    } else {
-        add_midend_passes(&mut passes, &profile, crate_name);
+/// The pipeline of one module (`side`): the stages crabbit-config builds
+/// for it — `mir` to the LLVM dialect (unless `CRABBIT_EMIT_IR` already
+/// ran that stage), the mid-end, and on the host side the machine pipeline
+/// — as one flat list, in crabbit's default order or the registered one.
+/// The kernel module stops after the mid-end: PTX has virtual registers
+/// and ptxas does the machine work, so translation to PTX text
+/// ([pliron_ll::nvptx::write_ptx_from_ir]) happens outside the pipeline,
+/// like the object writers.
+fn pipeline(cfg: &CrabbitConfig, side: Side, already_lowered: bool) -> Result<Passes, EmitError> {
+    let mut stages = Vec::new();
+    if !already_lowered {
+        stages.push(Stage::MirToLlvm);
     }
-    // The machine pipeline, with the register allocator swapped for the
-    // engine chosen by CRABBIT_REGALLOC (see [regalloc_engine]; the
-    // engine→allocator mapping lives in research-config so its cargo
-    // features gate it in one place).
-    let engine = regalloc_engine::RegallocEngine::from_env()?;
-    passes.add_pass(engine.machine_pipeline(target)?);
-    Ok(passes)
-}
-
-/// The `mir`-level stage (today the `mir-census` analysis, see
-/// crates/mir/src/passes/), the `mir` → LLVM dialect lowering, and the
-/// passes that complete it for crabbit's module (linkage stamp, deferred
-/// function addresses, residual `mir.ptr` types). Shared by the pipelines and the standalone
-/// `CRABBIT_EMIT_IR` path, so every module passes through the stage exactly
-/// once and the two entry points cannot drift.
-fn add_mir_stage_and_lowering(passes: &mut Passes, crate_name: &str) {
-    use crabbit_mir::passes::{
-        erase_mir_types::EraseMirTypesPass, function_addresses::MaterializeFunctionAddressesPass,
-        linkage::ApplyModuleLinkagePass, lower_dialect_mir::LowerDialectMirPass,
-    };
-    crabbit_mir::passes::add_mir_passes_labelled(passes, Some(crate_name));
-    passes.add_pass(LowerDialectMirPass);
-    passes.add_pass(ApplyModuleLinkagePass);
-    passes.add_pass(MaterializeFunctionAddressesPass);
-    passes.add_pass(EraseMirTypesPass);
-}
-
-/// The target-independent mid-end: [add_mir_stage_and_lowering], then
-/// inlining, simplification, SROA and mem2reg (twice, see below). Shared
-/// by the host pipeline and the kernel pipeline. `crate_name` labels the
-/// census records.
-fn add_midend_passes(
-    passes: &mut Passes,
-    profile: &pliron_ll::target_profile::TargetProfile,
-    crate_name: &str,
-) {
-    add_mir_stage_and_lowering(passes, crate_name);
-    // The LLVM-dialect mid-end proper is shared with the resident
-    // driver/server (which starts from post-lowering IR), so its pass list
-    // lives in pliron-ll and cannot drift between the two entry points.
-    pliron_ll::passes::llvm::add_llvm_midend_passes(passes, profile);
-}
-
-/// The kernel (`rust_kernels` module) pipeline: the mid-end only. PTX has
-/// virtual registers and ptxas does the machine work, so translation to
-/// PTX text ([pliron_ll::nvptx::write_ptx_from_ir]) happens outside the
-/// pass pipeline, like the object writers.
-fn kernel_pipeline(already_lowered: bool, crate_name: &str) -> Passes {
-    let mut passes = Passes::default();
-    let profile = pliron_ll::target_profile::TargetProfile::gpu_kernel();
-    if already_lowered {
-        pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
-    } else {
-        add_midend_passes(&mut passes, &profile, crate_name);
+    stages.push(Stage::Midend);
+    if side == Side::Host {
+        stages.push(Stage::Machine);
     }
-    passes
+    let mut passes = PassList::new();
+    for stage in stages {
+        passes.extend(crabbit_config::build(stage, side, cfg)?);
+    }
+    Ok(into_passes(passes))
 }
 
 /// `CRABBIT_EMIT_IR=<dir>`: emit the module as printed IR immediately
-/// after `lower-dialect-mir` (pure LLVM dialect — parseable without the
-/// mir dialect or rustc), for the resident driver/server. Runs the
-/// mir-level stage and the lower pass standalone on `module` (the same
-/// prefix `add_midend_passes` would run, so the census still sees every
-/// module exactly once) and writes `<dir>/<stem>.plir`; the caller must
-/// then continue with an `already_lowered` pipeline.
+/// after the `mir` → LLVM stage (pure LLVM dialect — parseable without the
+/// mir dialect or rustc), for the resident driver/server. Runs that stage
+/// standalone on `module` (so the census still sees every module exactly
+/// once) and writes `<dir>/<stem>.plir`; the caller must then continue
+/// with an `already_lowered` pipeline.
 fn emit_lowered_ir(
     ctx: &mut pliron::context::Context,
     module: pliron::context::Ptr<pliron::operation::Operation>,
     dir: &std::path::Path,
     stem: &str,
-    crate_name: &str,
-    ) -> Result<(), EmitError> {
-    let mut lower = Passes::default();
-    add_mir_stage_and_lowering(&mut lower, crate_name);
-    lower
+    cfg: &CrabbitConfig,
+    side: Side,
+) -> Result<(), EmitError> {
+    into_passes(crabbit_config::build(Stage::MirToLlvm, side, cfg)?)
         .run(module, ctx, &mut AnalysisManager::default())
         .map_err(|error| EmitError::Pipeline { stage: "mir stage + lower-dialect-mir (CRABBIT_EMIT_IR)", reason: error.disp(ctx).to_string() })?;
     std::fs::create_dir_all(dir).map_err(io_err("create CRABBIT_EMIT_IR dir", dir))?;
@@ -308,7 +254,7 @@ fn emit_kernels(
     object: &std::path::Path,
     tracing: bool,
     ir_stem: &str,
-    crate_name: &str,
+    cfg: &CrabbitConfig,
 ) -> Result<std::path::PathBuf, EmitError> {
     let mut analyses = AnalysisManager::default();
     let emit_dir = emit_ir_dir();
@@ -318,17 +264,19 @@ fn emit_kernels(
             imported.kernel_module,
             dir,
             &format!("{ir_stem}-kernels"),
-            crate_name,
-            )?;
+            cfg,
+            Side::Device,
+        )?;
     }
-    let mut pipeline = kernel_pipeline(emit_dir.is_some(), crate_name);
+    let mut pipeline = pipeline(cfg, Side::Device, emit_dir.is_some())?;
     let mut dump_dir = None;
     if tracing {
         let dir = std::env::temp_dir().join(format!("crabbit-kernel-pass-dumps-{}", trace_version()));
         std::fs::create_dir_all(&dir).map_err(io_err("create kernel pass dump directory", &dir))?;
-        pipeline.set_config(PMConfig {
+        analyses.set_config(PMConfig {
             print_after_all: true,
             ir_printing_dir: Some(dir.clone()),
+            ..Default::default()
         });
         dump_dir = Some(dir);
     }
@@ -428,7 +376,9 @@ fn emit_object(
     outputs: &OutputFilenames,
     imported: &mut importer::ImportedCrate,
 ) -> Result<std::path::PathBuf, EmitError> {
-    let target = backend_for_session(sess)?;
+    let backend = backend_for_session(sess)?;
+    let crate_name = trace_project(sess);
+    let cfg = CrabbitConfig::new(Triple::parse(&sess.target.llvm_target)).with_crate_name(&crate_name);
 
     // Per-pass IR dumps and the trace file cost O(passes × module text) in
     // formatting and I/O — gigabytes on a large crate — so tracing is
@@ -447,14 +397,14 @@ fn emit_object(
     };
     let mut emitted_lowering_dump = None;
     let emit_dir = emit_ir_dir();
-    let crate_name = trace_project(sess);
     if let Some(dir) = &emit_dir {
         emit_lowered_ir(
             &mut imported.ctx,
             imported.module,
             dir,
             &format!("{crate_name}-crabbit_rust"),
-            &crate_name,
+            &cfg,
+            Side::Host,
         )?;
         if tracing {
             // Record the stage the emit path ran outside the pipeline, so
@@ -463,7 +413,7 @@ fn emit_object(
                 Some(imported.module.disp(&imported.ctx).to_string());
         }
     }
-    let mut pipeline = pipeline(target, emit_dir.is_some(), &crate_name)?;
+    let mut pipeline = pipeline(&cfg, Side::Host, emit_dir.is_some())?;
     let mut dump_dir = None;
     let version = trace_version();
     if tracing {
@@ -472,9 +422,10 @@ fn emit_object(
         // so a failed pipeline still leaves a trace up to the failing pass.
         let dir = std::env::temp_dir().join(format!("crabbit-pass-dumps-{version}"));
         std::fs::create_dir_all(&dir).map_err(io_err("create pass dump directory", &dir))?;
-        pipeline.set_config(PMConfig {
+        analyses.set_config(PMConfig {
             print_after_all: true,
             ir_printing_dir: Some(dir.clone()),
+            ..Default::default()
         });
         dump_dir = Some(dir);
     } else {
@@ -535,7 +486,7 @@ fn emit_object(
     if let Some(parent) = object.parent() {
         std::fs::create_dir_all(parent).map_err(io_err("create object output directory", parent))?;
     }
-    let bytes = target
+    let bytes = backend
         .write_object(&mut imported.ctx, imported.module)
         .map_err(|error| EmitError::Pipeline {
             stage: "object write",
@@ -554,7 +505,7 @@ fn emit_object(
         std::fs::write(&sidecar, json).map_err(io_err("write blockmap sidecar", &sidecar))?;
     }
     if imported.kernel_count > 0 {
-        emit_kernels(imported, &object, tracing, &format!("{crate_name}-crabbit_rust"), &crate_name)?;
+        emit_kernels(imported, &object, tracing, &format!("{crate_name}-crabbit_rust"), &cfg)?;
     }
     Ok(object)
 }
@@ -595,15 +546,15 @@ fn sanitize_trace_name(name: &str) -> String {
     }
 }
 
-/// The backend object, separated from the exported entry point so the
-/// research composition dylib (crates/crabbit-research) can register its
-/// engines first and then delegate here.
+/// The backend object, separated from the exported entry point so a
+/// backend with extensions can register its passes and order first and
+/// then delegate here (docs/EXTENDING.md).
 pub fn create_backend() -> Box<dyn CodegenBackend> {
     Box::new(CrabbitBackend)
 }
 
 // The #[no_mangle] __rustc_codegen_backend entry lives in the thin dylib
-// wrappers (crates/crabbit-backend, crates/crabbit-research), never here:
+// wrappers (crates/crabbit-backend, backends with extensions), never here:
 // an exported entry in the rlib would collide when a wrapper defines its
 // own.
 

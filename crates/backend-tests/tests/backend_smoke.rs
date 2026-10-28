@@ -23,9 +23,8 @@ fn fixture_manifest(root: &Path, fixture: &str) -> PathBuf {
 
 fn backend_path(root: &std::path::Path) -> PathBuf {
     // CRABBIT_TEST_BACKEND points the whole suite at an alternative
-    // backend dylib — e.g. crates/crabbit-research/target/debug/
-    // libcrabbit_research.so, whose linked engines make the
-    // CRABBIT_REGALLOC=eregalloc run of this suite meaningful.
+    // backend dylib — e.g. one built with extensions (docs/EXTENDING.md),
+    // so the fixtures check that its passes keep every program correct.
     if let Ok(path) = std::env::var("CRABBIT_TEST_BACKEND") {
         if !path.is_empty() {
             return PathBuf::from(path);
@@ -86,27 +85,6 @@ fn object_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     objects
-}
-
-fn crabbit_files(root: &Path) -> Vec<PathBuf> {
-    let mut dumps = Vec::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return dumps;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            dumps.extend(crabbit_files(&path));
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "crabbit")
-            && path.metadata().is_ok_and(|metadata| metadata.len() > 0)
-        {
-            dumps.push(path);
-        }
-    }
-    dumps
 }
 
 fn build_backend(root: &Path, cargo: &str) -> PathBuf {

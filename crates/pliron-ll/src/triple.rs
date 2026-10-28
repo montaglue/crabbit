@@ -13,6 +13,9 @@ use std::fmt;
 pub enum Arch {
     Aarch64,
     X86_64,
+    /// 64-bit NVPTX, the triple crabbit's kernel pipeline compiles for
+    /// (`nvptx64-nvidia-cuda`, as in LLVM).
+    Nvptx64,
     Unknown(String),
 }
 
@@ -20,6 +23,7 @@ pub enum Arch {
 pub enum Vendor {
     Apple,
     Pc,
+    Nvidia,
     Unknown(String),
 }
 
@@ -32,6 +36,7 @@ pub enum Os {
     MacOsx,
     Ios,
     Linux,
+    Cuda,
     Unknown(String),
 }
 
@@ -100,11 +105,13 @@ impl fmt::Display for Triple {
         let arch = match &self.arch {
             Arch::Aarch64 => "aarch64",
             Arch::X86_64 => "x86_64",
+            Arch::Nvptx64 => "nvptx64",
             Arch::Unknown(name) => name,
         };
         let vendor = match &self.vendor {
             Vendor::Apple => "apple",
             Vendor::Pc => "pc",
+            Vendor::Nvidia => "nvidia",
             Vendor::Unknown(_) => "unknown",
         };
         let os = match &self.os {
@@ -112,6 +119,7 @@ impl fmt::Display for Triple {
             Os::MacOsx => "macosx",
             Os::Ios => "ios",
             Os::Linux => "linux",
+            Os::Cuda => "cuda",
             Os::Unknown(_) => "unknown",
         };
         write!(f, "{arch}-{vendor}-{os}")?;
@@ -127,6 +135,7 @@ fn parse_arch(component: &str) -> Arch {
     match component {
         "aarch64" | "arm64" | "arm64e" => Arch::Aarch64,
         "x86_64" | "amd64" | "x86_64h" => Arch::X86_64,
+        "nvptx64" => Arch::Nvptx64,
         other => Arch::Unknown(other.to_string()),
     }
 }
@@ -135,6 +144,7 @@ fn parse_vendor(component: &str) -> Vendor {
     match component {
         "apple" => Vendor::Apple,
         "pc" => Vendor::Pc,
+        "nvidia" => Vendor::Nvidia,
         other => Vendor::Unknown(other.to_string()),
     }
 }
@@ -150,6 +160,8 @@ fn try_parse_os(component: &str) -> Option<Os> {
         Some(Os::Ios)
     } else if component.starts_with("linux") {
         Some(Os::Linux)
+    } else if component.starts_with("cuda") {
+        Some(Os::Cuda)
     } else {
         None
     }
@@ -186,6 +198,15 @@ mod tests {
         assert_eq!(triple.vendor, Vendor::Apple);
         assert_eq!(triple.os, Os::MacOsx);
         assert!(triple.is_os_darwin());
+    }
+
+    #[test]
+    fn parses_nvptx_kernel_triple() {
+        let triple = Triple::parse("nvptx64-nvidia-cuda");
+        assert_eq!(triple.arch, Arch::Nvptx64);
+        assert_eq!(triple.vendor, Vendor::Nvidia);
+        assert_eq!(triple.os, Os::Cuda);
+        assert_eq!(triple.to_string(), "nvptx64-nvidia-cuda");
     }
 
     #[test]

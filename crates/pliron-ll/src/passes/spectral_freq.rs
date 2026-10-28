@@ -1,8 +1,8 @@
 //! Spectral block execution frequencies.
 //!
-//! Ported from combinatorial-matrix-theory Experiment A: with uniform
-//! branch priors the CFG is a row-substochastic transition matrix; closing
-//! the chain with exit→entry restart edges makes it irreducible, so
+//! With uniform branch priors the CFG is a row-substochastic transition
+//! matrix; closing the chain with exit→entry restart edges makes it
+//! irreducible, so
 //! Perron–Frobenius gives a unique stationary distribution π, found by
 //! power iteration on the lazy chain `(P + I) / 2` (lazy for
 //! aperiodicity). The compiler-meaningful quantity is the

@@ -67,9 +67,9 @@ Two properties fall out that a flat map cannot have:
   produce one `op_costs.json` shape with costs at the machine, lifted, and
   source levels — the backward walk applied at ingest, with equal-weight
   splits at multi-parent merges.
-- **Consumers.** The eregalloc register allocator's restore oracle accepts
-  measured per-decision costs (`CRABBIT_MEASURED_COSTS`), replacing its
-  estimates where a measurement exists. The analysis server's `run_costs`
+- **Consumers.** The `lifted` costs are keyed by RA-boundary ids, so an
+  allocator registered as an extension (docs/EXTENDING.md) can replace its
+  estimates with measured per-decision costs. The analysis server's `run_costs`
   command replays a compilation and returns per-op cost tables (with text
   positions) at any supported boundary, plus per-root semantic accounting —
   hot-line views at every level of the compiler, from one measurement.

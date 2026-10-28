@@ -24,7 +24,7 @@ pub mod verify_llvm_for_x86_64_darwin;
 use crate::{
     context::{Context, Ptr},
     ir::operation::Operation,
-    conversion::pass::{AnalysisManager, Passes},
+    conversion::pass::{AnalysisManager, Pass, Passes, into_passes, passes_from_order},
     result::CrabbitResult,
 };
 
@@ -41,27 +41,50 @@ use self::{
     verify_llvm_for_x86_64_darwin::VerifyLlvmForX86_64DarwinPass,
 };
 
-/// The x86-64-darwin lowering pipeline: every step is a
-/// [Pass](crate::conversion::pass::Pass) on the
-/// `builtin.module`, from LLVM-dialect verification down to encoded machine
-/// code. Translation to Mach-O bytes happens outside the pipeline, in
-/// [write_macho_object_from_ir].
+/// The default order of the x86-64-darwin lowering pipeline: every step is
+/// a pass on the `builtin.module`, from LLVM-dialect verification down to
+/// encoded machine code. Translation to Mach-O bytes happens outside the
+/// pipeline, in [write_macho_object_from_ir].
+pub const DEFAULT_ORDER: &[&str] = &[
+    "verify-llvm-for-x86-64-darwin",
+    "llvm-x86-64-darwin-abi",
+    "llvm-to-x86-64-isel",
+    "x86-64-legalize",
+    "x86-64-machine-cfg-cleanup",
+    "x86-64-target-opts-pre-ra",
+    "x86-64-register-allocate",
+    "x86-64-frame-lower",
+    "x86-64-post-ra-opts",
+    "x86-64-block-placement",
+    "x86-64-branch-relax",
+    "x86-64-asm-lower",
+    "x86-64-encode",
+];
+
+/// The x86-64-darwin machine pass called `name`; `None` for a name that is
+/// not one.
+pub fn construct(name: &str) -> Option<Box<dyn Pass>> {
+    Some(match name {
+        "verify-llvm-for-x86-64-darwin" => Box::new(VerifyLlvmForX86_64DarwinPass),
+        "llvm-x86-64-darwin-abi" => Box::new(LlvmX86_64DarwinAbiPass),
+        "llvm-to-x86-64-isel" => Box::new(LlvmToX86_64IselPass),
+        "x86-64-legalize" => Box::new(X86_64LegalizePass),
+        "x86-64-machine-cfg-cleanup" => Box::new(X86_64MachineCfgCleanupPass),
+        "x86-64-target-opts-pre-ra" => Box::new(X86_64TargetOptsPreRaPass),
+        "x86-64-register-allocate" => Box::new(X86_64RegisterAllocatePass),
+        "x86-64-frame-lower" => Box::new(X86_64FrameLowerPass),
+        "x86-64-post-ra-opts" => Box::new(X86_64PostRaOptsPass),
+        "x86-64-block-placement" => Box::new(X86_64BlockPlacementPass),
+        "x86-64-branch-relax" => Box::new(X86_64BranchRelaxPass),
+        "x86-64-asm-lower" => Box::new(X86_64AsmLowerPass),
+        "x86-64-encode" => Box::new(X86_64EncodePass),
+        _ => return None,
+    })
+}
+
+/// The default x86-64-darwin pipeline ([DEFAULT_ORDER]).
 pub fn pipeline() -> Passes {
-    let mut passes = Passes::default();
-    passes.add_pass(VerifyLlvmForX86_64DarwinPass);
-    passes.add_pass(LlvmX86_64DarwinAbiPass);
-    passes.add_pass(LlvmToX86_64IselPass);
-    passes.add_pass(X86_64LegalizePass);
-    passes.add_pass(X86_64MachineCfgCleanupPass);
-    passes.add_pass(X86_64TargetOptsPreRaPass);
-    passes.add_pass(X86_64RegisterAllocatePass);
-    passes.add_pass(X86_64FrameLowerPass);
-    passes.add_pass(X86_64PostRaOptsPass);
-    passes.add_pass(X86_64BlockPlacementPass);
-    passes.add_pass(X86_64BranchRelaxPass);
-    passes.add_pass(X86_64AsmLowerPass);
-    passes.add_pass(X86_64EncodePass);
-    passes
+    into_passes(passes_from_order(DEFAULT_ORDER, construct).expect("DEFAULT_ORDER names only passes construct knows"))
 }
 
 /// Runs [pipeline] on `root` (a `builtin.module`) in place.
@@ -120,6 +143,16 @@ mod tests {
     };
 
     use super::*;
+
+    /// Every name in [DEFAULT_ORDER] constructs a pass reporting that name.
+    #[test]
+    fn default_order_constructs_passes_by_their_names() {
+        for name in DEFAULT_ORDER {
+            let pass = construct(name).unwrap_or_else(|| panic!("`{name}` does not construct"));
+            assert_eq!(pass.name(), *name);
+        }
+    }
+
 
     fn context() -> Context {
         let mut ctx = Context::new();

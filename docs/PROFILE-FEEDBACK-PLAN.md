@@ -5,12 +5,12 @@ frequencies). The actual v1 design — backward interpretation through the
 dialect stack — is docs/PROFILE-FEEDBACK-BACKWARD.md; the "v1"/"v1.5"
 labels below are historical.
 
-User's research idea (2026-08-31): take perf traces of the running program
+Idea (2026-08-31): take perf traces of the running program
 and feed the measured metrics back into optimization. (Not backward
 dataflow — feedback across runs; the consuming passes are ordinary.)
 
 Why it fits: `CRABBIT_BLOCK_FREQ` is already an axis with `uniform` (no
-information) and `spectral` (CMT's analytic Perron–Frobenius model).
+information) and `spectral` (the analytic Perron–Frobenius model).
 Measured frequencies add the ground truth as a third source, giving the
 experiment: how close is the analytic model to reality, and do the
 allocators decide differently when told the truth?
@@ -39,25 +39,21 @@ allocators decide differently when told the truth?
    - linear engine: `BlockFreqModel::Profile` in codegen_opts, looked up
      by function symbol in the allocator (fall back to uniform when a
      function or block is missing — a stale profile must never error).
-   - eregalloc engine: `BlockFreqSource::Provider` fn that reads the same
-     JSON (lazy static keyed by env var) and returns the per-block vector
-     for the FuncOp's symbol; wrong-length vectors already fall back to
-     uniform per the contract.
    Determinism makes IDs stable across the profile build and the rebuild
    (same compiler, flags, source ⇒ same RA-time CFG). The profile build
    should use the SAME config as the rebuild except the freq source.
 4. **Experiment** (harness): corpus CPU variants × {uniform, spectral,
-   profile} × {linear-weighted, eregalloc-c0, eregalloc-c2}; the harness
+   profile} × the allocator configurations; the harness
    grows a profile-collection step (run the baseline-freq binary once
    under perf, ingest, then compile the `profile` configs). Report also
    the per-function correlation (Spearman) of spectral vs measured
-   frequencies — the direct CMT-model validation number.
+   frequencies — the direct validation number of the analytic model.
 
 ## Extensions (explicitly later)
 
-- ARM SPE / cache-miss counters → CMT cache-model line; branch counters →
+- ARM SPE / cache-miss counters → a cache-model line; branch counters →
   profile-guided `Aarch64BlockPlacementPass`; sample-driven spill-slot
-  and remat decisions in eregalloc's oracle (freq is already the hook).
+  and remat decisions (freq is already the hook).
 
 ## Gates
 
@@ -65,8 +61,9 @@ Unit: blockmap ids survive placement/relax (test asserts contiguous
 coverage of .text per function and monotone offsets); ingestion on a
 synthetic perf script fixture; provider fallback on stale/missing
 profiles. End to end: one corpus kernel (elementwise_chain — it showed
-the largest eregalloc runtime delta, +34%) profiled and rebuilt with
-`profile` under both engines, checksums unchanged, and the freq vectors
+the largest allocator-policy runtime delta, +34%) profiled and rebuilt
+with `profile` under each allocator configuration, checksums unchanged,
+and the freq vectors
 logged. No commits anywhere.
 
 ## v1.5: CUDA profiler feedback (user direction 2026-08-31)

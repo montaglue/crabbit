@@ -8,7 +8,7 @@ use crabbit_mir::passes::lower_dialect_mir::LowerDialectMirPass;
 use pliron::context::{Context, Ptr};
 use pliron::operation::Operation;
 use pliron_inspect_driver::DriverHooks;
-use pliron_ll::conversion::pass::{AnalysisManager, Mem2RegPass, Pass};
+use pliron_ll::conversion::pass::{AnalysisManager, Mem2RegPass, Pass, PassControl, run_observed};
 use pliron_ll::passes::llvm::{
     inline::LLVMInlinePass, pin_type_punned_slots::LLVMPinTypePunnedSlotsPass,
     simplify::LLVMSimplifyPass, simplify_cfg::LLVMSimplifyCfgPass,
@@ -94,34 +94,40 @@ const NVPTX_TARGET: &str = "nvptx-kernel";
 pub struct ServeHooks;
 
 impl ServeHooks {
-    fn backend(target: &str) -> Result<&'static pliron_ll::targets::TargetBackend, String> {
+    /// The backend for a host `target` name, with the triple it was
+    /// resolved from.
+    fn backend(
+        target: &str,
+    ) -> Result<(&'static pliron_ll::targets::TargetBackend, pliron_ll::triple::Triple), String> {
         let (_, triple) = SERVE_TARGETS
             .iter()
             .find(|(name, _)| *name == target)
             .ok_or_else(|| format!("unknown target `{target}`"))?;
-        pliron_ll::targets::lookup(&pliron_ll::triple::Triple::parse(triple))
-            .ok_or_else(|| format!("no backend registered for `{target}`"))
+        let triple = pliron_ll::triple::Triple::parse(triple);
+        let backend = pliron_ll::targets::lookup(&triple)
+            .ok_or_else(|| format!("no backend registered for `{target}`"))?;
+        Ok((backend, triple))
     }
 
-    /// The full pipeline for `target` (flattened for per-pass reporting).
-    /// Must be called inside `with_env_config` — the engine selection and
-    /// several passes read `CRABBIT_*` at construction or run time.
-    fn build_pipeline(target: &str) -> Result<pliron_ll::conversion::pass::Passes, String> {
-        let mut passes = pliron_ll::conversion::pass::Passes::default();
-        let profile = if target == NVPTX_TARGET {
-            pliron_ll::target_profile::TargetProfile::gpu_kernel()
+    /// The pipeline for `target` from lowered IR (flattened for per-pass
+    /// reporting): the mid-end, then the machine pipeline for host
+    /// targets, in crabbit-config's effective order. Must be called inside
+    /// `with_env_config` — several passes read `CRABBIT_*` at construction
+    /// or run time.
+    fn build_pipeline(target: &str) -> Result<pliron_ll::conversion::pass::PassList, String> {
+        use crabbit_config::{CrabbitConfig, Side, Stage, build};
+        let (cfg, side) = if target == NVPTX_TARGET {
+            // The device pipeline does not depend on the host; any served
+            // host triple will do.
+            (CrabbitConfig::new(pliron_ll::triple::Triple::parse(SERVE_TARGETS[0].1)), Side::Device)
         } else {
-            // Only the aarch64 backends lower the mid-end's vector ops.
-            pliron_ll::target_profile::TargetProfile::host_cpu()
-                .with_simd128(target.starts_with("aarch64"))
+            let (_, triple) = Self::backend(target)?;
+            (CrabbitConfig::new(triple), Side::Host)
         };
-        pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
-        if target == NVPTX_TARGET {
-            return Ok(passes);
+        let mut passes = build(Stage::Midend, side, &cfg).map_err(|e| e.to_string())?;
+        if side == Side::Host {
+            passes.extend(build(Stage::Machine, side, &cfg).map_err(|e| e.to_string())?);
         }
-        let backend = Self::backend(target)?;
-        let engine = research_config::RegallocEngine::from_env().map_err(|e| e.to_string())?;
-        passes.extend(engine.machine_pipeline(backend).map_err(|e| e.to_string())?);
         Ok(passes)
     }
 }
@@ -140,8 +146,8 @@ impl DriverHooks for ServeHooks {
         target: &str,
         config: &std::collections::BTreeMap<String, String>,
     ) -> Result<Vec<String>, String> {
-        research_config::with_env_config(config, || {
-            Self::build_pipeline(target).map(|p| p.names())
+        crabbit_config::with_env_config(config, || {
+            Self::build_pipeline(target).map(|passes| passes.iter().map(|pass| pass.name().to_string()).collect())
         })
         .map_err(|e| e.to_string())?
     }
@@ -160,7 +166,7 @@ impl DriverHooks for ServeHooks {
         // the replay into an empty attribution table.
         let mut config = config.clone();
         config.insert("CRABBIT_PROFILE_MAP".to_string(), "1".to_string());
-        research_config::with_env_config(&config, || {
+        crabbit_config::with_env_config(&config, || {
             let hooks = analysis_hooks_factory()();
             let mut ctx = hooks.create_context();
             let root = pliron_inspect_driver::parse_ir(module_text, &mut ctx)
@@ -168,17 +174,15 @@ impl DriverHooks for ServeHooks {
             let mut passes = Self::build_pipeline(target)?;
             let mut analyses = AnalysisManager::default();
             let mut hit = false;
-            passes
-                .run_observed(root, &mut ctx, &mut analyses, &mut |_, name, _, _| {
-                    use pliron_ll::conversion::pass::PassControl;
-                    if name == boundary_pass {
-                        hit = true;
-                        PassControl::Stop
-                    } else {
-                        PassControl::Continue
-                    }
-                })
-                .map_err(|e| format!("attribution replay failed: {e}"))?;
+            run_observed(&mut passes, root, &mut ctx, &mut analyses, &mut |_, name, _, _| {
+                if name == boundary_pass {
+                    hit = true;
+                    PassControl::Stop
+                } else {
+                    PassControl::Continue
+                }
+            })
+            .map_err(|e| format!("attribution replay failed: {e}"))?;
             if !hit {
                 return Err(format!(
                     "boundary pass `{boundary_pass}` is not in the `{target}` pipeline"
@@ -261,35 +265,33 @@ impl DriverHooks for ServeHooks {
         capture: bool,
         events: &mut dyn FnMut(pliron_inspect_driver::PipelineEvent) -> bool,
     ) -> Result<(), String> {
-        research_config::with_env_config(config, || {
+        crabbit_config::with_env_config(config, || {
             let mut passes = Self::build_pipeline(target)?;
             let mut analyses = AnalysisManager::default();
             let mut last = std::time::Instant::now();
-            passes
-                .run_observed(root, ctx, &mut analyses, &mut |index, name, ctx, op| {
-                    use pliron_ll::conversion::pass::PassControl;
-                    let micros = last.elapsed().as_micros() as u64;
-                    last = std::time::Instant::now();
-                    let ir = capture.then(|| {
-                        use pliron::printable::Printable;
-                        let state = pliron::printable::State::default();
-                        op.print(ctx, &state).to_string()
-                    });
-                    let keep_going = events(pliron_inspect_driver::PipelineEvent {
-                        index,
-                        name: name.to_string(),
-                        micros,
-                        ir,
-                    });
-                    let stop_after = upto.is_some_and(|u| index + 1 >= u);
-                    if keep_going && !stop_after {
-                        PassControl::Continue
-                    } else {
-                        PassControl::Stop
-                    }
-                })
-                .map(|_| ())
-                .map_err(|e| format!("{e}"))
+            run_observed(&mut passes, root, ctx, &mut analyses, &mut |index, name, ctx, op| {
+                let micros = last.elapsed().as_micros() as u64;
+                last = std::time::Instant::now();
+                let ir = capture.then(|| {
+                    use pliron::printable::Printable;
+                    let state = pliron::printable::State::default();
+                    op.print(ctx, &state).to_string()
+                });
+                let keep_going = events(pliron_inspect_driver::PipelineEvent {
+                    index,
+                    name: name.to_string(),
+                    micros,
+                    ir,
+                });
+                let stop_after = upto.is_some_and(|u| index + 1 >= u);
+                if keep_going && !stop_after {
+                    PassControl::Continue
+                } else {
+                    PassControl::Stop
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| format!("{e}"))
         })
         .map_err(|e| e.to_string())?
     }
@@ -309,7 +311,7 @@ impl DriverHooks for ServeHooks {
             .map_err(|e| format!("{e}"))?;
             return Ok(ptx.into_bytes());
         }
-        let backend = Self::backend(target)?;
+        let (backend, _) = Self::backend(target)?;
         backend
             .write_object(ctx, root)
             .map_err(|e| format!("{e}"))

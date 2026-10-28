@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["vendor", "crates/crabbit-research"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,8 +14,8 @@ repository = "https://github.com/montaglue/crabbit"
 # this dependency against crates.io once the local path is stripped from the
 # packaged manifest. Locally, cargo still prefers the path.
 # Upstream pliron from crates.io (0.20.0), unpatched. cuda-oxide's crates
-# below pin the same release ("=0.20.0"), as does crabbit-engines; every
-# consumer must resolve one pliron or types do not unify.
+# below pin the same release ("=0.20.0"); every consumer — extensions
+# included — must resolve one pliron or types do not unify.
 pliron = "0.20.0"
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
@@ -48,15 +48,8 @@ reserved-oxide-symbols = { git = "https://github.com/NVlabs/cuda-oxide.git", rev
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }
-# The research engines (eregalloc, combinatorial-matrix-theory) are NOT
-# dependencies of this workspace: they live in the private sibling repository
-# `crabbit-engines` (checked out next to this one), and
-# cargo resolves even optional dependencies into the lockfile, so any
-# reference here would break a fresh public checkout. They are composed
-# into a research build by the workspace-excluded crates/crabbit-research
-# dylib (path deps on ../crabbit-engines; engines registered at load).
 crabbit-core = { path = "crates/crabbit", version = "0.1.0" }
-research-config = { path = "crates/research-config", version = "0.1.0", default-features = false }
+crabbit-config = { path = "crates/config", version = "0.1.0" }
 crabbit-mir = { path = "crates/mir", version = "0.1.0" }
 awint = "0"
 combine = "4"

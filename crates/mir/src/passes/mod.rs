@@ -18,7 +18,7 @@
 //! lowering must not introduce `mir.*` kinds it lacks, and anything that
 //! has to cross the lowering travels on the module.
 
-use pliron_ll::conversion::pass::Passes;
+use pliron_ll::conversion::pass::Pass;
 
 pub mod erase_mir_types;
 pub mod function_addresses;
@@ -27,12 +27,41 @@ pub mod linkage;
 pub mod lower_dialect_mir;
 pub mod mir_census;
 
-/// The passes before the lowering (the measurement stage).
-pub fn add_mir_passes(passes: &mut Passes) {
-    add_mir_passes_labelled(passes, None);
+/// The default order of the stage from imported `mir` to the LLVM dialect:
+/// the measurement pass, the lowering, and the passes that complete it for
+/// crabbit's module (linkage stamp, deferred function addresses, residual
+/// `mir.ptr` types). crabbit-config builds pipelines from this order.
+pub const DEFAULT_ORDER: &[&str] = &[
+    mir_census::PASS_NAME,
+    "lower-dialect-mir",
+    linkage::PASS_NAME,
+    function_addresses::PASS_NAME,
+    erase_mir_types::PASS_NAME,
+];
+
+/// The pass of this stage called `name`; `label` is the census record's
+/// `crate` field. `None` for a name that is not one of this stage's passes.
+pub fn construct(name: &str, label: Option<&str>) -> Option<Box<dyn Pass>> {
+    Some(match name {
+        mir_census::PASS_NAME => Box::new(mir_census::MirCensusPass::new(label)),
+        "lower-dialect-mir" => Box::new(lower_dialect_mir::LowerDialectMirPass),
+        linkage::PASS_NAME => Box::new(linkage::ApplyModuleLinkagePass),
+        function_addresses::PASS_NAME => Box::new(function_addresses::MaterializeFunctionAddressesPass),
+        erase_mir_types::PASS_NAME => Box::new(erase_mir_types::EraseMirTypesPass),
+        _ => return None,
+    })
 }
 
-/// [add_mir_passes] with `label` on the census records.
-pub fn add_mir_passes_labelled(passes: &mut Passes, label: Option<&str>) {
-    passes.add_pass(mir_census::MirCensusPass::new(label));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every name in [DEFAULT_ORDER] constructs a pass reporting that name.
+    #[test]
+    fn default_order_constructs_passes_by_their_names() {
+        for name in DEFAULT_ORDER {
+            let pass = construct(name, Some("label")).unwrap_or_else(|| panic!("`{name}` does not construct"));
+            assert_eq!(pass.name(), *name);
+        }
+    }
 }

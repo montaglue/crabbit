@@ -1,0 +1,13 @@
+[package]
+name = "crabbit-config"
+description = "crabbit's compilation configuration (host and device targets) and pass-pipeline API: passes registered by name, pipelines as editable orders of names"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+pliron.workspace = true
+pliron-ll.workspace = true
+crabbit-mir.workspace = true

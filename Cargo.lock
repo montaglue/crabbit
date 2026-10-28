@@ -291,12 +291,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabbit-config"
+version = "0.1.0"
+dependencies = [
+ "crabbit-mir",
+ "pliron",
+ "pliron-ll",
+ "thiserror",
+]
+
+[[package]]
 name = "crabbit-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "awint",
  "combine",
+ "crabbit-config",
  "crabbit-mir",
  "dialect-nvvm",
  "expect-test",
@@ -305,7 +316,6 @@ dependencies = [
  "pliron",
  "pliron-ll",
  "pliron-llvm",
- "research-config",
  "reserved-oxide-symbols",
  "rustc-hash",
  "serde",
@@ -320,13 +330,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crabbit-config",
  "crabbit-mir",
  "pliron",
  "pliron-inspect-driver",
  "pliron-inspect-protocol",
  "pliron-ll",
  "pliron-llvm",
- "research-config",
  "serde_json",
 ]
 
@@ -1096,16 +1106,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "research-config"
-version = "0.1.0"
-dependencies = [
- "pliron",
- "pliron-ll",
- "serde_json",
- "thiserror",
-]
 
 [[package]]
 name = "reserved-oxide-symbols"

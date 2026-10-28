@@ -62,3 +62,34 @@ impl TargetProfile {
         self
     }
 }
+
+/// What a pipeline compiles for: the target triple — the LLVM-style
+/// identity of the pipeline (the kernel module compiles for
+/// `nvptx64-nvidia-cuda`) — and the [TargetProfile] answers the mid-end's
+/// profitability questions get.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineTarget {
+    pub triple: crate::triple::Triple,
+    pub profile: TargetProfile,
+}
+
+impl PipelineTarget {
+    /// A host pipeline for `triple`: the CPU profile, with SIMD on the
+    /// backends that lower the mid-end's vector ops (aarch64 only).
+    pub fn host(triple: crate::triple::Triple) -> Self {
+        let simd128 = triple.arch == crate::triple::Arch::Aarch64;
+        PipelineTarget {
+            triple,
+            profile: TargetProfile::host_cpu().with_simd128(simd128),
+        }
+    }
+
+    /// The kernel (`rust_kernels` module) pipeline: `nvptx64-nvidia-cuda`
+    /// with the GPU profile.
+    pub fn nvptx_kernel() -> Self {
+        PipelineTarget {
+            triple: crate::triple::Triple::parse("nvptx64-nvidia-cuda"),
+            profile: TargetProfile::gpu_kernel(),
+        }
+    }
+}

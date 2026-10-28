@@ -29,7 +29,7 @@ pliron-llvm.workspace = true
 pliron-ll.workspace = true
 crabbit-mir.workspace = true
 pliron-inspect-driver.workspace = true
-research-config.workspace = true
+crabbit-config.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -37,10 +37,3 @@ serde_json.workspace = true
 [dev-dependencies]
 pliron-inspect-protocol.workspace = true
 
-[features]
-# Compat no-ops (see crates/research-config): the public analysisd links
-# no research engines; a research analysisd would be composed the same
-# way crates/crabbit-research composes the backend dylib.
-default = []
-eregalloc = ["research-config/eregalloc"]
-cmt = ["research-config/cmt"]

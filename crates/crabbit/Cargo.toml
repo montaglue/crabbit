@@ -11,8 +11,8 @@ categories = ["compilers"]
 
 [lib]
 # rlib ONLY: every loadable backend is a thin dylib wrapper that links this
-# statically (crates/crabbit-backend for the public libcrabbit.so, the
-# workspace-excluded crates/crabbit-research for the research build).
+# statically (crates/crabbit-backend for libcrabbit.so; a backend with
+# extensions does the same, docs/EXTENDING.md).
 # Exactly one Rust dylib per rustc process — a second one reintroduces the
 # shared-generics/undefined-symbol hazards this layout exists to prevent.
 name = "crabbit_core"
@@ -31,7 +31,7 @@ pliron.workspace = true
 crabbit-mir.workspace = true
 pliron-llvm.workspace = true
 pliron-ll.workspace = true
-research-config.workspace = true
+crabbit-config.workspace = true
 llvm-export.workspace = true
 dialect-nvvm.workspace = true
 reserved-oxide-symbols.workspace = true
@@ -48,8 +48,3 @@ awint.workspace = true
 expect-test.workspace = true
 tempfile.workspace = true
 
-[features]
-# Compat no-ops: engines are linked, not feature-gated (see
-# crates/research-config's docs).
-eregalloc = ["research-config/eregalloc"]
-cmt = ["research-config/cmt"]

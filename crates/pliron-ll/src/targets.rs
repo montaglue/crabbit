@@ -7,7 +7,7 @@
 use pliron::{context::Context, context::Ptr, operation::Operation};
 
 use crate::{
-    conversion::pass::{DynPass, Pass, Passes},
+    conversion::pass::Pass,
     passes::{aarch64, x86_64_darwin},
     result::CrabbitResult,
     triple::{Arch, Triple},
@@ -19,31 +19,22 @@ pub struct TargetBackend {
     /// Registry name, e.g. `aarch64-linux` (diagnostics only).
     pub name: &'static str,
     matches: fn(&Triple) -> bool,
-    pipeline: fn() -> Passes,
-    /// The same pipeline with the register allocator replaced; `None` for
-    /// backends whose allocator slot is not parameterized (yet).
-    pipeline_with_allocator: Option<fn(DynPass) -> Passes>,
+    /// The default order of the machine pipeline: LLVM-dialect
+    /// verification down to encoded machine code.
+    pub default_order: &'static [&'static str],
+    construct: fn(&str) -> Option<Box<dyn Pass>>,
     write_object: fn(&mut Context, Ptr<Operation>) -> CrabbitResult<Vec<u8>>,
 }
 
 impl TargetBackend {
-    /// The lowering pipeline for this backend, from LLVM-dialect
-    /// verification down to encoded machine code.
-    pub fn pipeline(&self) -> Passes {
-        (self.pipeline)()
+    /// This backend's machine pass called `name`, or `None` if it has none
+    /// by that name.
+    pub fn construct(&self, name: &str) -> Option<Box<dyn Pass>> {
+        (self.construct)(name)
     }
 
-    /// [Self::pipeline] with `allocator` in the register-allocation slot,
-    /// or `None` if this backend has no swappable allocator. The allocator
-    /// must meet the backend's own allocator post-conditions (see
-    /// `passes::aarch64::pipeline_with_allocator`).
-    pub fn pipeline_with_allocator(&self, allocator: impl Pass + 'static) -> Option<Passes> {
-        self.pipeline_with_allocator
-            .map(|build| build(DynPass::new(allocator)))
-    }
-
-    /// Writes a module lowered by [Self::pipeline] into object-container
-    /// bytes (Mach-O or ELF, per the backend's triple).
+    /// Writes a module lowered by the machine pipeline into
+    /// object-container bytes (Mach-O or ELF, per the backend's triple).
     pub fn write_object(
         &self,
         ctx: &mut Context,
@@ -57,10 +48,8 @@ static BACKENDS: &[TargetBackend] = &[
     TargetBackend {
         name: "aarch64-darwin",
         matches: |triple| triple.arch == Arch::Aarch64 && triple.is_os_darwin(),
-        pipeline: || aarch64::pipeline(aarch64::TargetOs::Darwin),
-        pipeline_with_allocator: Some(|allocator| {
-            aarch64::pipeline_with_allocator(aarch64::TargetOs::Darwin, allocator)
-        }),
+        default_order: aarch64::default_order(aarch64::TargetOs::Darwin),
+        construct: |name| aarch64::construct(name, aarch64::TargetOs::Darwin),
         write_object: aarch64::write_macho_object_from_ir,
     },
     TargetBackend {
@@ -68,17 +57,15 @@ static BACKENDS: &[TargetBackend] = &[
         matches: |triple| {
             triple.arch == Arch::Aarch64 && triple.os == crate::triple::Os::Linux
         },
-        pipeline: || aarch64::pipeline(aarch64::TargetOs::Linux),
-        pipeline_with_allocator: Some(|allocator| {
-            aarch64::pipeline_with_allocator(aarch64::TargetOs::Linux, allocator)
-        }),
+        default_order: aarch64::default_order(aarch64::TargetOs::Linux),
+        construct: |name| aarch64::construct(name, aarch64::TargetOs::Linux),
         write_object: aarch64::write_elf_object_from_ir,
     },
     TargetBackend {
         name: "x86_64-darwin",
         matches: |triple| triple.arch == Arch::X86_64 && triple.is_os_darwin(),
-        pipeline: x86_64_darwin::pipeline,
-        pipeline_with_allocator: None,
+        default_order: x86_64_darwin::DEFAULT_ORDER,
+        construct: x86_64_darwin::construct,
         write_object: x86_64_darwin::write_macho_object_from_ir,
     },
 ];

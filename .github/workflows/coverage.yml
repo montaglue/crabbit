@@ -32,7 +32,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Coverage (library crates)
-        run: cargo llvm-cov -p pliron-ll -p research-config -p crabbit-mir --lcov --output-path lcov.info --locked
+        run: cargo llvm-cov -p pliron-ll -p crabbit-config -p crabbit-mir --lcov --output-path lcov.info --locked
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
         with:

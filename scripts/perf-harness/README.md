@@ -4,7 +4,7 @@
 compiles a corpus under each entry of a config matrix (`configs.json`: a list
 of `{name, env}` objects — the env vars, e.g. `CRABBIT_SPILL_POLICY`,
 `CRABBIT_RESTORE_ESTIMATE`, `CRABBIT_BLOCK_FREQ`, are read at *target-crate*
-compile time, so new research knobs are just more keys). Corpus A is the
+compile time, so new options are just more keys). Corpus A is the
 runnable fixtures under `crates/backend-tests/fixtures/` (compiled `--release`
 with the smoke-test recipe, run N times, median+min wall time; stdout is
 checked against the expectations lifted from `backend_smoke.rs` — or against
@@ -23,15 +23,12 @@ timer. Typical use: `python3 scripts/perf-harness/harness.py` (add
 `--skip-backend-build`, `--runs 20`, `--fixtures sudoku-solver`,
 `--arrow-crates arrow-schema`, `--skip-arrow` etc. as needed; build scratch
 lives outside the repo in `--workdir`, default `~/.cache/crabbit-perf-harness`).
+A backend built with extensions (docs/EXTENDING.md) is measured with
+`--backend <its dylib>`; its own options are more keys in the config matrix.
 
 
-## Engine axis, corpus targets, pinning (2026-08-28)
+## Corpus targets, pinning (2026-08-28)
 
-- `configs.json` now spans the register-allocation *engine* too:
-  `CRABBIT_REGALLOC=linear|eregalloc`, `CRABBIT_REGALLOC_ORACLE=c0|c2`, with
-  `CRABBIT_BLOCK_FREQ` meaningful under both (see
-  `crates/crabbit/src/regalloc_engine.rs`). `configs-engines.json` is the
-  three-config engine-only matrix used for compile-time measurements.
 - Corpus C: the kernel-corpus CPU variants (`--corpus <path>`, default
   `~/projects/montaglue/kernel-corpus`; `--kernels a,b`; `--skip-corpus`).
   Each `kernels/<k>/cpu` bin runs `--size large` (timed, exact `checksum …`
@@ -50,7 +47,7 @@ lives outside the repo in `--workdir`, default `~/.cache/crabbit-perf-harness`).
 `profile_ingest.py` closes the perf → codegen loop of
 `docs/PROFILE-FEEDBACK-PLAN.md`: measured per-block execution frequencies
 become a third `CRABBIT_BLOCK_FREQ` source next to `uniform` and
-`spectral`, under both allocator engines.
+`spectral`.
 
 Workflow (all offsets/ids are RA-time region order, stable across builds
 with identical compiler/flags/sources — the profile build must use the
@@ -75,11 +72,9 @@ python3 scripts/perf-harness/profile_ingest.py \
   --blockmap path/to/foo.blockmap.json \
   --perf-script samples.txt -o profile.json
 
-# 4. rebuild with measured frequencies (either engine)
+# 4. rebuild with measured frequencies
 CRABBIT_BLOCK_FREQ=profile CRABBIT_PROFILE=$PWD/profile.json \
-  CRABBIT_SPILL_POLICY=weighted cargo rustc ...              # linear
-CRABBIT_REGALLOC=eregalloc CRABBIT_BLOCK_FREQ=profile \
-  CRABBIT_PROFILE=$PWD/profile.json cargo rustc ...          # eregalloc
+  CRABBIT_SPILL_POLICY=weighted cargo rustc ...
 ```
 
 - `profile.json` is `{symbol: [freq per RA-order block]}`, normalized like
@@ -87,7 +82,7 @@ CRABBIT_REGALLOC=eregalloc CRABBIT_BLOCK_FREQ=profile \
   ≥ 1 sample, unsampled blocks 0.0 (entry is always 1.0).
 - Robustness contract: a stale/missing profile, an absent symbol, or a
   wrong-length vector silently falls back to uniform for that function —
-  never an error. The linear engine consumes frequencies only through
+  never an error. The linear allocator consumes frequencies only through
   `CRABBIT_SPILL_POLICY=weighted` (a one-time note is printed otherwise).
 - Fallback for perf builds without sym/symoff formatting:
   `--nm-binary <bin>` (+ `--load-bias`) resolves bare-ip lines via `nm`;
@@ -99,18 +94,6 @@ CRABBIT_REGALLOC=eregalloc CRABBIT_BLOCK_FREQ=profile \
 - Unit tests: `python3 scripts/perf-harness/test_profile_ingest.py`
   (fixtures in `fixtures/`), also run by `cargo test -p backend-tests`
   (`tests/profile_ingest.rs`).
-
-- Cargo features (2026-08-31): the research engines are feature-gated —
-  `eregalloc` and `cmt`, both ON by default in `research-config`, `crabbit`
-  and `crabbit-inspect-driver`, so the harness needs nothing. A backend
-  built `--no-default-features` answers `CRABBIT_REGALLOC=eregalloc` /
-  `CRABBIT_BLOCK_FREQ=cmt-provider` with "crabbit was built without the
-  `<feature>` feature".
-  Update (2026-10-26): those features are now declared no-ops; the engines
-  are link-time only. The harness builds `crates/crabbit-research`, whose
-  path deps point at the private sibling checkout `../crabbit-engines`
-  (eregalloc + CMT crates), and falls back to the engine-less
-  `libcrabbit.so` when that checkout is missing.
 
 ## Mid-end backward-dataflow round (2026-08-31)
 
@@ -130,10 +113,9 @@ ranking with vs without sinking" is itself an experiment worth running.
   top-level `__midend__` table (fresh RA-boundary id → source parents);
   `profile_ingest.py` emits a third `source` level in `op_costs.json`
   (equal-weight splits for merges).
-- `CRABBIT_MEASURED_COSTS=<op_costs.json>` (under
-  `CRABBIT_REGALLOC=eregalloc`): per-function measured restore costs from
-  the `lifted` level replace the oracle's estimates (experiment E1's
-  knob). Missing files/symbols fall back to estimates, never error.
+- The `lifted` level of `op_costs.json` is keyed by RA-boundary ids, so an
+  allocator registered as an extension can consume measured per-decision
+  costs in place of its estimates.
 - The analysis server answers `run_costs` (heat-map join of an op_costs
   payload with the ops at the `source`/`ra` boundary, plus per-root
   semantic accounting).

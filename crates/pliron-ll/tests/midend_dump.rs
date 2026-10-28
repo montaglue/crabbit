@@ -14,6 +14,7 @@ use pliron::location::Source;
 use pliron::operation::{Operation, OperationParserConfig};
 use pliron::parsable::{Parsable, State, state_stream_from_iterator};
 use pliron::printable::Printable;
+use pliron_ll::conversion::pass::Pass as _;
 
 #[test]
 fn dump_post_midend_ir() {
@@ -34,12 +35,14 @@ fn dump_post_midend_ir() {
 
     // `CRABBIT_MIDEND_DUMP_PROFILE=gpu` dumps under the kernel pipeline's
     // profile (divergent target, no SIMD) instead of the host CPU's.
-    let profile = match std::env::var("CRABBIT_MIDEND_DUMP_PROFILE").as_deref() {
-        Ok("gpu") => pliron_ll::target_profile::TargetProfile::gpu_kernel(),
-        _ => pliron_ll::target_profile::TargetProfile::host_cpu().with_simd128(true),
+    let target = match std::env::var("CRABBIT_MIDEND_DUMP_PROFILE").as_deref() {
+        Ok("gpu") => pliron_ll::target_profile::PipelineTarget::nvptx_kernel(),
+        _ => pliron_ll::target_profile::PipelineTarget::host(pliron_ll::triple::Triple::parse(
+            "aarch64-unknown-linux-gnu",
+        )),
     };
-    let mut passes = pliron_ll::conversion::pass::Passes::default();
-    pliron_ll::passes::llvm::add_llvm_midend_passes(&mut passes, &profile);
+    let profile = target.profile;
+    let mut passes = pliron_ll::passes::llvm::default_midend(&target);
     // Run the vectorizer AFTER the shared mid-end, at its intended pipeline
     // position, so its bail/transform decisions are visible here too.
     passes.add_pass(pliron_ll::passes::llvm::vectorize::LLVMVectorizePass::new(

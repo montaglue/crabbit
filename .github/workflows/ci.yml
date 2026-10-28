@@ -90,4 +90,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check
-        run: cargo check -p pliron-ll -p research-config -p crabbit-mir --locked
+        run: cargo check -p pliron-ll -p crabbit-config -p crabbit-mir --locked

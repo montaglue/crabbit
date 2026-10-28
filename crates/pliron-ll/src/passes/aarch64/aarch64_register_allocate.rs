@@ -273,7 +273,7 @@ fn dump_spectral_freqs(live: &FunctionLiveness, symbol: &str) {
 }
 
 /// Restore-cost units: a reload is priced like a memory access, a trivial
-/// rematerialization like a single ALU op (the eregalloc cost shape).
+/// rematerialization like a single ALU op.
 const RELOAD_COST: f64 = 4.0;
 const REMAT_COST: f64 = 1.0;
 
@@ -796,7 +796,7 @@ fn rewrite_allocated_registers(
                 }
                 Some(Allocation::Spill(slot)) => {
                     let scratch = next_spill_scratch(&mut scratch_index, class)?;
-                    // The eregalloc "safe form": the slot store stays (see
+                    // The "safe form": the slot store stays (see
                     // the def rewrite below), but a use of a trivially
                     // rematerializable value re-executes its constant def
                     // instead of reloading.

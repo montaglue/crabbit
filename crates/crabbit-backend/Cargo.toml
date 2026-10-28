@@ -28,7 +28,3 @@ targets = []
 [dependencies]
 crabbit-core.workspace = true
 
-[features]
-# Compat forwards; no-ops (engines are linked, not feature-gated).
-eregalloc = ["crabbit-core/eregalloc"]
-cmt = ["crabbit-core/cmt"]

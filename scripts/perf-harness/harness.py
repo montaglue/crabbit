@@ -8,7 +8,8 @@ instruction counts, and spill-traffic proxies (sp-relative loads/stores,
 mov-immediate counts) from objdump disassembly.
 
 Config matrix is generic: a config is just {"name": ..., "env": {...}}, so new
-research env vars (e.g. CRABBIT_REGALLOC) are simply more keys in configs.json.
+CRABBIT_* options are simply more keys in configs.json. A backend built with
+extensions (docs/EXTENDING.md) is measured with --backend <its dylib>.
 
 Fixture output mismatches vs the known-good expectations (lifted from
 crates/backend-tests/tests/backend_smoke.rs) or vs the baseline config's output
@@ -418,20 +419,6 @@ def check_run(proc_out, case, baseline_stdout):
 
 
 def build_backend():
-    # Research dylib first: the engine axes (CRABBIT_REGALLOC=eregalloc,
-    # cmt-provider frequencies) only exist in the composition build, which
-    # needs the private sibling checkout ../crabbit-engines (crates/crabbit-research).
-    research = REPO / "crates" / "crabbit-research"
-    if (research / "Cargo.toml").exists():
-        log("building research backend (crates/crabbit-research)...")
-        proc = run_cmd(["cargo", "build"], env=base_env(), cwd=str(research),
-                       timeout=3600)
-        backend = research / "target" / "debug" / "libcrabbit_research.so"
-        if proc.returncode == 0 and backend.exists():
-            return backend
-        log("WARNING: crabbit-research build failed (missing the private "
-            "sibling checkout ../crabbit-engines?); falling back to the engine-less "
-            "libcrabbit.so -- eregalloc/cmt configs will error")
     log("building crabbit backend (cargo build -p crabbit)...")
     proc = run_cmd(["cargo", "build", "-p", "crabbit"], env=base_env(),
                    cwd=str(REPO), timeout=3600)
@@ -745,8 +732,8 @@ def main():
     ap.add_argument("--skip-arrow", action="store_true")
     ap.add_argument("--skip-backend-build", action="store_true")
     ap.add_argument("--backend", default="",
-                    help="use this libcrabbit.so instead of building/locating "
-                         "target/debug/libcrabbit.so")
+                    help="use this backend dylib (e.g. one built with "
+                         "extensions) instead of building target/debug/libcrabbit.so")
     ap.add_argument("--no-hyperfine", action="store_true")
     ap.add_argument("--no-probe", action="store_true",
                     help="trust --arrow-crates without a warmup probe compile")

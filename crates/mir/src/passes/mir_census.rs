@@ -741,10 +741,8 @@ mod tests {
             op_interfaces::{OneRegionInterface as _, OperandSegmentInterface as _},
             types::{FunctionType, IntegerType, Signedness},
         },
-        op::Op as _,
         r#type::TypeHandle,
     };
-    use pliron_ll::conversion::pass::Passes;
 
     // A legacy-mangled std symbol and a v0 one copied from a real crabbit
     // module (`<*mut i32>::add`, an inherent method on a primitive).
@@ -1057,11 +1055,10 @@ mod tests {
     fn pass_reports_unchanged_and_leaves_ir_alone() {
         let mut b = build();
         let before = census(&b.ctx, b.module);
-        let mut passes = Passes::default();
-        super::super::add_mir_passes(&mut passes);
-        assert_eq!(passes.names(), vec![PASS_NAME.to_string()]);
+        let mut pass = super::super::construct(PASS_NAME, None).expect("census constructs by name");
+        assert_eq!(pass.name(), PASS_NAME);
         let mut analyses = AnalysisManager::default();
-        let result = passes
+        let result = pass
             .run(b.module, &mut b.ctx, &mut analyses)
             .expect("census never fails");
         let _ = result;
