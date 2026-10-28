@@ -317,3 +317,68 @@ fn kernel_coverage_structs_allocas_device_calls() {
         "{stdout}"
     );
 }
+
+/// A host program that launches its own kernels through cuda-oxide's host
+/// API (`#[cuda_module]`, `kernels::load`, the typed launch methods on
+/// cuda-core buffers), compiled entirely by crabbit: `main` and cuda-core's
+/// generic launch code to the host object, the kernels to PTX embedded in
+/// the executable as a cuda-oxide artifact bundle (docs/KERNEL-ABI.md).
+/// Building needs a CUDA 13 toolkit (cuda-core's bindings are generated
+/// from `cuda.h` by bindgen, which needs libclang with its resource
+/// headers); running needs a GPU.
+#[test]
+fn host_program_launches_its_kernels_through_cuda_oxide_api() {
+    let cuda_include = Path::new("/usr/local/cuda/include");
+    if !cuda_include.join("cuda.h").exists() {
+        eprintln!("no CUDA toolkit headers; skipping the cuda-oxide host API fixture");
+        return;
+    }
+    let root = repo_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let backend = build_backend(&root, &cargo);
+    let fixture_dir = root.join("crates/backend-tests/fixtures/kernel-launch");
+    let target_dir = root.join("target/crabbit-backend-tests-kernel-launch");
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir).expect("clear kernel-launch fixture target dir");
+    }
+    fs::create_dir_all(&target_dir).expect("create kernel-launch fixture target dir");
+    let ptx_out = target_dir.join("kernels.ptx");
+    let status = Command::new(&cargo)
+        .arg("rustc")
+        .arg("--manifest-path")
+        .arg(fixture_dir.join("Cargo.toml"))
+        .args(["--bin", "crabbit-kernel-launch", "--release", "--"])
+        .arg(format!("-Zcodegen-backend={}", backend.display()))
+        .arg("-Coverflow-checks=off")
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("CRABBIT_PTX_OUT", &ptx_out)
+        .status()
+        .expect("failed to run cargo for the kernel-launch fixture");
+    assert!(status.success(), "kernel-launch fixture did not compile with the crabbit dylib");
+
+    // Slices cross the launch boundary as (ptr, len), the way cuda-oxide's
+    // launchers push them: `add(a: &[f32], b: &[f32], sum: DisjointSlice<f32>)`
+    // has six parameters.
+    let ptx = fs::read_to_string(&ptx_out).expect("CRABBIT_PTX_OUT was not written");
+    assert!(ptx.contains(".visible .entry add("), "{ptx}");
+    assert!(ptx.contains(".param .u64 add_param_5"), "{ptx}");
+    assert!(ptx.contains(".param .f32 scale_param_2"), "{ptx}");
+
+    let executable = target_dir.join("release/crabbit-kernel-launch");
+    if let Ok(output) = Command::new("readelf").arg("-S").arg(&executable).output()
+        && output.status.success()
+    {
+        let sections = String::from_utf8_lossy(&output.stdout);
+        assert!(sections.contains(".oxart"), "no embedded device artifact:\n{sections}");
+    }
+
+    let run = Command::new(&executable).output().expect("run the kernel-launch fixture");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    if stderr.contains("create a CUDA context") {
+        eprintln!("no usable GPU: {stderr}; skipping GPU execution");
+        return;
+    }
+    assert!(run.status.success(), "kernel-launch fixture failed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("add then scale correct"), "{stdout}");
+}

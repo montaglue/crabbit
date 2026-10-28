@@ -35,6 +35,7 @@ crabbit-config.workspace = true
 llvm-export.workspace = true
 dialect-nvvm.workspace = true
 reserved-oxide-symbols.workspace = true
+oxide-artifacts.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -9,6 +9,7 @@ extern crate rustc_public;
 extern crate rustc_session;
 extern crate rustc_span;
 extern crate rustc_symbol_mangling;
+extern crate rustc_target;
 
 #[allow(unused_extern_crates)]
 extern crate rustc_driver;
@@ -17,6 +18,7 @@ extern crate rustc_driver;
 /// a module of cuda-oxide's `mir` dialect (dialect-mir).
 pub mod importer;
 pub mod kernel_llvm_export;
+mod device_artifact;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, TargetConfig};
@@ -112,13 +114,13 @@ impl CodegenBackend for CrabbitBackend {
             ));
         }
 
-        let object = emit_object(sess, outputs, &mut imported).unwrap_or_else(|error| {
+        let objects = emit_object(sess, outputs, &mut imported).unwrap_or_else(|error| {
             sess.dcx()
                 .fatal(format!("crabbit codegen failed: {error}"))
         });
 
-        let module = CompiledModule {
-            name: "crabbit_rust".to_string(),
+        let compiled = |name: &str, object| CompiledModule {
+            name: name.to_string(),
             kind: rustc_codegen_ssa::ModuleKind::Regular,
             object: Some(object),
             global_asm_object: None,
@@ -128,10 +130,14 @@ impl CodegenBackend for CrabbitBackend {
             llvm_ir: None,
             links_from_incr_cache: Vec::new(),
         };
+        let mut modules = vec![compiled("crabbit_rust", objects.host)];
+        if let Some(device) = objects.device_artifact {
+            modules.push(compiled("crabbit_device_artifact", device));
+        }
 
         (
             CompiledModules {
-                modules: vec![module],
+                modules,
                 allocator_module: None,
             },
             WorkProductMap::default(),
@@ -170,7 +176,7 @@ pub enum EmitError {
     InvalidPtxSm { got: String },
 }
 
-fn io_err(action: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> EmitError {
+pub(crate) fn io_err(action: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> EmitError {
     let path = path.to_path_buf();
     move |source| EmitError::Io { action, path, source }
 }
@@ -246,29 +252,24 @@ fn emit_ir_dir() -> Option<std::path::PathBuf> {
     })
 }
 
-/// Lower the imported `rust_kernels` module and write its PTX next to
-/// `object` (`<stem>.ptx`) and to `CRABBIT_PTX_OUT` when set. See
-/// docs/KERNEL-ABI.md.
-fn emit_kernels(
+/// The kernel module's pass state between its two runs: lowered to the
+/// LLVM dialect before the program stage ([lower_kernels]), through the
+/// mid-end after it ([emit_kernels]). One analysis manager, so traced pass
+/// dumps keep one numbering.
+struct KernelPipeline {
+    analyses: AnalysisManager,
+    dump_dir: Option<std::path::PathBuf>,
+}
+
+/// The `mir` → LLVM stage of the imported `rust_kernels` module (written
+/// to `CRABBIT_EMIT_IR` when set, like the host module).
+fn lower_kernels(
     imported: &mut importer::ImportedCrate,
-    object: &std::path::Path,
     tracing: bool,
     ir_stem: &str,
     cfg: &CrabbitConfig,
-) -> Result<std::path::PathBuf, EmitError> {
+) -> Result<KernelPipeline, EmitError> {
     let mut analyses = AnalysisManager::default();
-    let emit_dir = emit_ir_dir();
-    if let Some(dir) = &emit_dir {
-        emit_lowered_ir(
-            &mut imported.ctx,
-            imported.kernel_module,
-            dir,
-            &format!("{ir_stem}-kernels"),
-            cfg,
-            Side::Device,
-        )?;
-    }
-    let mut pipeline = pipeline(cfg, Side::Device, emit_dir.is_some())?;
     let mut dump_dir = None;
     if tracing {
         let dir = std::env::temp_dir().join(format!("crabbit-kernel-pass-dumps-{}", trace_version()));
@@ -280,6 +281,64 @@ fn emit_kernels(
         });
         dump_dir = Some(dir);
     }
+    if let Some(dir) = emit_ir_dir() {
+        emit_lowered_ir(
+            &mut imported.ctx,
+            imported.kernel_module,
+            &dir,
+            &format!("{ir_stem}-kernels"),
+            cfg,
+            Side::Device,
+        )?;
+    } else {
+        into_passes(crabbit_config::build(Stage::MirToLlvm, Side::Device, cfg)?)
+            .run(imported.kernel_module, &mut imported.ctx, &mut analyses)
+            .map_err(|error| EmitError::Pipeline {
+                stage: "kernel pipeline",
+                reason: error.disp(&imported.ctx).to_string(),
+            })?;
+    }
+    Ok(KernelPipeline { analyses, dump_dir })
+}
+
+/// Run the program stage ([Stage::Program]) over the host module and the
+/// kernel module together, both in the LLVM dialect. Nothing runs when its
+/// order is empty (crabbit's default).
+fn run_program_stage(imported: &mut importer::ImportedCrate, cfg: &CrabbitConfig) -> Result<(), EmitError> {
+    if crabbit_config::order(Stage::Program, Side::Program, cfg)?.is_empty() {
+        return Ok(());
+    }
+    let mut passes = into_passes(crabbit_config::build(Stage::Program, Side::Program, cfg)?);
+    crabbit_config::run_program_stage(
+        &mut passes,
+        &mut imported.ctx,
+        imported.module,
+        imported.kernel_module,
+        &mut AnalysisManager::default(),
+    )
+    .map_err(|error| EmitError::Pipeline {
+        stage: "program pipeline",
+        reason: error.disp(&imported.ctx).to_string(),
+    })
+}
+
+/// Run the lowered `rust_kernels` module through the device mid-end, write
+/// its PTX next to `object` (`<stem>.ptx`) and to `CRABBIT_PTX_OUT` when
+/// set, and embed it for the host: the returned path is the device
+/// artifact object (device_artifact.rs) the host program links. See
+/// docs/KERNEL-ABI.md.
+fn emit_kernels(
+    imported: &mut importer::ImportedCrate,
+    object: &std::path::Path,
+    kernels: KernelPipeline,
+    cfg: &CrabbitConfig,
+    host_target: &str,
+) -> Result<std::path::PathBuf, EmitError> {
+    let KernelPipeline {
+        mut analyses,
+        dump_dir,
+    } = kernels;
+    let mut pipeline = pipeline(cfg, Side::Device, true)?;
     let run_result = pipeline.run(imported.kernel_module, &mut imported.ctx, &mut analyses);
     if let Some(dir) = dump_dir {
         // Keep the kernel dumps where CRABBIT_TRACE users can find them;
@@ -345,7 +404,14 @@ fn emit_kernels(
         std::fs::write(&out, ll)
             .map_err(io_err("write CRABBIT_LL_OUT", std::path::Path::new(&out)))?;
     }
-    Ok(sidecar)
+    device_artifact::write_artifact_object(
+        object,
+        cfg.crate_name.as_deref().unwrap_or("crate"),
+        host_target,
+        target.sm,
+        &ptx,
+        &pliron_ll::nvptx::entry_names(&imported.ctx, imported.kernel_module),
+    )
 }
 
 /// The `(pass name, IR dump)` pairs pliron's `print_after_all` hook wrote
@@ -371,11 +437,18 @@ fn collect_pass_dumps(dir: &std::path::Path) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The objects one crate compiles to: the host object and, when the crate
+/// has kernels, the device artifact object embedding them.
+struct EmittedObjects {
+    host: std::path::PathBuf,
+    device_artifact: Option<std::path::PathBuf>,
+}
+
 fn emit_object(
     sess: &Session,
     outputs: &OutputFilenames,
     imported: &mut importer::ImportedCrate,
-) -> Result<std::path::PathBuf, EmitError> {
+) -> Result<EmittedObjects, EmitError> {
     let backend = backend_for_session(sess)?;
     let crate_name = trace_project(sess);
     let cfg = CrabbitConfig::new(Triple::parse(&sess.target.llvm_target)).with_crate_name(&crate_name);
@@ -413,7 +486,6 @@ fn emit_object(
                 Some(imported.module.disp(&imported.ctx).to_string());
         }
     }
-    let mut pipeline = pipeline(&cfg, Side::Host, emit_dir.is_some())?;
     let mut dump_dir = None;
     let version = trace_version();
     if tracing {
@@ -432,7 +504,28 @@ fn emit_object(
         initial_dump = None;
     }
 
-    let run_result = pipeline.run(imported.module, &mut imported.ctx, &mut analyses);
+    // A crate with kernels lowers both modules to the LLVM dialect first and
+    // runs the program stage over them together, before either mid-end;
+    // the host run below then continues from the lowered module.
+    let mut host_lowered = emit_dir.is_some();
+    let mut kernels = None;
+    let mut run_result = Ok(());
+    if imported.kernel_count > 0 {
+        if !host_lowered {
+            run_result = into_passes(crabbit_config::build(Stage::MirToLlvm, Side::Host, &cfg)?)
+                .run(imported.module, &mut imported.ctx, &mut analyses)
+                .map(|_| ());
+            host_lowered = true;
+        }
+        if run_result.is_ok() {
+            kernels = Some(lower_kernels(imported, tracing, &format!("{crate_name}-crabbit_rust"), &cfg)?);
+            run_program_stage(imported, &cfg)?;
+        }
+    }
+    if run_result.is_ok() {
+        let mut pipeline = pipeline(&cfg, Side::Host, host_lowered)?;
+        run_result = pipeline.run(imported.module, &mut imported.ctx, &mut analyses).map(|_| ());
+    }
 
     if let Some(dump_dir) = dump_dir {
         let project = trace_project(sess);
@@ -504,10 +597,14 @@ fn emit_object(
         let sidecar = object.with_extension("blockmap.json");
         std::fs::write(&sidecar, json).map_err(io_err("write blockmap sidecar", &sidecar))?;
     }
-    if imported.kernel_count > 0 {
-        emit_kernels(imported, &object, tracing, &format!("{crate_name}-crabbit_rust"), &cfg)?;
-    }
-    Ok(object)
+    let device_artifact = match kernels {
+        Some(kernels) => Some(emit_kernels(imported, &object, kernels, &cfg, &sess.target.llvm_target)?),
+        None => None,
+    };
+    Ok(EmittedObjects {
+        host: object,
+        device_artifact,
+    })
 }
 
 fn trace_project(sess: &Session) -> String {

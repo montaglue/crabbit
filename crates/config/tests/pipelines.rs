@@ -6,8 +6,8 @@
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crabbit_config::{
-    ConfigError, CrabbitConfig, Side, Stage, Triple, build, default_order, order, register_order,
-    register_pass, registered_passes,
+    ConfigError, CrabbitConfig, Side, Stage, Triple, build, default_order, order, program_modules,
+    register_order, register_pass, registered_passes, run_program_stage,
 };
 use pliron_ll::{
     context::{Context, Ptr},
@@ -17,6 +17,8 @@ use pliron_ll::{
 };
 
 static MARKER_RUNS: AtomicUsize = AtomicUsize::new(0);
+/// What the program pass saw: 1 = the (host, kernels) modules, by name.
+static PROGRAM_SEEN: AtomicUsize = AtomicUsize::new(0);
 /// What the registered order function does (0 = edits, 1 = unknown name,
 /// 2 = error, 3 = failing pass).
 static ORDER_MODE: AtomicU8 = AtomicU8::new(0);
@@ -40,6 +42,40 @@ impl Pass for Named {
         }
         Ok(unchanged())
     }
+}
+
+/// A program pass: checks it is handed both modules, host first.
+struct ProgramProbe;
+
+impl Pass for ProgramProbe {
+    fn name(&self) -> &str {
+        "test-program"
+    }
+
+    fn run(
+        &mut self,
+        op: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
+        use pliron::builtin::op_interfaces::SymbolOpInterface;
+        let (host, kernels) = program_modules(ctx, op).expect("a program root");
+        let name = |module: Ptr<Operation>| {
+            Operation::get_op::<builtin::ops::ModuleOp>(module, ctx)
+                .unwrap()
+                .get_symbol_name(ctx)
+                .to_string()
+        };
+        if (name(host).as_str(), name(kernels).as_str()) == ("host", "rust_kernels") {
+            PROGRAM_SEEN.store(1, Ordering::SeqCst);
+        }
+        Ok(unchanged())
+    }
+}
+
+fn program_probe(_: &CrabbitConfig, side: Side) -> Result<Box<dyn Pass>, String> {
+    assert_eq!(side, Side::Program);
+    Ok(Box::new(ProgramProbe))
 }
 
 fn marker(_: &CrabbitConfig, side: Side) -> Result<Box<dyn Pass>, String> {
@@ -88,6 +124,8 @@ fn edits(
             order.insert(unroll, "test-marker");
             Some(order)
         }
+        // A pass over both modules.
+        (Stage::Program, Side::Program) => Some(vec!["test-program"]),
         // Replace the register allocator.
         (Stage::Machine, Side::Host) => Some(
             default
@@ -134,6 +172,20 @@ fn orders_insert_remove_and_replace_passes() {
         default_order(Stage::Machine, Side::Device, &cfg),
         Err(ConfigError::NoDeviceMachineStage)
     ));
+    // The program stage: empty by default, and only for Side::Program.
+    assert!(
+        default_order(Stage::Program, Side::Program, &cfg)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        default_order(Stage::Program, Side::Host, &cfg),
+        Err(ConfigError::ProgramStage { .. })
+    ));
+    assert!(matches!(
+        default_order(Stage::Midend, Side::Program, &cfg),
+        Err(ConfigError::ProgramStage { .. })
+    ));
     let riscv = CrabbitConfig::new(Triple::parse("riscv64-unknown-linux-gnu"));
     assert!(matches!(
         default_order(Stage::Machine, Side::Host, &riscv),
@@ -159,7 +211,30 @@ fn orders_insert_remove_and_replace_passes() {
     register_pass("test-marker", marker);
     register_pass("test-allocator", allocator);
     register_pass("test-failing", failing);
+    register_pass("test-program", program_probe);
     register_order(edits);
+
+    // A program pass sees both modules under one root; afterwards they are
+    // separate top-level modules again.
+    {
+        let mut ctx = Context::new();
+        let host =
+            builtin::ops::ModuleOp::new(&mut ctx, "host".try_into().unwrap()).get_operation();
+        let kernels = builtin::ops::ModuleOp::new(&mut ctx, "rust_kernels".try_into().unwrap())
+            .get_operation();
+        let mut passes = into_passes(build(Stage::Program, Side::Program, &cfg).unwrap());
+        run_program_stage(
+            &mut passes,
+            &mut ctx,
+            host,
+            kernels,
+            &mut AnalysisManager::default(),
+        )
+        .unwrap();
+        assert_eq!(PROGRAM_SEEN.load(Ordering::SeqCst), 1);
+        assert!(host.deref(&ctx).get_parent_block().is_none());
+        assert!(kernels.deref(&ctx).get_parent_block().is_none());
+    }
 
     let device = names(Stage::Midend, Side::Device, &cfg);
     let at = device
@@ -243,6 +318,11 @@ fn orders_insert_remove_and_replace_passes() {
     register_pass("test-marker", marker);
     assert_eq!(
         registered_passes(),
-        ["test-marker", "test-allocator", "test-failing"]
+        [
+            "test-marker",
+            "test-allocator",
+            "test-failing",
+            "test-program"
+        ]
     );
 }

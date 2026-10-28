@@ -8,9 +8,23 @@ stage is an order of names:
 | `MirToLlvm` | host, device | `crabbit_mir::passes::DEFAULT_ORDER` — `mir-census`, `lower-dialect-mir`, and the passes completing the lowering |
 | `Midend` | host, device | `pliron_ll::passes::llvm::DEFAULT_ORDER` — inline … gvn, licm, unroll, dse, adce, sink, vectorize |
 | `Machine` | host | the host backend's order, e.g. `pliron_ll::passes::aarch64::default_order(os)` — isel … `aarch64-register-allocate` … encode |
+| `Program` | program | empty — passes over the host module and the kernel module together (below) |
 
 (The device side stops after the mid-end: PTX is written from its output
 and ptxas does the machine work.)
+
+**The program stage.** A crate with kernels compiles to two modules, the
+host module and the kernel module. `Stage::Program` runs passes over both
+at once: after both modules' `MirToLlvm` and before either `Midend`, so
+both mid-ends optimize whatever a program pass changed on either side. Its
+passes are built for `Side::Program` (the only stage that side builds; a
+factory reading `cfg.target(Side::Program)` gets the host target) and are
+handed one root, a `builtin.module` holding the host module first and the
+kernel module second — `crabbit_config::program_modules(ctx, root)` returns
+the two. crabbit's own passes each compile one module, so none can be
+placed there; the stage runs only when its order is non-empty and only for
+crates with kernels. Typical use: a pass that rewrites host launch sites
+together with the kernels they launch.
 
 An extension adds passes and decides orders through crabbit-config
 (`crates/config`):

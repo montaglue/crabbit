@@ -1,0 +1,21 @@
+[package]
+name = "crabbit-kernel-launch"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Kernels and the host program that launches them, in one crate, through
+# cuda-oxide's API: `#[kernel]` items inside a `#[cuda_module]`, launched
+# with the module's typed methods on cuda-core buffers.
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+
+[[bin]]
+name = "crabbit-kernel-launch"
+path = "src/main.rs"
+
+# Keep this fixture out of the parent workspace; the backend tests compile
+# it explicitly with the crabbit dylib.
+[workspace]

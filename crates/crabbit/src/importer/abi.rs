@@ -55,17 +55,53 @@ pub(super) enum ArgAbi {
     Indirect,
 }
 
-/// Kernel (`.entry`) parameters are never flattened or passed indirectly:
-/// the CUDA launch ABI hands each parameter — scalar or aggregate — as ONE
-/// `.param` whose bytes are the host value's C layout, and the NVPTX
-/// emitter loads an aggregate's leaves with `ld.param` at their field
-/// offsets (docs/KERNEL-ABI.md). Zero-sized types keep their no-presence
-/// rule so parameter indices stay aligned with the host launch.
-pub(super) fn kernel_param_abi(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
+/// Kernel (`.entry`) parameters are never passed indirectly: the CUDA
+/// launch ABI hands each parameter — scalar or aggregate — as ONE `.param`
+/// whose bytes are the host value's C layout, and the NVPTX emitter loads
+/// an aggregate's leaves with `ld.param` at their field offsets. The
+/// exception is a slice-like parameter (`flattened`, see
+/// `is_flattened_kernel_param`): its scalar fields are separate `.param`s,
+/// because the host launch pushes them as separate arguments
+/// (docs/KERNEL-ABI.md). Zero-sized types keep their no-presence rule so
+/// parameter indices stay aligned with the host launch.
+pub(super) fn kernel_param_abi(ctx: &Context, ty: TypeHandle, flattened: bool) -> Result<ArgAbi, String> {
     if let Ok(0) = crabbit_ty_size(ctx, ty) {
         return Ok(ArgAbi::Leaves(Vec::new()));
     }
+    if flattened {
+        let mut leaves = Vec::new();
+        collect_kernel_param_leaves(ctx, ty, Vec::new(), &mut leaves)?;
+        return Ok(ArgAbi::Leaves(leaves));
+    }
     Ok(ArgAbi::Leaves(vec![(Vec::new(), ty)]))
+}
+
+/// The scalar fields of a flattened kernel parameter, in field order;
+/// zero-sized fields (`PhantomData`, an index space without runtime
+/// layout) contribute no `.param`, as NVPTX has no empty parameter.
+fn collect_kernel_param_leaves(
+    ctx: &Context,
+    ty: TypeHandle,
+    prefix: Vec<u32>,
+    out: &mut Vec<(Vec<u32>, TypeHandle)>,
+) -> Result<(), String> {
+    if let Ok(0) = crabbit_ty_size(ctx, ty) {
+        return Ok(());
+    }
+    if is_simple_abi_scalar_ty(ctx, ty) {
+        out.push((prefix, ty));
+        return Ok(());
+    }
+    let fields = match ty.deref(ctx).downcast_ref::<llvm::types::StructType>() {
+        Some(struct_ty) if !struct_ty.is_opaque() => struct_ty.fields().collect::<Vec<_>>(),
+        _ => return Err(format!("kernel parameter field of type {:?} cannot be flattened", ty.deref(ctx))),
+    };
+    for (index, field_ty) in fields.into_iter().enumerate() {
+        let mut field_prefix = prefix.clone();
+        field_prefix.push(index as u32);
+        collect_kernel_param_leaves(ctx, field_ty, field_prefix, out)?;
+    }
+    Ok(())
 }
 
 pub(super) fn arg_abi_for_ty(ctx: &Context, ty: TypeHandle) -> Result<ArgAbi, String> {
@@ -178,14 +214,7 @@ pub(super) fn lower_abi_call_arg(
 ) -> Result<(), String> {
     let value_ty = value.get_type(ctx);
     match arg_abi_for_ty(ctx, value_ty)? {
-        ArgAbi::Indirect => {
-            let slot = mir_dialect::ops::AllocaOp::new(ctx, value_ty);
-            slot.get_operation().insert_at_back(insert_block, ctx);
-            let store = mir_dialect::ops::StoreOp::new(ctx, value, slot.get_result(ctx));
-            store.get_operation().insert_at_back(insert_block, ctx);
-            out.push(slot.get_result(ctx));
-            Ok(())
-        }
+        ArgAbi::Indirect => lower_abi_call_arg_indirect(ctx, insert_block, value, out),
         ArgAbi::Leaves(leaves) => {
             if leaves.len() == 1 && leaves[0].0.is_empty() {
                 out.push(value);
@@ -199,4 +228,195 @@ pub(super) fn lower_abi_call_arg(
             Ok(())
         }
     }
+}
+
+/// Where rustc's Rust ABI puts the result of a call to code rustc compiled
+/// (std, dependencies), from the callee's `FnAbi`. crabbit's backend
+/// returns an aggregate by its size (in x0/x1 up to 16 bytes, through x8
+/// beyond); rustc returns a memory-layout aggregate wider than a pointer
+/// through x8 and a scalar pair as one scalar per register, so a call into
+/// rustc-compiled code adapts to whichever it is.
+pub(super) enum RustReturn {
+    /// In registers the way crabbit's backend reads them.
+    Registers,
+    /// Through the indirect-result pointer (x8).
+    Indirect,
+    /// A scalar pair whose second scalar sits at `second_offset` (below 8):
+    /// it comes back in x1, not in the upper half of x0.
+    Pair { second_offset: u64, second_size: u64 },
+}
+
+pub(super) fn rust_abi_return<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Option<RustReturn> {
+    use rustc_target::callconv::PassMode;
+    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let fn_abi = tcx
+        .fn_abi_of_instance(typing_env.as_query_input((instance, rustc_middle::ty::List::empty())))
+        .ok()?;
+    Some(match &fn_abi.ret.mode {
+        PassMode::Indirect { .. } => RustReturn::Indirect,
+        PassMode::Pair(..) => match fn_abi.ret.layout.backend_repr {
+            rustc_abi::BackendRepr::ScalarPair { b: second, b_offset, .. } => {
+                let second_offset = b_offset.bytes();
+                if second_offset < 8 {
+                    RustReturn::Pair {
+                        second_offset,
+                        second_size: second.size(&tcx).bytes(),
+                    }
+                } else {
+                    RustReturn::Registers
+                }
+            }
+            _ => RustReturn::Registers,
+        },
+        _ => RustReturn::Registers,
+    })
+}
+
+/// How rustc's Rust ABI passes one argument of a call into code rustc
+/// compiled, from the callee's `FnAbi`. crabbit classifies an argument by
+/// its converted type (scalar leaves of aggregates up to 16 bytes in
+/// registers, larger ones by reference); rustc instead passes a scalar
+/// pair as two scalars, a memory-layout aggregate up to a pointer wide as
+/// one integer, a wider one by reference, and a scalar-layout aggregate
+/// (a newtype, a niche-encoded enum) as its scalar. A call into
+/// rustc-compiled code passes each argument rustc's way.
+pub(super) enum RustArg {
+    /// No presence (a zero-sized argument).
+    Ignore,
+    /// By reference to a copy of the value.
+    Indirect,
+    /// As these scalars, read from the value's bytes at their offsets.
+    Scalars(Vec<(u64, TypeHandle)>),
+    /// As one 64-bit integer register holding the value's bytes.
+    Cast,
+}
+
+/// The [RustArg]s of `instance`'s parameters, or `None` when its `FnAbi`
+/// is unavailable or has a shape crabbit's call lowering does not mirror
+/// (then crabbit's own classification is used, as for its own functions).
+pub(super) fn rust_abi_args<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    instance: Instance<'tcx>,
+) -> Option<Vec<RustArg>> {
+    use rustc_target::callconv::PassMode;
+    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let fn_abi = tcx
+        .fn_abi_of_instance(typing_env.as_query_input((instance, rustc_middle::ty::List::empty())))
+        .ok()?;
+    if fn_abi.c_variadic {
+        return None;
+    }
+    fn_abi
+        .args
+        .iter()
+        .map(|arg| {
+            Some(match &arg.mode {
+                PassMode::Ignore => RustArg::Ignore,
+                PassMode::Indirect { meta_attrs: None, on_stack: false, .. } => RustArg::Indirect,
+                PassMode::Indirect { .. } => return None,
+                PassMode::Cast { .. } if arg.layout.size.bytes() <= 8 => RustArg::Cast,
+                PassMode::Cast { .. } => return None,
+                PassMode::Direct(_) => match arg.layout.backend_repr {
+                    rustc_abi::BackendRepr::Scalar(scalar) => {
+                        RustArg::Scalars(vec![(0, scalar_abi_ty(tcx, ctx, scalar)?)])
+                    }
+                    _ => return None,
+                },
+                PassMode::Pair(..) => match arg.layout.backend_repr {
+                    rustc_abi::BackendRepr::ScalarPair { a, b, b_offset } => RustArg::Scalars(vec![
+                        (0, scalar_abi_ty(tcx, ctx, a)?),
+                        (b_offset.bytes(), scalar_abi_ty(tcx, ctx, b)?),
+                    ]),
+                    _ => return None,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The register type of one ABI scalar.
+fn scalar_abi_ty<'tcx>(tcx: TyCtxt<'tcx>, ctx: &mut Context, scalar: rustc_abi::Scalar) -> Option<TypeHandle> {
+    use rustc_abi::{Float, Primitive};
+    Some(match scalar.primitive() {
+        Primitive::Int(int, _) => {
+            IntegerType::get(ctx, int.size().bits() as u32, Signedness::Signless).into()
+        }
+        Primitive::Float(Float::F32) => FP32Type::get(ctx).into(),
+        Primitive::Float(Float::F64) => FP64Type::get(ctx).into(),
+        Primitive::Float(_) => return None,
+        Primitive::Pointer(_) => {
+            let _ = tcx;
+            ptr_ty(ctx)
+        }
+    })
+}
+
+/// Lower one argument of a call into rustc-compiled code the way rustc
+/// passes it ([RustArg]). The value is crabbit's representation, which
+/// keeps rustc's in-memory layout, so its bytes in a stack slot are the
+/// bytes rustc's caller would have.
+pub(super) fn lower_rust_abi_call_arg(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    value: Value,
+    abi: &RustArg,
+    out: &mut Vec<Value>,
+) -> Result<(), String> {
+    let value_ty = value.get_type(ctx);
+    let is_aggregate = {
+        let ty_ref = value_ty.deref(ctx);
+        ty_ref.is::<llvm::types::StructType>() || ty_ref.is::<llvm::types::ArrayType>()
+    };
+    match abi {
+        RustArg::Ignore => Ok(()),
+        RustArg::Scalars(scalars) if !is_aggregate && scalars.len() == 1 => {
+            // Already the scalar (an integer, float, pointer or bool).
+            out.push(value);
+            Ok(())
+        }
+        RustArg::Indirect => lower_abi_call_arg_indirect(ctx, insert_block, value, out),
+        RustArg::Cast | RustArg::Scalars(_) => {
+            // Through memory: store the value into a slot of at least one
+            // word and read the register values back from its bytes.
+            let word_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+            let words = crabbit_ty_size(ctx, value_ty)?.div_ceil(8).max(1);
+            let slot_ty: TypeHandle = llvm::types::ArrayType::get(ctx, word_ty, words).into();
+            let slot = mir_dialect::ops::AllocaOp::new(ctx, slot_ty);
+            slot.get_operation().insert_at_back(insert_block, ctx);
+            let slot = slot.get_result(ctx);
+            let store = mir_dialect::ops::StoreOp::new(ctx, value, slot);
+            store.get_operation().insert_at_back(insert_block, ctx);
+            let scalars = match abi {
+                RustArg::Scalars(scalars) => scalars.clone(),
+                _ => vec![(0, IntegerType::get(ctx, 64, Signedness::Signless).into())],
+            };
+            for (offset, ty) in scalars {
+                let addr = if offset == 0 {
+                    slot
+                } else {
+                    ptr_offset_const(ctx, insert_block, slot, offset)?
+                };
+                let load = mir_dialect::ops::LoadOp::new(ctx, addr, ty);
+                load.get_operation().insert_at_back(insert_block, ctx);
+                out.push(load.get_result(ctx));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn lower_abi_call_arg_indirect(
+    ctx: &mut Context,
+    insert_block: Ptr<BasicBlock>,
+    value: Value,
+    out: &mut Vec<Value>,
+) -> Result<(), String> {
+    let value_ty = value.get_type(ctx);
+    let slot = mir_dialect::ops::AllocaOp::new(ctx, value_ty);
+    slot.get_operation().insert_at_back(insert_block, ctx);
+    let store = mir_dialect::ops::StoreOp::new(ctx, value, slot.get_result(ctx));
+    store.get_operation().insert_at_back(insert_block, ctx);
+    out.push(slot.get_result(ctx));
+    Ok(())
 }

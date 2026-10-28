@@ -31,22 +31,25 @@ pub fn vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) {
   STRIPPED (`vector_add`), so the three comparison arms (crabbit PTX, LLVM
   PTX, nvcc) share one entry name per kernel. `pub unsafe fn` is accepted
   too.
-- Device crates set `default-features = false` on `cuda-device` and
-  `cuda-macros`: the `host` feature would pull in `cuda-host`, and the host
-  side of a crabbit device crate is never linked.
+- A device-only crate (no host program) sets `default-features = false`
+  on `cuda-device` and `cuda-macros`: the `host` feature would pull in
+  `cuda-host`, which only a crate that launches its kernels needs (see
+  "Host programs" below).
 - Parameters: raw pointers (`*const T` / `*mut T`, T ∈
   {i32,u32,i64,u64,f32,f64,u8}), scalars `u32`/`i32`/`u64`/`i64`/`f32`/`f64`,
-  and by-value `#[repr(C)]` structs of those (nested structs/arrays
-  included). `&[T]` and `DisjointSlice<T>` are accepted and are passed as
-  ONE by-value `{ptr, len}` struct parameter each (16 bytes, align 8).
-  Pointer params are global-memory addresses. A struct param is one launch
-  argument: crabbit emits `.param .align A .b8 name[size]` in the C layout
-  and loads the fields with `ld.param`, so the host passes a pointer to the
-  C struct in `kernelParams[i]` exactly as it would for an nvcc kernel.
-  Kernel parameters are never flattened or passed indirectly. The corpus
-  keeps raw pointers plus scalars so the Rust, CUDA C++ and LLVM arms share
-  one launch signature; cuda-oxide's own host launchers (which flatten
-  slices) are not used.
+  by-value `#[repr(C)]` structs of those (nested structs/arrays included),
+  and slices. Pointer params are global-memory addresses. A struct param
+  is one launch argument: crabbit emits `.param .align A .b8 name[size]`
+  in the C layout and loads the fields with `ld.param`, so the host passes
+  a pointer to the C struct in `kernelParams[i]` exactly as it would for
+  an nvcc kernel. Slices are the exception, as in cuda-oxide: `&[T]`,
+  `&mut [T]`, `*const [T]`, `*mut [T]` and `DisjointSlice<T>` cross the
+  launch boundary as their scalar fields, one `.param` each — `(ptr, len)`,
+  followed for a `DisjointSlice` by its index space's runtime layout (none
+  for the default 1-D space) — because cuda-oxide's host launchers push a
+  slice's pointer and length as two driver arguments. The corpus keeps raw
+  pointers plus scalars so the Rust, CUDA C++ and LLVM arms share one
+  launch signature.
 - Calls: the `cuda_device` functions below always work. Internal Rust
   helpers are inlined by the mid-end; one that survives (e.g. recursion)
   becomes a PTX `.func` with the `.param` ABI (scalar params/result only).
@@ -54,12 +57,60 @@ pub fn vector_add(a: *const i32, b: *const i32, out: *mut i32, n: u32) {
   checked `cuda_device` accessors; build device crates with
   `-Coverflow-checks=off` (`overflow-checks = false` in the profile) and
   `panic = "abort"`.
-- Host code must not call a kernel directly (crabbit errors on that).
+- Host code must not call a kernel directly (crabbit errors on that); it
+  launches it (next section).
 - Build kernels in release. cuda-device's checked accessors
   (`DisjointSlice::get_mut`, `ThreadIndex`) return `Option`s whose
   aggregate values survive in debug code; the NVPTX translator lowers
   scalars, pointers and by-value struct parameters, not aggregate SSA
   values, and the optimizer scalarizes them in release.
+
+## Host programs: launching through cuda-oxide's host API
+
+A crate can hold its kernels and the host program that launches them,
+written against cuda-oxide's host API: the kernels inside a
+`#[cuda_module] mod kernels { … }` (from `cuda-device`), the program
+loading that module with `kernels::load(&ctx)` and launching through its
+typed methods on `cuda-core` buffers (`module.add(&stream, config, &a, &b,
+&mut sum)`). crabbit compiles both sides in one compilation: the host code
+— the program and the generic parts of cuda-core and cuda-host it
+instantiates — to the host object, the kernels to PTX. The PTX is embedded
+in the binary the way cuda-oxide's own backend embeds it
+(`crates/crabbit/src/device_artifact.rs`): an artifact bundle in the
+`oxide-artifacts` format (named after the cargo package, PTX payload,
+kernel entries) in the `.oxart` section of an extra object linked next to
+the host object, which also defines the package's artifact anchor — the
+symbol `#[cuda_module]`'s `load()` references to find the bundle. The PTX
+sidecar next to the object and `CRABBIT_PTX_OUT` are written as before.
+Owner-filtered builds (cuda-oxide's per-crate device codegen filter and
+its target-specific anchors) are not supported.
+
+```toml
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "<crabbit's pin>" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "<crabbit's pin>" }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "<crabbit's pin>" }
+```
+
+Build with `cargo rustc --release -- -Zcodegen-backend=<libcrabbit.so>
+-Coverflow-checks=off`; the dependencies themselves are compiled by rustc's
+default backend, as for any crabbit build. `cuda-core`'s bindings are
+generated from the CUDA 13 toolkit's `cuda.h` by bindgen at build time,
+which needs libclang with clang's resource headers (Ubuntu:
+`libclang-common-18-dev`). The fixture is
+`crates/backend-tests/fixtures/kernel-launch` (two kernels, launched in
+sequence, results checked on the host).
+
+Calls from crabbit-compiled code into code rustc compiled (std, the
+dependencies) follow rustc's Rust ABI, read from the callee's `FnAbi`
+(`crates/crabbit/src/importer/abi.rs`): a result rustc returns indirectly
+(e.g. a 16-byte `Result<Arc<_>, DriverError>`) comes back through x8, a
+scalar pair whose second half rustc returns in x1 is split; an argument
+goes by reference when rustc passes it indirectly (memory-layout
+aggregates wider than a pointer), as one integer when rustc casts it
+(up to a pointer wide), as its scalar(s) when rustc passes a scalar or a
+scalar pair (newtypes, niche-encoded enums). crabbit's own functions keep
+crabbit's classification among themselves.
 
 ## The device API the importer understands
 

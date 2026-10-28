@@ -34,7 +34,11 @@ own device conventions (`#[kernel]`, `cuda_device::{thread, SharedArray,
 warp, atomic}`); crabbit's importer translates them (the `cuda_device` API
 becomes `nvvm` dialect ops) and NVIDIA's `mir-lower` takes them to the
 LLVM dialect (input verification on), then crabbit's mid-end and NVPTX
-translator finish the job — `docs/KERNEL-ABI.md`.
+translator finish the job — `docs/KERNEL-ABI.md`. A crate can hold its
+kernels and the host program that launches them through cuda-oxide's host
+API (`#[cuda_module]`, `kernels::load`, the typed launch methods on
+`cuda-core` buffers): crabbit compiles both sides in one compilation and
+embeds the PTX in the binary the way cuda-oxide's own backend does.
 
 ![A compiled function's control-flow graph in pliron-inspect's CFG view:
 per-block IR, laid out and browsable per pass](docs/images/inspect-cfg.png)
@@ -295,7 +299,8 @@ checksum gates for both CPU and GPU artifacts.
 ## Extending crabbit
 
 Every pass has a name and every pipeline stage — `mir` to LLVM dialect,
-mid-end, machine — is an order of names with a default. A backend built
+mid-end, machine, and the program stage that sees a crate's host and
+kernel modules together — is an order of names with a default. A backend built
 with extensions is a small dylib crate that links crabbit's library,
 registers its passes (`crabbit_config::register_pass`) and one order
 function (`crabbit_config::register_order`, which receives crabbit's
@@ -313,7 +318,7 @@ crabbit's own default pipeline (linear-scan allocation), measured on the
 | --- | --- | --- |
 | Register allocation as e-graph materialization | spilling decided by an availability-aware oracle over each value's derivations: a restore is the cheapest of a reload or a recomputation | **1.6% faster** geomean with the loop-aware frequency prior below (histogram −14%, transpose −9%, worst dot_product +4%); 1.9% slower without it |
 | Analytical models (combinatorial matrix theory) | spectral block frequencies with a loop-aware branch prior; max-plus scheduling bounds; unimodular loop transforms | the frequency prior inside the allocator above: **3.4% faster** geomean (gemm_tiled −25%); its frequencies' rank correlation with measured profiles 0.002 → 0.742 |
-| Kernel fusion | fusing separately written GPU kernels (and CPU loops) through their iteration domains, with legality proven on affine access maps | none yet: it summarizes kernels (12 of 31 corpus kernels fully affine) and fuses nothing so far |
+| Kernel fusion | fusing a program's back-to-back launches of its own kernels into one launch, kernels and host launch code rewritten together, with legality proven on affine access maps | on three real host programs (MoE decode tails of an inference engine) launches cut 2 → 1, 2 → 1 and 3 → 2 with outputs bit-identical: **2.0×** and **1.33×** faster per step, 1.03× on the third (whose step is mostly host routing) |
 
 ## License
 

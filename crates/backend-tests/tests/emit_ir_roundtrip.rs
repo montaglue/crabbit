@@ -258,14 +258,18 @@ fn emitted_ir_round_trips_for_every_fixture() {
             continue;
         }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        // Packages with more than one target need the target named.
+        // cuda-core's bindings are generated from the CUDA toolkit's
+        // `cuda.h` at build time (tests/kernels.rs skips it the same way).
+        if name == "kernel-launch" && !Path::new("/usr/local/cuda/include/cuda.h").exists() {
+            continue;
+        }
         // Packages with more than one target need the target named; the
         // mixed host+kernel binaries build in release like every kernel
         // (debug keeps `Option` aggregates the NVPTX translator cannot lower).
         let target: &[&str] = match name.as_str() {
             "kernel-vector-add" => &["--lib"],
             "backend-smoke" => &["--bin", "crabbit-backend-smoke", "--release"],
-            "llama-rms-norm" => &["--release"],
+            "llama-rms-norm" | "kernel-launch" => &["--release"],
             _ => &[],
         };
         let emit_dir = scratch.join("ir").join(&name);

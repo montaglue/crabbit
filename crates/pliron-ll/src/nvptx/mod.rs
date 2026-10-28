@@ -1025,6 +1025,24 @@ fn call_mem_effect(canonical: &str) -> CallMemEffect {
 
 /// Whether `func` has internal/private linkage: a device helper rather
 /// than a kernel entry point.
+/// The `.entry` kernels [write_ptx_from_ir] emits for `module`, by name:
+/// every defined function that is not internal (the inliner's leftover
+/// device functions are; they become `.func`s).
+pub fn entry_names(ctx: &Context, module: Ptr<Operation>) -> Vec<String> {
+    let Some(body) = module.deref(ctx).get_region(0).deref(ctx).get_head() else {
+        return Vec::new();
+    };
+    body.deref(ctx)
+        .iter(ctx)
+        .filter_map(|op_ptr| {
+            let op_obj = Operation::get_op_dyn(op_ptr, ctx);
+            let func = op_obj.downcast_ref::<LlvmFuncOp>()?;
+            (!func.is_declaration(ctx) && !is_internal(ctx, func))
+                .then(|| func.get_symbol_name(ctx).to_string())
+        })
+        .collect()
+}
+
 fn is_internal(ctx: &Context, func: &LlvmFuncOp) -> bool {
     func.get_attr_llvm_function_linkage(ctx).is_some_and(|linkage| {
         matches!(

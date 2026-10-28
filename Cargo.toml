@@ -45,6 +45,12 @@ llvm-export = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7c
 #   reserved-oxide-symbols  the `#[kernel]` symbol conventions
 dialect-nvvm = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
 reserved-oxide-symbols = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+#   oxide-artifacts  the embedded device-artifact format cuda-oxide's host
+#                API loads kernels from (`#[cuda_module]` `load()`); from
+#                crates.io like upstream's own workspace, which keeps that
+#                release equal to its in-tree copy -- the host side reads
+#                the bundles crabbit writes with this same crate
+oxide-artifacts = { version = "0.2.1", features = ["object-write"] }
 # `version` on these intra-workspace deps is likewise required for `cargo
 # publish`; keep them in lockstep with `workspace.package.version` above.
 pliron-ll = { path = "crates/pliron-ll", version = "0.1.0" }

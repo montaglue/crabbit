@@ -309,9 +309,30 @@ pub(super) fn import_terminator<'tcx>(
                         == rustc_abi::ExternAbi::RustCall
                 });
 
+            // A direct call into code rustc compiled passes its arguments
+            // the way rustc's Rust ABI does (abi.rs, `RustArg`).
+            let rust_abi_args = if virtual_slot.is_none()
+                && callee_value.is_none()
+                && !untuple_last
+                && is_upstream_call(tcx, state, body, func)
+            {
+                call_instance(tcx, state, body, func)
+                    .map(|instance| with_intrinsic_fallback(tcx, instance))
+                    .filter(|instance| !should_import_instance(tcx, *instance))
+                    .and_then(|instance| rust_abi_args(tcx, ctx, instance))
+                    .filter(|abis| abis.len() == args.len())
+            } else {
+                None
+            };
+
             let mut call_args = Vec::with_capacity(args.len());
             let mut vtable_ptr = None;
             for (idx, arg) in args.iter().enumerate() {
+                if let Some(abis) = &rust_abi_args {
+                    let value = import_operand(tcx, ctx, state, insert_block, body, &arg.node)?;
+                    lower_rust_abi_call_arg(ctx, insert_block, value, &abis[idx], &mut call_args)?;
+                    continue;
+                }
                 if idx == 0 && virtual_slot.is_some() {
                     let receiver =
                         import_operand(tcx, ctx, state, insert_block, body, &arg.node)?;
@@ -423,14 +444,25 @@ pub(super) fn import_terminator<'tcx>(
                     if result_type.is_some() && layout_sensitive {
                         let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
                         let real_size = rustc_layout_size_of_ty(tcx, typing_env, rust_ret_ty)?;
+                        let rust_return = call_instance(tcx, state, body, func)
+                            .and_then(|instance| rust_abi_return(tcx, instance))
+                            .unwrap_or(RustReturn::Registers);
                         // Use a word-array blob so the decoded loads stay
-                        // 8-byte aligned.
+                        // 8-byte aligned. An indirect result is given more
+                        // than two registers' worth, which is what makes
+                        // the backend pass x8 (the callee writes only its
+                        // real size); a split scalar pair takes both words.
+                        let words = match rust_return {
+                            RustReturn::Registers => real_size.div_ceil(8),
+                            RustReturn::Indirect => real_size.div_ceil(8).max(3),
+                            RustReturn::Pair { .. } => 2,
+                        };
                         let word_ty: TypeHandle =
                             IntegerType::get(ctx, 64, Signedness::Unsigned).into();
                         let blob_ty: TypeHandle =
-                            llvm::types::ArrayType::get(ctx, word_ty, real_size.div_ceil(8)).into();
+                            llvm::types::ArrayType::get(ctx, word_ty, words).into();
                         result_type = Some(blob_ty);
-                        external_enum_result = Some((rust_ret_ty, blob_ty));
+                        external_enum_result = Some((rust_ret_ty, blob_ty, rust_return));
                     }
                     let arg_types = call_args
                         .iter()
@@ -448,12 +480,33 @@ pub(super) fn import_terminator<'tcx>(
             };
             call.get_operation().insert_at_back(insert_block, ctx);
 
-            if let Some((rust_ret_ty, blob_ty)) = external_enum_result {
+            if let Some((rust_ret_ty, blob_ty, rust_return)) = external_enum_result {
                 let blob = call.get_operation().deref(ctx).get_result(0);
                 let blob_slot = mir_dialect::ops::AllocaOp::new(ctx, blob_ty);
                 blob_slot.get_operation().insert_at_back(insert_block, ctx);
                 let store = mir_dialect::ops::StoreOp::new(ctx, blob, blob_slot.get_result(ctx));
                 store.get_operation().insert_at_back(insert_block, ctx);
+                if let RustReturn::Pair {
+                    second_offset,
+                    second_size,
+                } = rust_return
+                {
+                    // x1 holds the second scalar; move it to its offset.
+                    let int_ty: TypeHandle =
+                        IntegerType::get(ctx, (second_size * 8) as u32, Signedness::Signless).into();
+                    let from = ptr_offset_const(ctx, insert_block, blob_slot.get_result(ctx), 8)?;
+                    let second = mir_dialect::ops::LoadOp::new(ctx, from, int_ty);
+                    second.get_operation().insert_at_back(insert_block, ctx);
+                    let to = ptr_offset_const(
+                        ctx,
+                        insert_block,
+                        blob_slot.get_result(ctx),
+                        second_offset,
+                    )?;
+                    mir_dialect::ops::StoreOp::new(ctx, second.get_result(ctx), to)
+                        .get_operation()
+                        .insert_at_back(insert_block, ctx);
+                }
                 let value = load_value_from_real_layout(
                     tcx,
                     ctx,

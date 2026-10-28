@@ -31,6 +31,28 @@ pub(super) fn cuda_oxide_entry_name(symbol: &str) -> Option<&str> {
 const DEVICE_CRATE: &str = "cuda_device";
 const SHARED_ARRAY: &str = "SharedArray";
 const DYNAMIC_SHARED_ARRAY: &str = "DynamicSharedArray";
+const DISJOINT_SLICE: &str = "DisjointSlice";
+
+/// Whether a kernel parameter of type `ty` crosses the launch boundary as
+/// its scalar fields, one `.param` each, instead of one aggregate `.param`:
+/// slice pointers (`&[T]`, `&mut [T]`, `*const [T]`, `*mut [T]`) as
+/// `(ptr, len)`, and `DisjointSlice<T, S>` as `(ptr, len)` followed by its
+/// index space's runtime layout. This is cuda-oxide's kernel-entry ABI:
+/// its host launchers push a slice's pointer and length as two driver
+/// arguments (`cuda_host::push_kernel_device_slice`).
+pub(super) fn is_flattened_kernel_param<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    use rustc_middle::ty::TyKind;
+    match runtime_ty(ty).kind() {
+        TyKind::Ref(_, pointee, _) | TyKind::RawPtr(pointee, _) => {
+            matches!(pointee.kind(), TyKind::Slice(_))
+        }
+        TyKind::Adt(adt, _) => {
+            tcx.crate_name(adt.did().krate).as_str() == DEVICE_CRATE
+                && tcx.item_name(adt.did()).as_str() == DISJOINT_SLICE
+        }
+        _ => false,
+    }
+}
 
 /// The storage a `SharedArray<T, N, ALIGN>` static needs: `(bytes, align)`,
 /// `None` for any other type.

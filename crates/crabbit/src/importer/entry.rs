@@ -276,7 +276,7 @@ pub(super) fn import_function<'tcx>(
         }
         let abi_ty = convert_immediate_ty(tcx, ctx, ty)?;
         let group = if is_kernel {
-            kernel_param_abi(ctx, abi_ty)?
+            kernel_param_abi(ctx, abi_ty, is_flattened_kernel_param(tcx, ty))?
         } else {
             arg_abi_for_ty(ctx, abi_ty)?
         };

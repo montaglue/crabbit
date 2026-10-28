@@ -35,9 +35,12 @@ pub(super) fn declare_static_global<'tcx>(
         return Ok(());
     }
     // A local static is defined here from its evaluated initializer; a foreign
-    // one is only declared (a `llvm.global` with no initializer), so its
-    // address resolves through an undefined symbol-table entry at link time.
+    // one — another crate's, or an `extern { static … }` item of this crate,
+    // which has no body to evaluate — is only declared (a `llvm.global` with
+    // no initializer), so its address resolves through an undefined
+    // symbol-table entry at link time.
     if def_id.is_local()
+        && !tcx.is_foreign_item(def_id)
         && let Ok(alloc) = tcx.eval_static_initializer(def_id)
     {
         emit_allocation_global(
@@ -101,6 +104,7 @@ pub(super) fn declare_thread_local_global<'tcx>(
         return Ok(());
     }
     if def_id.is_local()
+        && !tcx.is_foreign_item(def_id)
         && let Ok(alloc) = tcx.eval_static_initializer(def_id)
     {
         return emit_allocation_global(

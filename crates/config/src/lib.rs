@@ -19,6 +19,12 @@
 //! reordering or replacing passes, crabbit's own included. [build] turns
 //! the effective order ([order]) into a pipeline.
 //!
+//! **The program stage.** Besides the per-module stages, [Stage::Program]
+//! runs passes over the whole program — the host module and the kernel
+//! module together under one root ([program_modules]) — so a pass can
+//! change both sides at once (rewrite host launch sites together with the
+//! kernels they launch). crabbit's own order for it is empty.
+//!
 //! **Extending crabbit.** Registration happens in the codegen-backend dylib
 //! rustc loads: a crate that links crabbit-core, registers its passes and
 //! its order in `__rustc_codegen_backend`, then returns
@@ -57,20 +63,23 @@ impl CrabbitConfig {
         self
     }
 
-    /// The target of `side`.
+    /// The target of `side`. The program is compiled for the host (its
+    /// kernels for [CrabbitConfig::device]), so [Side::Program] is the host.
     pub fn target(&self, side: Side) -> &PipelineTarget {
         match side {
-            Side::Host => &self.host,
+            Side::Host | Side::Program => &self.host,
             Side::Device => &self.device,
         }
     }
 }
 
-/// Which module a pipeline compiles: the host module or the kernel module.
+/// Which module a pipeline compiles: the host module, the kernel module,
+/// or — in [Stage::Program], and only there — both together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     Host,
     Device,
+    Program,
 }
 
 /// A stage of a pipeline; each stage is one order of pass names.
@@ -85,6 +94,12 @@ pub enum Stage {
     /// The device side has none — PTX is written from the mid-end's output
     /// and ptxas does the machine work.
     Machine,
+    /// Passes over the whole program ([Side::Program]): one root holding
+    /// the host module and the kernel module ([program_modules]). Runs once
+    /// per crate that has kernels, after both modules' [Stage::MirToLlvm]
+    /// and before either [Stage::Midend], so both mid-ends optimize what a
+    /// program pass changed. crabbit's default order is empty.
+    Program,
 }
 
 /// Builds a registered pass for one side of a configuration. A pass that
@@ -103,6 +118,10 @@ pub enum ConfigError {
         "the device side has no machine pipeline (kernels are translated to PTX after the mid-end)"
     )]
     NoDeviceMachineStage,
+    #[error(
+        "{stage:?} is not a stage of {side:?}: the program stage is built for Side::Program, which builds nothing else"
+    )]
+    ProgramStage { stage: Stage, side: Side },
     #[error(
         "no crabbit backend is registered for host triple `{triple}`; registered backends: {registered}"
     )]
@@ -181,6 +200,10 @@ pub fn default_order(
     cfg: &CrabbitConfig,
 ) -> Result<Vec<&'static str>, ConfigError> {
     Ok(match (stage, side) {
+        (Stage::Program, Side::Program) => Vec::new(),
+        (Stage::Program, _) | (_, Side::Program) => {
+            return Err(ConfigError::ProgramStage { stage, side });
+        }
         (Stage::MirToLlvm, _) => crabbit_mir::passes::DEFAULT_ORDER.to_vec(),
         (Stage::Midend, _) => pliron_ll::passes::llvm::DEFAULT_ORDER.to_vec(),
         (Stage::Machine, Side::Host) => host_backend(cfg)?.default_order.to_vec(),
@@ -228,23 +251,31 @@ pub fn construct(
             reason,
         });
     }
-    crabbit_mir::passes::construct(name, cfg.crate_name.as_deref())
-        .or_else(|| pliron_ll::passes::llvm::construct(name, cfg.target(side)))
-        .or_else(|| match side {
-            Side::Host => targets::lookup(&cfg.host.triple)?.construct(name),
-            Side::Device => None,
+    // crabbit's own passes each compile one module; none takes a program.
+    let own = (side != Side::Program)
+        .then(|| {
+            crabbit_mir::passes::construct(name, cfg.crate_name.as_deref())
+                .or_else(|| pliron_ll::passes::llvm::construct(name, cfg.target(side)))
         })
-        .ok_or_else(|| ConfigError::UnknownPass {
-            name: name.to_string(),
-            stage,
-            side,
-            known: known_passes(side, cfg).join(", "),
-        })
+        .flatten();
+    own.or_else(|| match side {
+        Side::Host => targets::lookup(&cfg.host.triple)?.construct(name),
+        Side::Device | Side::Program => None,
+    })
+    .ok_or_else(|| ConfigError::UnknownPass {
+        name: name.to_string(),
+        stage,
+        side,
+        known: known_passes(side, cfg).join(", "),
+    })
 }
 
 /// Every name [construct] resolves for `side` (for diagnostics).
 fn known_passes(side: Side, cfg: &CrabbitConfig) -> Vec<&'static str> {
     let mut names = registered_passes();
+    if side == Side::Program {
+        return names;
+    }
     names.extend(crabbit_mir::passes::DEFAULT_ORDER);
     names.extend(pliron_ll::passes::llvm::DEFAULT_ORDER);
     if side == Side::Host
@@ -265,6 +296,65 @@ pub fn build(stage: Stage, side: Side, cfg: &CrabbitConfig) -> Result<PassList, 
         .into_iter()
         .map(|name| construct(name, stage, side, cfg))
         .collect()
+}
+
+/// The modules under a [Stage::Program] root, `(host, kernels)`: the root
+/// is a `builtin.module` whose body holds the host module first and the
+/// kernel module second. `None` for any other operation.
+pub fn program_modules(
+    ctx: &pliron::context::Context,
+    root: pliron::context::Ptr<pliron::operation::Operation>,
+) -> Option<(
+    pliron::context::Ptr<pliron::operation::Operation>,
+    pliron::context::Ptr<pliron::operation::Operation>,
+)> {
+    use pliron::builtin::op_interfaces::OneRegionInterface as _;
+    use pliron::builtin::ops::ModuleOp;
+    use pliron::linked_list::ContainsLinkedList;
+    let root_op = pliron::operation::Operation::get_op::<ModuleOp>(root, ctx)?;
+    let body = root_op.get_region(ctx).deref(ctx).get_head()?;
+    let mut modules = body
+        .deref(ctx)
+        .iter(ctx)
+        .filter(|op| pliron::operation::Operation::get_op::<ModuleOp>(*op, ctx).is_some());
+    let host = modules.next()?;
+    let kernels = modules.next()?;
+    modules.next().is_none().then_some((host, kernels))
+}
+
+/// Run `passes` (a [Stage::Program] pipeline) over `host` and `kernels`:
+/// both modules, detached top-level ops, are placed under a fresh program
+/// root for the run and detached again afterwards, so every other stage
+/// keeps seeing them as separate modules.
+pub fn run_program_stage(
+    passes: &mut pliron_ll::conversion::pass::Passes,
+    ctx: &mut pliron::context::Context,
+    host: pliron::context::Ptr<pliron::operation::Operation>,
+    kernels: pliron::context::Ptr<pliron::operation::Operation>,
+    analyses: &mut pliron_ll::conversion::pass::AnalysisManager,
+) -> pliron::result::Result<()> {
+    use pliron::builtin::op_interfaces::OneRegionInterface as _;
+    use pliron::builtin::ops::ModuleOp;
+    use pliron::linked_list::ContainsLinkedList as _;
+    use pliron::op::Op;
+    use pliron_ll::conversion::pass::Pass as _;
+    let root = ModuleOp::new(
+        ctx,
+        "program".try_into().expect("static identifier literal"),
+    );
+    let body = root
+        .get_region(ctx)
+        .deref(ctx)
+        .get_head()
+        .expect("ModuleOp is built with one region holding one block");
+    host.insert_at_back(body, ctx);
+    kernels.insert_at_back(body, ctx);
+    let root = root.get_operation();
+    let result = passes.run(root, ctx, analyses).map(|_| ());
+    host.unlink(ctx);
+    kernels.unlink(ctx);
+    pliron::operation::Operation::erase(root, ctx);
+    result
 }
 
 /// Set or clear an environment variable under this crate's env-mutation
