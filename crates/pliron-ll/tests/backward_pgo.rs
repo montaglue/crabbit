@@ -28,7 +28,7 @@ use pliron_ll::dialects::llvm::{
 use pliron_ll::dialects::{aarch64, macho};
 use pliron_ll::ir::op::Op as _;
 use pliron_ll::linked_list::ContainsLinkedList;
-use pliron_ll::passes::aarch64::backward::{Samples, attach};
+use pliron_ll::passes::aarch64::backward::{Samples, attach, timeline};
 use pliron_ll::passes::aarch64::blockmap::Aarch64BlockmapIdPass;
 use pliron_ll::passes::aarch64::opmap::{self, Aarch64OpIdPass, unstamped_op_count};
 use pliron_ll::passes::aarch64::{
@@ -341,6 +341,30 @@ cycles:u:      ffff00000000 [unknown]
     assert_eq!(cycles(instructions[0]), Some(20.0));
     assert_eq!(cycles(instructions[1]), Some(10.0));
     assert_eq!(cycles(instructions[2]), None);
+}
+
+#[test]
+fn timeline_puts_each_cycle_sample_on_its_ops_line() {
+    unsafe { std::env::set_var("CRABBIT_PROFILE_MAP", "1") };
+    let mut ctx = context();
+    let (trace, _) = traced_compile(&mut ctx);
+    // The last snapshot as the tool reads it: parsed, its ops at their lines.
+    let mut parsed = context();
+    let root = walk::parse(&mut parsed, &trace.snapshots.last().unwrap().ir).unwrap();
+    let script = "\
+100.000001000: armv8_pmuv3_1/cycles/u:      aaaa00001000 audit+0x0
+100.000002500: armv8_pmuv3_1/instructions/u:      aaaa00001000 audit+0x0
+100.000003000:       cycles:u:      aaaa00001004 audit+0x4
+100.000004000:       cycles:u:      ffff00000000 [unknown]
+";
+    let samples = Samples::from_perf_script(script, 10);
+    let timeline = timeline(&parsed, root, &samples);
+    assert_eq!(timeline.start, 100_000_001_000);
+    // Only cycle samples, each after the one before.
+    assert_eq!(timeline.time, vec![0, 2000, 1000]);
+    let (first, second, unknown) = (timeline.line[0], timeline.line[1], timeline.line[2]);
+    assert!(first > 0 && second > first, "{:?}", timeline.line);
+    assert_eq!(unknown, 0);
 }
 
 #[test]

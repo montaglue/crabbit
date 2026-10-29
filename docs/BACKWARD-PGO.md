@@ -87,12 +87,15 @@ Two properties fall out that a flat map cannot have:
   `instructions`), puts the samples on the machine ops of the last
   snapshot by their encoded byte ranges, walks the trace, and writes
   `<version>.bpgo.crt`: the same snapshots, with the profile of every
-  snapshot reached in the header, keyed by each op's line and column. The
+  snapshot reached in the header, keyed by each op's line and column, and
+  each cycle sample's time with the line of the op it hit in the last
+  snapshot (`bpgo.timeline`), for a timeline of the run. The
   snapshot text is never re-printed — pliron renames values and blocks
   when it prints parsed IR. The raw recording stays next to it as
   `<version>.perf.data`; `crabbit-bpgo lift` walks such a recording again.
   [pliron-inspect](https://github.com/montaglue/pliron-inspect) shows the
-  profile on every snapshot it reaches, as text and as a CFG.
+  profile on every snapshot it reaches, as text, as a CFG and as a
+  flamegraph, and the run as a timeline.
 - **Consumers.** `CRABBIT_BLOCK_FREQ=profile` with
   `CRABBIT_PROFILE=<profiled trace>` gives the allocator measured block
   frequencies (`passes/profile_freq.rs`). An allocator registered as an

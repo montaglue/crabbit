@@ -175,7 +175,14 @@ fn lift(
     // Link the dialects every snapshot may contain.
     let _ = crabbit_mir::dialects::dialect_mir::register;
     let script = Command::new("perf")
-        .args(["script", "--no-demangle", "-F", "event,ip,sym,symoff", "-i"])
+        .args([
+            "script",
+            "--no-demangle",
+            "--ns",
+            "-F",
+            "time,event,ip,sym,symoff",
+            "-i",
+        ])
         .arg(perf_data)
         .output()
         .context("cannot run perf script")?;
@@ -191,8 +198,12 @@ fn lift(
     );
     let trace = Trace::read(trace_path)?;
     let mut attached = None;
+    let mut timeline = None;
     let walk = pliron_bpgo::walk(&trace, &backward_passes(), &mut |ctx, root| {
         attached = Some(pliron_ll::passes::aarch64::backward::attach(
+            ctx, root, &samples,
+        ));
+        timeline = Some(pliron_ll::passes::aarch64::backward::timeline(
             ctx, root, &samples,
         ));
         Ok(())
@@ -212,6 +223,13 @@ fn lift(
             "matched": attached.matched,
         }),
     );
+    // The cycle samples one by one, on the ops of the last snapshot.
+    if let (Some(timeline), Some(bpgo)) = (timeline, annotated.meta.extra.get_mut("bpgo")) {
+        let mut timeline = serde_json::to_value(timeline)?;
+        timeline["snapshot"] = serde_json::json!(trace.snapshots.len().saturating_sub(1));
+        timeline["event"] = serde_json::json!("cycles");
+        bpgo["timeline"] = timeline;
+    }
     annotated.meta.note = Some(format!(
         "backward PGO of {}",
         trace.meta.note.as_deref().unwrap_or("a compilation")
