@@ -320,55 +320,6 @@ pub(super) fn declare_anonymous_byte_global(
     symbol
 }
 
-pub(super) fn llvm_decl_type(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
-    let ty_ref = ty.deref(ctx);
-    if ty_ref.is::<crate::dialects::dialect_mir::types::MirPtrType>() {
-        drop(ty_ref);
-        return llvm::types::PointerType::get(ctx, 0).into();
-    }
-    if let Some(array_ty) = ty_ref.downcast_ref::<llvm::types::ArrayType>() {
-        let elem = array_ty.elem_type();
-        let size = array_ty.size();
-        drop(ty_ref);
-        let elem = llvm_decl_type(ctx, elem);
-        return llvm::types::ArrayType::get(ctx, elem, size).into();
-    }
-    if let Some(struct_ty) = ty_ref.downcast_ref::<llvm::types::StructType>() {
-        let name = struct_ty.name();
-        let fields = (!struct_ty.is_opaque()).then(|| struct_ty.fields().collect::<Vec<_>>());
-        drop(ty_ref);
-        let fields = fields.map(|fields| {
-            fields
-                .into_iter()
-                .map(|field| llvm_decl_type(ctx, field))
-                .collect::<Vec<_>>()
-        });
-        return match name {
-            Some(name) => {
-                let name = format!("{name}__llvm")
-                    .try_into()
-                    .expect("suffixing an existing legal identifier keeps it legal");
-                llvm::types::StructType::get_named(
-                    ctx,
-                    name,
-                    fields.map(|fields| (fields, llvm::types::StructLayout::Unpacked)),
-                )
-                .expect("the __llvm mirror name maps 1:1 to this field set")
-                .into()
-            }
-            None => llvm::types::StructType::get_unnamed(
-                ctx,
-                (
-                    fields.unwrap_or_default(),
-                    llvm::types::StructLayout::Unpacked,
-                ),
-            )
-            .into(),
-        };
-    }
-    ty
-}
-
 pub(super) fn declare_default_allocator_shims<'tcx>(
     tcx: TyCtxt<'tcx>,
     ctx: &mut Context,

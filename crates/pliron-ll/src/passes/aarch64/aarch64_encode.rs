@@ -266,11 +266,11 @@ mod tests {
                 ATTR_KEY_AARCH64_ENCODED.as_ref()
             ),
             // The two adr_literal ops are 12-byte pc-relative sequences
-            // (adr rd, #0 plus two add immediates); everything else is one
-            // word.
+            // (adr rd, #0 plus two add immediates); the `b exit` is no bytes,
+            // since `exit` is the next block; everything else is one word.
             Some(bytes(
-                "200080d2000000940900009401000010\
-                 21a000912100409102000010428000914200409101000014c0035fd6"
+                "200080d2000000940800009401000010\
+                 2190009121004091020000104270009142004091c0035fd6"
             ))
         );
         assert_eq!(
@@ -287,7 +287,7 @@ mod tests {
                 &ctx,
                 ATTR_KEY_AARCH64_ENCODED.as_ref()
             ),
-            Some(bytes("f4ffff97"))
+            Some(bytes("f5ffff97"))
         );
         assert_eq!(
             get_bytes_attr(

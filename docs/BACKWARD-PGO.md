@@ -55,8 +55,8 @@ Two properties fall out that a flat map cannot have:
   with the source op being lowered
   (`crates/pliron-ll/src/passes/aarch64/opmap.rs`); the register allocator
   stamps spill stores with the spilled def and reloads with the use they
-  feed; frame lowering and block placement stamp their code or named roots
-  (`isel:abi`, `regalloc`, `frame`, `placement`). Machine blocks get their
+  feed; frame lowering stamps its code or a named root (`isel:abi`,
+  `regalloc`, `frame`). Machine blocks get their
   position at the allocator's input (`aarch64_blockmap_id`).
 - **Traces.** With `CRABBIT_TRACE=1` the compilation leaves its IR after
   every pass in a trace (`.crt`, format in `crates/pliron-trace`). The
@@ -78,7 +78,7 @@ Two properties fall out that a flat map cannot have:
   op), `executions` (how often it ran), and `<pass>.cycles` — cycles of
   code a pass created as its own decision (`regalloc.cycles` for spill
   code charged to the value it spilled, `frame.cycles`, `abi.cycles`,
-  `placement.cycles`, `unattributed.cycles`). Cycles add up where ops
+  `unattributed.cycles`). Cycles add up where ops
   merge; an expansion's ops each ran as often as their source; unrolled
   copies add their executions to the original's.
 - **Measuring.** `crabbit-bpgo run --trace <version>.crt -- <program>
@@ -116,11 +116,11 @@ the source level as a 50/50 split across both original adds and onto the
 original `sdiv`, and the total must hold at every snapshot.
 
 **End to end, CPU** (2026-10-29, `gemm_tiled` CPU from the kernel corpus,
-`--size large --repeat 5`, Cortex-X925): 331,416 of 331,618 cycle samples
+`--size large --repeat 5`, Cortex-X925): 328,366 of 328,569 cycle samples
 land on the traced code; the profile reaches every snapshot from
-`erase-mir-types` to the encoder, with the same 3.31e10 cycles at each.
-At the source level one multiply holds 31% of the run (10.4G cycles,
-1.83G executions, 485M of them its spill code).
+`apply-module-linkage` to the encoder, with the same 3.28e10 cycles at
+each. At the source level one multiply holds 32% of the run (10.5G
+cycles, 1.83G executions, 427M of them its spill code).
 
 The results below were measured on 2026-08-31 with the first
 implementation of the lift, which ran outside the compiler; it was
@@ -184,8 +184,8 @@ trust them.
   hot loops that mostly fit the (deliberately tiny) 4-register allocatable
   pool; the decision-feedback experiments on pressure-rich host code
   (e.g. the arrow crates) are the next step, not a done one.
-- **Coverage is a suffix.** The MIR-level passes (`erase-mir-types` and
-  before) have no backward passes yet, so profiles stop at the LLVM
+- **Coverage is a suffix.** The MIR-level passes (`apply-module-linkage`
+  and before) have no backward passes yet, so profiles stop at the LLVM
   level.
 - **Inlined code** returns its profile to the call site; the callee's
   own body gets only the profile of its out-of-line calls.

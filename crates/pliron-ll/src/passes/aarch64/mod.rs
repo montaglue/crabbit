@@ -1154,8 +1154,8 @@ mod tests {
         assert_eq!(labels.len(), 3);
         assert!(labels[1].starts_with("else"), "layout was {labels:?}");
         assert!(labels[2].starts_with("then"), "layout was {labels:?}");
-        // The unconditional branch to the hot block became a fall-through;
-        // only the conditional branch to the cold block remains.
+        // The entry's terminator branches to the cold block and falls
+        // through to the hot one, which is next.
         let machine_entry = machine_func.entry_block(&ctx);
         let tail = machine_entry.deref(&ctx).get_tail().unwrap();
         let cold_target = aarch64::ops::target(&ctx, tail).unwrap();

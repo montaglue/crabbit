@@ -9,7 +9,7 @@ document maps the pipeline to the actual modules.
 flowchart TD
     MIR["rustc MIR<br/>(CodegenBackend trait)"] -->|"crates/crabbit/src/importer/"| MIRD["mir dialect<br/>(cuda-oxide's dialect-mir: the typing contract)"]
     MIRD -->|"mir-level stage<br/>crates/mir/src/passes/ (mir-census)"| MIRA["mir dialect, measured"]
-    MIRA -->|"LowerDialectMirPass (cuda-oxide's mir-lower,<br/>verification on) → apply-module-linkage<br/>→ materialize-function-addresses → erase-mir-types"| LLVMD["llvm dialect<br/>(pliron-llvm, no llvm-sys)"]
+    MIRA -->|"LowerDialectMirPass (cuda-oxide's mir-lower,<br/>verification on, leftover MIR types erased)<br/>→ apply-module-linkage → materialize-function-addresses"| LLVMD["llvm dialect<br/>(pliron-llvm, no llvm-sys)"]
     LLVMD --> MIDEND["shared mid-end<br/>pliron-ll/src/passes/llvm/"]
     MIDEND -->|host| MACH["machine pipeline<br/>pliron-ll/src/passes/aarch64/"]
     MIDEND -->|"#[kernel] fns"| NVPTX["NVPTX translator<br/>pliron-ll/src/nvptx/"]
@@ -80,11 +80,12 @@ lacks, and anything that has to cross the lowering travels on the module —
 function linkage does (`crabbit_linkage`, a symbol → linkage dictionary the
 importer writes and `apply-module-linkage` stamps onto the `llvm.func`s
 right after the lowering; every lowered function then carries an explicit
-linkage, external where nothing was recorded). Two more crabbit passes
-complete the lowering for this module shape: `materialize-function-addresses`
-turns `ll.func_addr` into `llvm.addressof`, and `erase-mir-types` rewrites
-the `mir.ptr` the lowering leaves inside the importer's llvm-dialect
-aggregate ops to `llvm.ptr`.
+linkage, external where nothing was recorded). The lowering pass itself
+erases the MIR types `mir-lower` leaves on the importer's llvm-dialect
+aggregate ops (`mir.ptr`, signed and unsigned integers, named structs),
+with `mir-lower`'s own type mapping, so every snapshot from there on is
+valid LLVM dialect; `materialize-function-addresses` then turns
+`ll.func_addr` into `llvm.addressof`.
 
 ## 2. Shared mid-end (`crates/pliron-ll/src/passes/llvm/`)
 
@@ -127,6 +128,12 @@ verify → abi → isel (llvm_to_aarch64_isel.rs) → legalize
 → frame-lower → post-ra-opts → block-placement
 → branch-relax → asm-lower → encode
 ```
+
+Every machine block ends in one terminator that names all its successors
+(`b`; `b_cond`/`cbnz` with their taken and not-taken blocks; `ret`;
+`brk`), as pliron's CFG model requires. Block placement only orders blocks;
+the encoder turns the edge to the next block into a fall-through (a `b` to
+it is no bytes, a `b_cond` whose taken block is next is inverted).
 
 ELF/Mach-O translation happens outside the pass pipeline
 (`aarch64_object_lower.rs`, `elf.rs`, `macho.rs`), like the PTX writer.
@@ -181,9 +188,9 @@ The substrate of [BACKWARD-PGO.md](BACKWARD-PGO.md), gated by
   multi-parent `ll.derived_from_many`, `ll.inlined_from`) next to its own
   code.
 - The machine boundary (`passes/aarch64/opmap.rs`) re-stamps: isel brackets
-  every emitted machine op with its source op; RA/frame/placement stamp
+  every emitted machine op with its source op; RA and frame lowering stamp
   the code they create (or named synthetic roots: `isel:abi`, `regalloc`,
-  `frame`, `placement`). Machine blocks get their RA-time position
+  `frame`). Machine blocks get their RA-time position
   (`passes/aarch64/blockmap.rs`).
 - Backward passes (`crates/pliron-bpgo`: `BackwardPass`, `walk`): each is
   paired with a forward pass by name and puts the profile of the pass's

@@ -3,13 +3,13 @@
 //! the lowering itself.
 //!
 //! - [mir_census]: pure analysis (opt-in measurement), before the lowering.
-//! - [lower_dialect_mir]: cuda-oxide's `mir-lower` as a pass.
+//! - [lower_dialect_mir]: cuda-oxide's `mir-lower` as a pass, followed by
+//!   [erase_mir_types] for the MIR types it leaves on the importer's
+//!   llvm-dialect aggregate ops.
 //! - [linkage]: function linkage across the lowering (module attribute in,
 //!   `llvm.func` linkage out), right after it.
 //! - [function_addresses]: the importer's deferred function addresses
 //!   (`ll.func_addr`) become `llvm.addressof`.
-//! - [erase_mir_types]: `llvm.ptr` for the `mir.ptr` the lowering leaves in
-//!   the importer's llvm-dialect aggregate ops, last.
 //!
 //! Constraints, verified against the pinned `mir-lower`: its conversion
 //! claims every `mir.*`/`nvvm.*` op and fails on one it has no arm for;
@@ -29,14 +29,13 @@ pub mod mir_census;
 
 /// The default order of the stage from imported `mir` to the LLVM dialect:
 /// the measurement pass, the lowering, and the passes that complete it for
-/// crabbit's module (linkage stamp, deferred function addresses, residual
-/// `mir.ptr` types). crabbit-config builds pipelines from this order.
+/// crabbit's module (linkage stamp, deferred function addresses).
+/// crabbit-config builds pipelines from this order.
 pub const DEFAULT_ORDER: &[&str] = &[
     mir_census::PASS_NAME,
     "lower-dialect-mir",
     linkage::PASS_NAME,
     function_addresses::PASS_NAME,
-    erase_mir_types::PASS_NAME,
 ];
 
 /// The pass of this stage called `name`; `label` is the census record's
@@ -49,7 +48,6 @@ pub fn construct(name: &str, label: Option<&str>) -> Option<Box<dyn Pass>> {
         function_addresses::PASS_NAME => {
             Box::new(function_addresses::MaterializeFunctionAddressesPass)
         }
-        erase_mir_types::PASS_NAME => Box::new(erase_mir_types::EraseMirTypesPass),
         _ => return None,
     })
 }

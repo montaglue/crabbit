@@ -518,34 +518,20 @@ fn block_successors(
         .iter()
         .enumerate()
         .map(|(index, insts)| {
+            // A block ends in its terminator, which names every successor;
+            // a block without one (only in hand-built IR) falls through.
             let mut successors = BTreeSet::new();
-            let mut has_unconditional_branch = false;
-            let mut terminates = false;
+            let mut terminated = false;
             for op in insts {
-                let Some(opcode) = aarch64_ops::opcode(ctx, *op) else {
-                    continue;
-                };
-                match opcode {
-                    aarch64_ops::BOp::OPCODE => {
-                        has_unconditional_branch = true;
-                        if let Some(target) = aarch64_ops::target(ctx, *op)
-                            .and_then(|target| block_index.get(&target))
-                        {
-                            successors.insert(*target);
-                        }
+                terminated |= aarch64_ops::is_terminator(ctx, *op);
+                let op_ref = op.deref(ctx);
+                for succ in op_ref.successors() {
+                    if let Some(&succ) = block_index.get(&succ) {
+                        successors.insert(succ);
                     }
-                    aarch64_ops::BCondOp::OPCODE | aarch64_ops::CbnzOp::OPCODE => {
-                        if let Some(target) = aarch64_ops::target(ctx, *op)
-                            .and_then(|target| block_index.get(&target))
-                        {
-                            successors.insert(*target);
-                        }
-                    }
-                    aarch64_ops::RetOp::OPCODE | aarch64_ops::BrkOp::OPCODE => terminates = true,
-                    _ => {}
                 }
             }
-            if !has_unconditional_branch && !terminates && index + 1 < block_insts.len() {
+            if !terminated && index + 1 < block_insts.len() {
                 successors.insert(index + 1);
             }
             successors.into_iter().collect()

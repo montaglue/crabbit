@@ -9,7 +9,7 @@
 //! (matched by opcode and `derived_from`, in order); an op it created
 //! stands in place of what it took out at the same spot, or belongs to the
 //! op it was stamped from; code from nothing is the pass's own cost, on the
-//! function (`frame.cycles`, `placement.cycles`, ...).
+//! function (`frame.cycles`, `abi.cycles`, ...).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -186,7 +186,6 @@ fn root_metric(root: i64) -> &'static str {
         roots::ISEL_ABI => "abi",
         roots::REGALLOC => "regalloc",
         roots::FRAME => "frame",
-        roots::PLACEMENT => "placement",
         roots::MIDEND => "midend",
         _ => "unattributed",
     }

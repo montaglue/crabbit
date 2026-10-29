@@ -4,13 +4,10 @@
 //! analysis](crate::passes::hot_path), modeled on LLVM's
 //! `MachineBlockPlacement`, which runs after register allocation and before
 //! branch relaxation. It lays the hottest control-flow chains out
-//! contiguously so that likely edges become fall-throughs, then rewrites
-//! branches against the new layout:
-//!
-//! - an unconditional `b` to the next block in layout is deleted
-//!   (fall-through);
-//! - a `b_cond` whose taken target became the next block is inverted so the
-//!   cold edge is the branch and the hot edge falls through.
+//! contiguously so that likely edges become fall-throughs. It only orders
+//! blocks: every block ends in a terminator naming all its successors, and
+//! the encoder turns the edge to the next block into a fall-through (a `b`
+//! to it is not emitted, a `b_cond` whose taken block is next is inverted).
 //!
 //! Edge probabilities come from the `branch_weights` transferred onto
 //! conditional branches by instruction selection (the machine-level analogue
@@ -22,9 +19,9 @@ use std::collections::HashMap;
 use crate::{
     context::{Context, Ptr},
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
-    dialects::aarch64::ops::{self as aarch64_ops, BCondOp, BOp, BrkOp, CbnzOp, FuncOp, RetOp},
+    dialects::aarch64::ops::{self as aarch64_ops, FuncOp},
     dialects::builtin::op_interfaces::OneRegionInterface,
-    ir::{basic_block::BasicBlock, operation::Operation},
+    ir::basic_block::BasicBlock,
     linked_list::ContainsLinkedList,
     passes::hot_path::{CfgEdge, HotPathInfo},
 };
@@ -40,7 +37,7 @@ impl Pass for Aarch64BlockPlacementPass {
 
     fn run(
         &mut self,
-        root: Ptr<Operation>,
+        root: Ptr<crate::ir::operation::Operation>,
         ctx: &mut Context,
         _analyses: &mut AnalysisManager,
     ) -> pliron::result::Result<PassResult> {
@@ -63,12 +60,8 @@ fn place_blocks(ctx: &mut Context, func: FuncOp) {
         return;
     }
 
-    // Phase 0: make every fall-through explicit so reordering cannot change
-    // behavior (and the pass stays correct on its own output).
-    materialize_fallthrough_branches(ctx, &blocks);
-
-    // Phase 1: recover the CFG from the branches' successor blocks and read
-    // the branch weights left by instruction selection.
+    // Phase 1: the CFG, from each block's terminator, with the branch
+    // weights left by instruction selection.
     let block_index: HashMap<_, _> = blocks
         .iter()
         .enumerate()
@@ -86,86 +79,11 @@ fn place_blocks(ctx: &mut Context, func: FuncOp) {
         blocks[index].unlink(ctx);
         blocks[index].insert_at_back(region, ctx);
     }
-
-    // Phase 4: turn branches along the layout into fall-throughs.
-    let layout: Vec<_> = region.deref(ctx).iter(ctx).collect();
-    simplify_branches_for_layout(ctx, &layout);
 }
 
-/// Kinds of control transfer recognized in machine blocks.
-enum ControlFlowOp {
-    /// `b_cond`/`cbnz`: branches to its successor block, otherwise falls
-    /// through.
-    Conditional {
-        op: Ptr<Operation>,
-        target: Ptr<BasicBlock>,
-        weights: Option<(u32, u32)>,
-    },
-    /// `b`: always branches to its successor block.
-    Unconditional {
-        op: Ptr<Operation>,
-        target: Ptr<BasicBlock>,
-    },
-    /// `ret`/`brk`: leaves the function.
-    Exit,
-}
-
-fn classify_control_flow(ctx: &Context, op: Ptr<Operation>) -> Option<ControlFlowOp> {
-    let op_obj = Operation::get_op_dyn(op, ctx);
-    if op_obj.downcast_ref::<RetOp>().is_some() || op_obj.downcast_ref::<BrkOp>().is_some() {
-        return Some(ControlFlowOp::Exit);
-    }
-    let target = aarch64_ops::target(ctx, op)?;
-    if op_obj.downcast_ref::<BOp>().is_some() {
-        return Some(ControlFlowOp::Unconditional { op, target });
-    }
-    if op_obj.downcast_ref::<BCondOp>().is_some() || op_obj.downcast_ref::<CbnzOp>().is_some() {
-        return Some(ControlFlowOp::Conditional {
-            op,
-            target,
-            weights: aarch64_ops::branch_weights(ctx, op),
-        });
-    }
-    None
-}
-
-/// The control-flow structure of a block: its conditional branches in order,
-/// then how the block ends (`None` means it falls through).
-fn block_control_flow(
-    ctx: &Context,
-    block: Ptr<BasicBlock>,
-) -> (Vec<ControlFlowOp>, Option<ControlFlowOp>) {
-    let mut conditionals = vec![];
-    for op in block.deref(ctx).iter(ctx) {
-        match classify_control_flow(ctx, op) {
-            Some(cond @ ControlFlowOp::Conditional { .. }) => conditionals.push(cond),
-            Some(end @ (ControlFlowOp::Unconditional { .. } | ControlFlowOp::Exit)) => {
-                return (conditionals, Some(end));
-            }
-            None => {}
-        }
-    }
-    (conditionals, None)
-}
-
-fn materialize_fallthrough_branches(ctx: &mut Context, blocks: &[Ptr<BasicBlock>]) {
-    for pair in blocks.windows(2) {
-        let (block, next) = (pair[0], pair[1]);
-        let (_, end) = block_control_flow(ctx, block);
-        if end.is_none() {
-            let branch = aarch64_ops::b(ctx, next);
-            branch.insert_at_back(block, ctx);
-            if super::blockmap::blockmap_enabled() {
-                super::opmap::set_derived_from(ctx, branch, super::opmap::roots::PLACEMENT);
-            }
-        }
-    }
-}
-
-/// Outgoing edges of each block. Weighted conditional branches yield weighted
-/// edges; everything else is left to the analysis' heuristics. Blocks with
-/// more than one conditional branch keep unweighted edges, since a single
-/// `[taken, not-taken]` pair no longer describes them.
+/// Outgoing edges of each block, from its terminator: a conditional
+/// branch's taken and not-taken edges carry its `[taken, not-taken]`
+/// weights; everything else is left to the analysis' heuristics.
 fn machine_cfg_edges(
     ctx: &Context,
     blocks: &[Ptr<BasicBlock>],
@@ -174,35 +92,25 @@ fn machine_cfg_edges(
     blocks
         .iter()
         .map(|&block| {
-            let (conditionals, end) = block_control_flow(ctx, block);
-            let simple = conditionals.len() == 1;
-            let mut edges = vec![];
-            let mut not_taken_weight = None;
-            for conditional in &conditionals {
-                let ControlFlowOp::Conditional {
-                    target, weights, ..
-                } = conditional
-                else {
-                    unreachable!("block_control_flow only collects conditionals");
-                };
-                let weights = weights.filter(|_| simple);
-                if let Some(&to) = block_index.get(target) {
-                    edges.push(CfgEdge {
-                        to,
-                        weight: weights.map(|(taken, _)| taken),
-                    });
-                }
-                not_taken_weight = weights.map(|(_, not_taken)| not_taken);
-            }
-            if let Some(ControlFlowOp::Unconditional { target, .. }) = end
-                && let Some(&to) = block_index.get(&target)
-            {
-                edges.push(CfgEdge {
-                    to,
-                    weight: not_taken_weight,
-                });
-            }
-            edges
+            let Some(terminator) = block.deref(ctx).get_tail() else {
+                return vec![];
+            };
+            let weights = aarch64_ops::branch_weights(ctx, terminator);
+            let edge_weights = [
+                weights.map(|(taken, _)| taken),
+                weights.map(|(_, not_taken)| not_taken),
+            ];
+            let successors: Vec<_> = terminator.deref(ctx).successors().collect();
+            successors
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, succ)| {
+                    Some(CfgEdge {
+                        to: *block_index.get(&succ)?,
+                        weight: edge_weights.get(index).copied().flatten(),
+                    })
+                })
+                .collect()
         })
         .collect()
 }
@@ -247,62 +155,16 @@ fn chain_order(
     order
 }
 
-fn simplify_branches_for_layout(ctx: &mut Context, layout: &[Ptr<BasicBlock>]) {
-    for (index, &block) in layout.iter().enumerate() {
-        let Some(&next) = layout.get(index + 1) else {
-            continue;
-        };
-        let (conditionals, end) = block_control_flow(ctx, block);
-        let Some(ControlFlowOp::Unconditional {
-            op: branch_op,
-            target: branch_target,
-        }) = end
-        else {
-            continue;
-        };
-
-        if branch_target == next {
-            // The unconditional branch just falls through now.
-            Operation::erase(branch_op, ctx);
-            continue;
-        }
-
-        // `b_cond taken; b other` where `taken` is the next block: invert the
-        // condition so the hot edge falls through and the cold edge branches.
-        if let [
-            ControlFlowOp::Conditional {
-                op: cond_op,
-                target: cond_target,
-                weights,
-            },
-        ] = conditionals.as_slice()
-            && *cond_target == next
-        {
-            let op_obj = Operation::get_op_dyn(*cond_op, ctx);
-            if op_obj.downcast_ref::<BCondOp>().is_none() {
-                continue;
-            }
-            let Some(cond) = aarch64_ops::cond(ctx, *cond_op) else {
-                continue;
-            };
-            aarch64_ops::set_cond(ctx, *cond_op, cond.invert());
-            aarch64_ops::set_target(ctx, *cond_op, branch_target);
-            if let Some((taken, not_taken)) = weights {
-                aarch64_ops::set_branch_weights(ctx, *cond_op, *not_taken, *taken);
-            }
-            Operation::erase(branch_op, ctx);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ll::LinkageAttr;
     use crate::{
         common_traits::Named,
-        dialects::aarch64::{self, attributes::ConditionCode},
-        ir::op::Op,
+        dialects::aarch64::{
+            self, attributes::ConditionCode, op_interfaces::BinarySerializableOpInterface,
+        },
+        ir::{op::op_cast, operation::Operation},
     };
 
     fn context() -> Context {
@@ -326,6 +188,15 @@ mod tests {
             .collect()
     }
 
+    /// The bytes `block`'s terminator encodes to in the current layout.
+    fn terminator_bytes(ctx: &Context, block: Ptr<BasicBlock>) -> u64 {
+        let tail = block.deref(ctx).get_tail().unwrap();
+        let op = Operation::get_op_dyn(tail, ctx);
+        op_cast::<dyn BinarySerializableOpInterface>(&*op)
+            .unwrap()
+            .byte_len(ctx)
+    }
+
     #[test]
     fn hot_successor_is_laid_out_as_fallthrough() {
         let mut ctx = context();
@@ -334,10 +205,9 @@ mod tests {
         let (cold, cold_label) = new_block(&mut ctx, func, "cold");
         let (hot, hot_label) = new_block(&mut ctx, func, "hot");
 
-        let cond = aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, cold);
+        let cond = aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, cold, hot);
         aarch64_ops::set_branch_weights(&mut ctx, cond, 1, 99);
         cond.insert_at_back(entry, &ctx);
-        aarch64_ops::b(&mut ctx, hot).insert_at_back(entry, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(cold, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(hot, &ctx);
 
@@ -348,26 +218,25 @@ mod tests {
             layout_labels(&ctx, func),
             [entry_label, hot_label, cold_label]
         );
-        // The branch to the hot block became a fall-through; the cold branch
-        // stayed, untouched.
+        // The terminator is untouched; with the hot block next, it encodes
+        // as the one word `b.eq cold`.
         let tail = entry.deref(&ctx).get_tail().unwrap();
-        assert!(Operation::get_opid(tail, &ctx) == BCondOp::get_opid_static());
         assert!(aarch64_ops::target(&ctx, tail) == Some(cold));
-        assert_eq!(aarch64_ops::cond(&ctx, tail), Some(ConditionCode::Eq));
+        assert!(aarch64_ops::not_taken(&ctx, tail) == Some(hot));
+        assert_eq!(terminator_bytes(&ctx, entry), 4);
     }
 
     #[test]
-    fn branch_to_hot_fallthrough_is_inverted() {
+    fn branch_to_hot_fallthrough_encodes_inverted() {
         let mut ctx = context();
         let func = FuncOp::new(&mut ctx, "f".try_into().unwrap(), LinkageAttr::External);
         let entry = func.entry_block(&ctx);
         let (hot, hot_label) = new_block(&mut ctx, func, "hot");
         let (cold, cold_label) = new_block(&mut ctx, func, "cold");
 
-        let cond = aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, hot);
+        let cond = aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, hot, cold);
         aarch64_ops::set_branch_weights(&mut ctx, cond, 99, 1);
         cond.insert_at_back(entry, &ctx);
-        aarch64_ops::b(&mut ctx, cold).insert_at_back(entry, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(hot, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(cold, &ctx);
 
@@ -378,13 +247,8 @@ mod tests {
             layout_labels(&ctx, func),
             [entry_label, hot_label, cold_label]
         );
-        // `b_cond eq hot; b cold` became `b_cond ne cold` falling through to
-        // the hot block, with the weights swapped to match.
-        let tail = entry.deref(&ctx).get_tail().unwrap();
-        assert!(Operation::get_opid(tail, &ctx) == BCondOp::get_opid_static());
-        assert_eq!(aarch64_ops::cond(&ctx, tail), Some(ConditionCode::Ne));
-        assert!(aarch64_ops::target(&ctx, tail) == Some(cold));
-        assert_eq!(aarch64_ops::branch_weights(&ctx, tail), Some((1, 99)));
+        // The taken block is next: one word, `b.ne cold`.
+        assert_eq!(terminator_bytes(&ctx, entry), 4);
     }
 
     #[test]
@@ -399,8 +263,7 @@ mod tests {
         aarch64_ops::b(&mut ctx, header).insert_at_back(entry, &ctx);
         // No branch weights anywhere: the loop heuristic must keep the body
         // on the fall-through path and leave only the loop-exit branch.
-        aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, exit).insert_at_back(header, &ctx);
-        aarch64_ops::b(&mut ctx, body).insert_at_back(header, &ctx);
+        aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, exit, body).insert_at_back(header, &ctx);
         aarch64_ops::b(&mut ctx, header).insert_at_back(body, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(exit, &ctx);
 
@@ -411,15 +274,11 @@ mod tests {
             layout_labels(&ctx, func),
             [entry_label, header_label, body_label, exit_label]
         );
-        // entry falls through into the loop header.
-        assert!(entry.deref(&ctx).get_tail().is_none());
-        // The header keeps only the conditional loop exit and falls through
-        // into the body.
-        let header_tail = header.deref(&ctx).get_tail().unwrap();
-        assert!(Operation::get_opid(header_tail, &ctx) == BCondOp::get_opid_static());
-        // The back edge cannot fall through and stays an explicit branch.
-        let body_tail = body.deref(&ctx).get_tail().unwrap();
-        assert!(Operation::get_opid(body_tail, &ctx) == BOp::get_opid_static());
+        // entry falls through into the loop header; the header encodes only
+        // the conditional loop exit; the back edge stays an explicit branch.
+        assert_eq!(terminator_bytes(&ctx, entry), 0);
+        assert_eq!(terminator_bytes(&ctx, header), 4);
+        assert_eq!(terminator_bytes(&ctx, body), 4);
     }
 
     #[test]
@@ -430,10 +289,9 @@ mod tests {
         let (cold, _cold_label) = new_block(&mut ctx, func, "cold");
         let (hot, _hot_label) = new_block(&mut ctx, func, "hot");
 
-        let cond = aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, cold);
+        let cond = aarch64_ops::b_cond(&mut ctx, ConditionCode::Eq, cold, hot);
         aarch64_ops::set_branch_weights(&mut ctx, cond, 1, 99);
         cond.insert_at_back(entry, &ctx);
-        aarch64_ops::b(&mut ctx, hot).insert_at_back(entry, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(cold, &ctx);
         aarch64_ops::ret(&mut ctx).insert_at_back(hot, &ctx);
 
@@ -441,7 +299,5 @@ mod tests {
         let first = layout_labels(&ctx, func);
         place_blocks(&mut ctx, func);
         assert_eq!(layout_labels(&ctx, func), first);
-        let tail = entry.deref(&ctx).get_tail().unwrap();
-        assert!(Operation::get_opid(tail, &ctx) == BCondOp::get_opid_static());
     }
 }

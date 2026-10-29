@@ -189,7 +189,10 @@ fn negated_i1_condition(ctx: &Context, cond: Value) -> Option<(Value, bool)> {
     Some((value, negated))
 }
 
-fn remove_unreachable_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
+/// Erase the blocks of `region` its entry block cannot reach, with their
+/// ops; returns whether any were erased. Works on any dialect whose blocks
+/// end in terminators.
+pub fn remove_unreachable_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
     let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
     let Some(&entry) = blocks.first() else {
         return false;

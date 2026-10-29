@@ -415,6 +415,11 @@ pub(super) fn import_function<'tcx>(
         let terminator = data.terminator();
         import_terminator(tcx, ctx, &state, insert_block, body, &terminator.kind)?;
     }
+    // Unwind edges are not imported, so blocks reached only by unwinding
+    // (cleanup paths) are unreachable: no block of the function may lack a
+    // path from its entry, or its uses of the entry's slots are not
+    // dominated by them.
+    pliron_ll::passes::llvm::simplify_cfg::remove_unreachable_blocks(ctx, region);
     Ok(())
 }
 
@@ -453,13 +458,17 @@ pub(super) fn declare_external_function(
         return;
     }
 
-    let result = result
-        .map(|ty| llvm_decl_type(ctx, ty))
-        .unwrap_or_else(|| llvm::types::VoidType::get(ctx).into());
-    let args = args
-        .into_iter()
-        .map(|arg| llvm_decl_type(ctx, arg))
-        .collect();
+    // The declaration's types are spelled the way the lowering spells types,
+    // so calls and declaration agree. A type the lowering cannot convert
+    // fails there, at the op that uses it.
+    let llvm_type = |ctx: &mut Context, ty| {
+        crabbit_mir::passes::erase_mir_types::llvm_type(ctx, ty).unwrap_or(ty)
+    };
+    let result = match result {
+        Some(ty) => llvm_type(ctx, ty),
+        None => llvm::types::VoidType::get(ctx).into(),
+    };
+    let args = args.into_iter().map(|arg| llvm_type(ctx, arg)).collect();
     let func_ty = llvm::types::FuncType::get(ctx, result, args, false);
     let func = new_llvm_func_decl(ctx, symbol, func_ty, LinkageAttr::ExternalLinkage);
     func.get_operation().insert_at_back(module_body, ctx);

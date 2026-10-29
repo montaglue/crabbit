@@ -61,13 +61,14 @@ the verifier's form:
   `materialize-function-addresses` turns it into the `llvm.addressof`
   right after the lowering.
 
-After `lower-dialect-mir`, three crabbit passes complete the module:
+`lower-dialect-mir` erases, right after the lowering, the MIR types left
+inside the llvm aggregate ops the lowering passes through (`mir.ptr`,
+signed and unsigned integers, named structs), with `mir-lower`'s own type
+mapping. Two crabbit passes then complete the module:
 `apply-module-linkage` (the importer records each function's linkage in
 the module attribute `crabbit_linkage`; the lowering builds `llvm.func`s
 fresh and keeps no custom attributes, while the `builtin.module` op and its
-attributes survive), `materialize-function-addresses`, and
-`erase-mir-types` (`llvm.ptr` for the `mir.ptr` left inside the llvm
-aggregate ops the lowering passes through).
+attributes survive) and `materialize-function-addresses`.
 
 ## Measuring the distance
 

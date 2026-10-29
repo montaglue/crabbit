@@ -1,62 +1,52 @@
-//! `erase-mir-types`: after `lower-dialect-mir`, substitute `llvm.ptr` for
-//! every `mir.ptr` left in the module's types.
+//! The types `mir-lower` leaves behind, and their LLVM-dialect spelling.
 //!
 //! crabbit's importer builds aggregate values with llvm-dialect ops
 //! (`llvm.undef`, `llvm.insert_value`, `llvm.extract_value`, `llvm.bitcast`)
-//! over llvm aggregate types whose pointer fields are `mir.ptr`. `mir-lower`
-//! converts the types of the ops it rewrites (every `mir.*` op, function
-//! signatures) and passes llvm ops through untouched, so `mir.ptr` survives
-//! in those ops' result types, inside their aggregate types, in block
-//! arguments, and in the callee types of calls to foreign symbols. The
-//! representation is the same — the lowering maps `mir.ptr`
-//! to the generic `llvm.ptr` for the ops it does convert — so this pass
-//! rewrites the remaining types in place, which leaves a module in the LLVM
-//! dialect alone. Named structs with a rewritten field take the name the
-//! importer gives their declaration-side mirror (`<name>__llvm`), so the two
-//! spellings meet.
+//! over llvm aggregate types whose fields are MIR-typed: `mir.ptr` pointers,
+//! signed and unsigned integers, named structs. `mir-lower` converts the
+//! types of the ops it rewrites (every `mir.*` op, function signatures) and
+//! passes llvm ops through untouched, so the MIR types survive in those
+//! ops' result types, inside their aggregate types, in block arguments, and
+//! in types held by attributes (callee types of calls to foreign symbols,
+//! global types, function types). [erase] rewrites them in place, right
+//! after the lowering
+//! ([LowerDialectMirPass](super::lower_dialect_mir::LowerDialectMirPass)),
+//! which leaves a module in the LLVM dialect alone.
+//!
+//! [llvm_type] is the one mapping, and it is the lowering's own
+//! ([mir_lower::convert::types::convert_type]: `llvm.ptr` for `mir.ptr`,
+//! signless integers, unnamed structs), so what the lowering made and what
+//! it left meet; the importer spells its declarations with it too.
 
 use std::collections::HashMap;
 
-use dialect_mir::types::MirPtrType;
+use mir_lower::{convert::types::convert_type, type_conversion_interface::MirConvertibleType};
 use pliron::{
     basic_block::BasicBlock,
-    builtin::{op_interfaces::CallOpInterface as _, type_interfaces::FunctionTypeInterface as _},
+    builtin::{
+        attributes::{IntegerAttr, TypeAttr},
+        type_interfaces::FunctionTypeInterface as _,
+        types::{IntegerType, Signedness},
+    },
     context::{Context, Ptr},
+    identifier::Identifier,
     linked_list::ContainsLinkedList as _,
     operation::Operation,
     result::Result,
-    r#type::{TypeHandle, Typed as _},
+    r#type::{TypeHandle, Typed as _, type_impls},
 };
-use pliron_ll::conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged};
-use pliron_llvm::{
-    ops::CallOp,
-    types::{ArrayType, FuncType, PointerType, StructType},
-};
+use pliron_llvm::types::{FuncType, StructType};
 
-/// The pass name.
-pub const PASS_NAME: &str = "erase-mir-types";
+/// Rewrite every MIR type left under `root` to its [llvm_type]; returns the
+/// number of values and attributes rewritten.
+pub fn erase(ctx: &mut Context, root: Ptr<Operation>) -> Result<usize> {
+    Eraser::default().visit_op(ctx, root)
+}
 
-pub struct EraseMirTypesPass;
-
-impl Pass for EraseMirTypesPass {
-    fn name(&self) -> &str {
-        PASS_NAME
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let mut eraser = Eraser::default();
-        let rewritten = eraser.visit_op(ctx, root);
-        Ok(if rewritten > 0 {
-            changed()
-        } else {
-            unchanged()
-        })
-    }
+/// The LLVM-dialect spelling of `ty`, as the lowering spells it. A type
+/// with nothing to rewrite is returned as is.
+pub fn llvm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
+    Eraser::default().erase(ctx, ty)
 }
 
 /// Rewrites types, memoized per source type.
@@ -66,9 +56,9 @@ struct Eraser {
 }
 
 impl Eraser {
-    /// Rewrite the result and block-argument types under `op` (including
-    /// `op`'s own results); returns the number of values retyped.
-    fn visit_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> usize {
+    /// Rewrite the result types, block-argument types and attribute-held
+    /// types under `op` (including `op`'s own); returns the number rewritten.
+    fn visit_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<usize> {
         let mut rewritten = 0;
         let results: Vec<pliron::value::Value> = {
             let op_ref = op.deref(ctx);
@@ -77,18 +67,9 @@ impl Eraser {
                 .collect()
         };
         for result in results {
-            rewritten += self.retype(ctx, result);
+            rewritten += self.retype(ctx, result)?;
         }
-        // A call's callee type is an attribute, not a value type: the
-        // lowering builds it from the `mir.call`'s foreign signature.
-        if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-            let ty = call.callee_type(ctx);
-            let erased = self.erase(ctx, ty);
-            if erased != ty {
-                call.set_callee_type(ctx, erased);
-                rewritten += 1;
-            }
-        }
+        rewritten += self.rewrite_attributes(ctx, op)?;
         let blocks: Vec<Ptr<BasicBlock>> = op
             .deref(ctx)
             .regions()
@@ -97,108 +78,108 @@ impl Eraser {
         for block in blocks {
             let args: Vec<pliron::value::Value> = block.deref(ctx).arguments().collect();
             for arg in args {
-                rewritten += self.retype(ctx, arg);
+                rewritten += self.retype(ctx, arg)?;
             }
             let ops: Vec<Ptr<Operation>> = block.deref(ctx).iter(ctx).collect();
             for inner in ops {
-                rewritten += self.visit_op(ctx, inner);
+                rewritten += self.visit_op(ctx, inner)?;
             }
         }
-        rewritten
+        Ok(rewritten)
     }
 
-    fn retype(&mut self, ctx: &mut Context, value: pliron::value::Value) -> usize {
+    /// Types held by `op`'s attributes: [TypeAttr]s (callee, function,
+    /// global, element types) and the types of [IntegerAttr]s.
+    fn rewrite_attributes(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<usize> {
+        let held: Vec<(Identifier, TypeHandle, Option<IntegerAttr>)> = {
+            let attributes = &op.deref(ctx).attributes;
+            attributes
+                .0
+                .iter()
+                .filter_map(|(key, _)| {
+                    if let Some(attr) = attributes.get::<TypeAttr>(key) {
+                        Some((key.clone(), attr.get_type(ctx), None))
+                    } else {
+                        attributes
+                            .get::<IntegerAttr>(key)
+                            .map(|attr| (key.clone(), attr.get_type().into(), Some(attr.clone())))
+                    }
+                })
+                .collect()
+        };
+        let mut rewritten = 0;
+        for (key, ty, integer) in held {
+            let erased = self.erase(ctx, ty)?;
+            if erased == ty {
+                continue;
+            }
+            match integer {
+                None => op.deref_mut(ctx).attributes.set(key, TypeAttr::new(erased)),
+                Some(attr) => {
+                    let width = attr.get_type().deref(ctx).width();
+                    let signless = IntegerType::get(ctx, width, Signedness::Signless);
+                    op.deref_mut(ctx)
+                        .attributes
+                        .set(key, IntegerAttr::new(signless, attr.value()));
+                }
+            }
+            rewritten += 1;
+        }
+        Ok(rewritten)
+    }
+
+    fn retype(&mut self, ctx: &mut Context, value: pliron::value::Value) -> Result<usize> {
         let ty = value.get_type(ctx);
-        let erased = self.erase(ctx, ty);
+        let erased = self.erase(ctx, ty)?;
         if erased == ty {
-            return 0;
+            return Ok(0);
         }
         value.set_type(ctx, erased);
-        1
+        Ok(1)
     }
 
-    /// `ty` with `llvm.ptr` for every `mir.ptr` inside it.
-    fn erase(&mut self, ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
+    fn erase(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
         if let Some(done) = self.memo.get(&ty) {
-            return *done;
+            return Ok(*done);
         }
-        let erased = self.erase_uncached(ctx, ty);
+        let erased = self.erase_uncached(ctx, ty)?;
         self.memo.insert(ty, erased);
-        erased
+        Ok(erased)
     }
 
-    fn erase_uncached(&mut self, ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
-        enum Shape {
-            MirPtr,
-            Array(TypeHandle, u64),
-            Struct(
-                Option<pliron::identifier::Identifier>,
-                Vec<TypeHandle>,
-                pliron_llvm::types::StructLayout,
-            ),
-            Func(TypeHandle, Vec<TypeHandle>, bool),
-            Other,
-        }
-        let shape = {
+    fn erase_uncached(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
+        let (func, opaque, convertible) = {
             let ty_ref = ty.deref(ctx);
-            if ty_ref.is::<MirPtrType>() {
-                Shape::MirPtr
-            } else if let Some(array) = ty_ref.downcast_ref::<ArrayType>() {
-                Shape::Array(array.elem_type(), array.size())
-            } else if let Some(st) = ty_ref.downcast_ref::<StructType>() {
-                if st.is_opaque() {
-                    Shape::Other
-                } else {
-                    Shape::Struct(st.name(), st.fields().collect(), st.layout())
-                }
-            } else if let Some(func) = ty_ref.downcast_ref::<FuncType>() {
-                Shape::Func(
+            let func = ty_ref.downcast_ref::<FuncType>().map(|func| {
+                (
                     func.result_type(),
                     func.arg_types().to_vec(),
                     func.is_var_arg(),
                 )
-            } else {
-                Shape::Other
-            }
+            });
+            let opaque = ty_ref
+                .downcast_ref::<StructType>()
+                .is_some_and(|st| st.is_opaque());
+            (func, opaque, type_impls::<dyn MirConvertibleType>(&*ty_ref))
         };
-        match shape {
-            Shape::MirPtr => PointerType::get(ctx, 0).into(),
-            Shape::Array(elem, size) => {
-                let erased = self.erase(ctx, elem);
-                if erased == elem {
-                    ty
-                } else {
-                    ArrayType::get(ctx, erased, size).into()
-                }
-            }
-            Shape::Struct(name, fields, layout) => {
-                let erased: Vec<TypeHandle> = fields.iter().map(|f| self.erase(ctx, *f)).collect();
-                if erased == fields {
-                    return ty;
-                }
-                match name {
-                    Some(name) => {
-                        let mirror = format!("{name}__llvm")
-                            .try_into()
-                            .expect("suffixing a legal identifier keeps it legal");
-                        StructType::get_named(ctx, mirror, Some((erased, layout)))
-                            .expect("the __llvm mirror name maps 1:1 to this field set")
-                            .into()
-                    }
-                    None => StructType::get_unnamed(ctx, (erased, layout)).into(),
-                }
-            }
-            Shape::Func(result, args, variadic) => {
-                let erased_result = self.erase(ctx, result);
-                let erased_args: Vec<TypeHandle> =
-                    args.iter().map(|a| self.erase(ctx, *a)).collect();
-                if erased_result == result && erased_args == args {
-                    ty
-                } else {
-                    FuncType::get(ctx, erased_result, erased_args, variadic).into()
-                }
-            }
-            Shape::Other => ty,
+        // Function types are not the lowering's to convert here (it builds
+        // signatures itself): their parts are.
+        if let Some((result, args, variadic)) = func {
+            let erased_result = self.erase(ctx, result)?;
+            let erased_args = args
+                .iter()
+                .map(|arg| self.erase(ctx, *arg))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(if erased_result == result && erased_args == args {
+                ty
+            } else {
+                FuncType::get(ctx, erased_result, erased_args, variadic).into()
+            });
         }
+        // An opaque struct has no body to convert.
+        if opaque || !convertible {
+            return Ok(ty);
+        }
+        convert_type(ctx, ty).map_err(|e| pliron::input_error_noloc!("{e}"))
     }
 }

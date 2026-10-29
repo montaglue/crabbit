@@ -43,7 +43,7 @@ dict_key!(ATTR_KEY_INLINED_FROM, "ll_inlined_from");
 
 /// Synthetic `derived_from` roots: code created from nothing is attributed
 /// to the pass that created it. Negative so they can never collide with
-/// LLVM op ids; the ingestion tool renders them by [root_name].
+/// LLVM op ids.
 pub mod roots {
     /// ABI glue emitted by instruction selection before any source op:
     /// link-register save, incoming-argument moves and loads, sret spill.
@@ -53,30 +53,14 @@ pub mod roots {
     /// Frame prologue/epilogue (`sub sp`/`add sp` and their materialized
     /// offsets).
     pub const FRAME: i64 = -3;
-    /// Branches materialized by block placement for what used to be
-    /// fallthrough.
-    pub const PLACEMENT: i64 = -4;
-    /// Final-IR ops that no pass stamped (reported by the sidecar so
-    /// nothing is silently dropped; [`unstamped_op_count`](crate::passes::aarch64::opmap::unstamped_op_count)
+    /// Final-IR ops that no pass stamped (counted, so nothing is silently
+    /// dropped; [`unstamped_op_count`](crate::passes::aarch64::opmap::unstamped_op_count)
     /// audits this).
     pub const UNATTRIBUTED: i64 = -5;
     /// Ops created by a mid-end pass that declared no adjoint for them —
     /// visible as a category so imprecise mid-end stamping is loud, not
     /// silent.
     pub const MIDEND: i64 = -6;
-}
-
-/// Human-readable name of a synthetic root id, for sidecars/reports.
-pub fn root_name(id: i64) -> Option<&'static str> {
-    Some(match id {
-        roots::ISEL_ABI => "isel:abi",
-        roots::REGALLOC => "regalloc",
-        roots::FRAME => "frame",
-        roots::PLACEMENT => "placement",
-        roots::UNATTRIBUTED => "unattributed",
-        roots::MIDEND => "midend",
-        _ => return None,
-    })
 }
 
 /// Stamps LLVM-level op ids at the RA boundary when [blockmap_enabled];

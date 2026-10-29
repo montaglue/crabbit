@@ -4,10 +4,12 @@ use crate::{
     common_traits::Named,
     context::{Context, Ptr},
     ir::{basic_block::BasicBlock, operation::Operation},
+    linked_list::LinkedList as _,
     result::CrabbitResult,
 };
 
 use super::{
+    attributes::ConditionCode,
     op_interfaces::{
         Aarch64Opcode, BinaryEncoding, BinaryFixup, BinarySerializationContext, FixupKind,
     },
@@ -108,9 +110,9 @@ pub(super) fn encode_inst(
                 }),
             ));
         }
-        ops::BOp::OPCODE => encode_b(ctx, refs.block_offsets, op, pc)?,
-        ops::BCondOp::OPCODE => encode_b_cond(ctx, refs.block_offsets, op, pc)?,
-        ops::CbnzOp::OPCODE => encode_cbnz(ctx, refs.block_offsets, op, pc)?,
+        ops::BOp::OPCODE | ops::BCondOp::OPCODE | ops::CbnzOp::OPCODE => {
+            return encode_branch(ctx, refs.block_offsets, op, opcode, pc);
+        }
         _ => encode_fixed_inst(ctx, op, opcode).ok_or_else(|| {
             crate::input_error_noloc!(
                 "unencodable AArch64 instruction `{}` rd={:?} rn={:?} imm={:?}",
@@ -1097,12 +1099,21 @@ fn encode_call(
     ))
 }
 
-/// The fixed byte length of an instruction's encoding, used by the layout
-/// passes (block offsets, function offsets) before any bytes are emitted.
-/// Every instruction is one 4-byte word except the pc-relative address
-/// materializations, which are a fixed 12-byte sequence (see
-/// [encode_pc_relative_address]).
-pub(super) fn byte_len_for(opcode: Aarch64Opcode) -> u64 {
+/// The byte length of an instruction's encoding, used by the layout passes
+/// (block offsets, function offsets) before any bytes are emitted: a
+/// branch's depends on which of its blocks follows it in the layout (see
+/// [branch_words]); every other instruction's is fixed ([byte_len_for]).
+pub(super) fn byte_len(ctx: &Context, op: Ptr<Operation>, opcode: Aarch64Opcode) -> u64 {
+    match branch_words(ctx, op, opcode) {
+        Some(words) => 4 * words.len() as u64,
+        None => byte_len_for(opcode),
+    }
+}
+
+/// The fixed byte length of a non-branch instruction's encoding: one
+/// 4-byte word, except the pc-relative address materializations, which are
+/// a fixed 12-byte sequence (see [encode_pc_relative_address]).
+fn byte_len_for(opcode: Aarch64Opcode) -> u64 {
     if opcode == ops::AdrLiteralOp::OPCODE || opcode == ops::AdrFunctionOp::OPCODE {
         12
     } else {
@@ -1172,13 +1183,95 @@ fn encode_adr_function(
     encode_pc_relative_address(rd, delta, "function address")
 }
 
-fn encode_b(
+/// One machine word of a branch terminator.
+enum BranchWord {
+    /// `b target`.
+    B(Ptr<BasicBlock>),
+    /// `b.cond target`.
+    BCond(ConditionCode, Ptr<BasicBlock>),
+    /// `cbnz target`.
+    Cbnz(Ptr<BasicBlock>),
+}
+
+/// The words a branch terminator encodes to, given the block that follows
+/// its own in the layout; `None` for an op that is not a branch. A branch
+/// to the next block falls through:
+///
+/// - `b next` is nothing;
+/// - `b_cond c, taken, next` is `b.c taken`; `b_cond c, next, other` is
+///   `b.!c other`; otherwise `b.c taken; b not_taken`;
+/// - `cbnz taken, next` is `cbnz taken`; otherwise `cbnz taken; b not_taken`.
+fn branch_words(
+    ctx: &Context,
+    op: Ptr<Operation>,
+    opcode: Aarch64Opcode,
+) -> Option<Vec<BranchWord>> {
+    if opcode != ops::BOp::OPCODE && opcode != ops::BCondOp::OPCODE && opcode != ops::CbnzOp::OPCODE
+    {
+        return None;
+    }
+    let next = op
+        .deref(ctx)
+        .get_parent_block()
+        .and_then(|block| block.deref(ctx).get_next());
+    let taken = ops::target(ctx, op)?;
+    if opcode == ops::BOp::OPCODE {
+        return Some(if Some(taken) == next {
+            vec![]
+        } else {
+            vec![BranchWord::B(taken)]
+        });
+    }
+    let not_taken = ops::not_taken(ctx, op)?;
+    if opcode == ops::CbnzOp::OPCODE {
+        let mut words = vec![BranchWord::Cbnz(taken)];
+        if Some(not_taken) != next {
+            words.push(BranchWord::B(not_taken));
+        }
+        return Some(words);
+    }
+    let cond = ops::cond(ctx, op)?;
+    Some(if Some(not_taken) == next {
+        vec![BranchWord::BCond(cond, taken)]
+    } else if Some(taken) == next {
+        vec![BranchWord::BCond(cond.invert(), not_taken)]
+    } else {
+        vec![BranchWord::BCond(cond, taken), BranchWord::B(not_taken)]
+    })
+}
+
+fn encode_branch(
     ctx: &Context,
     block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
     op: Ptr<Operation>,
+    opcode: Aarch64Opcode,
     pc: u64,
-) -> CrabbitResult<u32> {
-    let target = branch_target(ctx, block_offsets, op)?;
+) -> CrabbitResult<BinaryEncoding> {
+    let words = branch_words(ctx, op, opcode).ok_or_else(|| {
+        crate::input_error_noloc!("branch is missing its target blocks or condition code")
+    })?;
+    let mut bytes = Vec::with_capacity(4 * words.len());
+    for (index, word) in words.into_iter().enumerate() {
+        let pc = pc + 4 * index as u64;
+        let word = match word {
+            BranchWord::B(target) => encode_b(block_offset(ctx, block_offsets, target)?, pc)?,
+            BranchWord::BCond(cond, target) => {
+                encode_b_cond(cond, block_offset(ctx, block_offsets, target)?, pc)?
+            }
+            BranchWord::Cbnz(target) => {
+                let rn = xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32;
+                encode_cbnz(rn, block_offset(ctx, block_offsets, target)?, pc)?
+            }
+        };
+        bytes.extend(word.to_le_bytes());
+    }
+    Ok(BinaryEncoding {
+        bytes,
+        fixups: vec![],
+    })
+}
+
+fn encode_b(target: u64, pc: u64) -> CrabbitResult<u32> {
     let delta_words = ((target as i64) - (pc as i64)) / 4;
     if !(-(1 << 25)..(1 << 25)).contains(&delta_words) {
         return Err(crate::input_error_noloc!("branch target is out of B range"));
@@ -1186,49 +1279,31 @@ fn encode_b(
     Ok(0x1400_0000 | ((delta_words as u32) & 0x03ff_ffff))
 }
 
-fn encode_cbnz(
-    ctx: &Context,
-    block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
-    op: Ptr<Operation>,
-    pc: u64,
-) -> CrabbitResult<u32> {
-    let target = branch_target(ctx, block_offsets, op)?;
+fn encode_cbnz(rn: u32, target: u64, pc: u64) -> CrabbitResult<u32> {
     let delta_words = ((target as i64) - (pc as i64)) / 4;
     if !(-(1 << 18)..(1 << 18)).contains(&delta_words) {
         return Err(crate::input_error_noloc!(
             "branch target is out of CBNZ range"
         ));
     }
-    let rn = xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32;
     Ok(0xb500_0000 | (((delta_words as u32) & 0x7ffff) << 5) | rn)
 }
 
-fn encode_b_cond(
-    ctx: &Context,
-    block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
-    op: Ptr<Operation>,
-    pc: u64,
-) -> CrabbitResult<u32> {
-    let target = branch_target(ctx, block_offsets, op)?;
+fn encode_b_cond(cond: ConditionCode, target: u64, pc: u64) -> CrabbitResult<u32> {
     let delta_words = ((target as i64) - (pc as i64)) / 4;
     if !(-(1 << 18)..(1 << 18)).contains(&delta_words) {
         return Err(crate::input_error_noloc!(
             "branch target is out of B.cond range"
         ));
     }
-    let cond = ops::cond(ctx, op).ok_or_else(|| {
-        crate::input_error_noloc!("aarch64 `b_cond` is missing its condition code")
-    })?;
     Ok(0x5400_0000 | (((delta_words as u32) & 0x7ffff) << 5) | cond.encoding() as u32)
 }
 
-fn branch_target(
+fn block_offset(
     ctx: &Context,
     block_offsets: &HashMap<Ptr<BasicBlock>, u64>,
-    op: Ptr<Operation>,
+    target: Ptr<BasicBlock>,
 ) -> CrabbitResult<u64> {
-    let target = ops::target(ctx, op)
-        .ok_or_else(|| crate::input_error_noloc!("branch has no target block"))?;
     block_offsets.get(&target).copied().ok_or_else(|| {
         crate::input_error_noloc!(
             "branch target `{}` is outside the enclosing function",

@@ -96,7 +96,7 @@ results.csv; profiles under profiles/. Support added:
 
 - Backward passes cover instruction selection, every aarch64 machine pass
   and the whole mid-end; profiles reach every snapshot from
-  `erase-mir-types` to the encoder. The MIR-level passes have none yet.
+  `apply-module-linkage` to the encoder. The MIR-level passes have none yet.
 - E3 holds (`backward_pgo.rs`); end to end on `gemm_tiled` CPU, 99.9% of
   the cycle samples land on traced code and the total is the same at
   every snapshot reached.

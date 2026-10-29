@@ -12,8 +12,8 @@ use crate::{
     dialects::builtin::{
         attributes::{IntegerAttr, StringAttr},
         op_interfaces::{
-            IsolatedFromAboveInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
-            OneRegionInterface, SymbolOpInterface,
+            IsTerminatorInterface, IsolatedFromAboveInterface, NOpdsInterface, NRegionsInterface,
+            NResultsInterface, OneRegionInterface, SymbolOpInterface,
         },
         types::{IntegerType, Signedness},
     },
@@ -509,10 +509,17 @@ pub fn b(ctx: &mut Context, target: Ptr<BasicBlock>) -> Ptr<Operation> {
     op
 }
 
-pub fn cbnz(ctx: &mut Context, rn: Register, target: Ptr<BasicBlock>) -> Ptr<Operation> {
+/// `cbnz rn` to `taken`, else to `not_taken`: the block's terminator.
+pub fn cbnz(
+    ctx: &mut Context,
+    rn: Register,
+    taken: Ptr<BasicBlock>,
+    not_taken: Ptr<BasicBlock>,
+) -> Ptr<Operation> {
     let op = CbnzOp::new(ctx).op;
     set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), rn);
-    set_target(ctx, op, target);
+    set_target(ctx, op, taken);
+    set_not_taken(ctx, op, not_taken);
     op
 }
 
@@ -523,10 +530,17 @@ pub fn cmp(ctx: &mut Context, rn: Register, rm: Register) -> Ptr<Operation> {
     op
 }
 
-pub fn b_cond(ctx: &mut Context, cond: ConditionCode, target: Ptr<BasicBlock>) -> Ptr<Operation> {
+/// `b.cond` to `taken`, else to `not_taken`: the block's terminator.
+pub fn b_cond(
+    ctx: &mut Context,
+    cond: ConditionCode,
+    taken: Ptr<BasicBlock>,
+    not_taken: Ptr<BasicBlock>,
+) -> Ptr<Operation> {
     let op = BCondOp::new(ctx).op;
     set_cond(ctx, op, cond);
-    set_target(ctx, op, target);
+    set_target(ctx, op, taken);
+    set_not_taken(ctx, op, not_taken);
     op
 }
 
@@ -641,10 +655,23 @@ pub fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<String> {
         .map(|attr| -> String { attr.clone().into() })
 }
 
-/// A branch's target block: its first (and only) CFG successor.
+/// A branch's target block: its first CFG successor (the taken edge of a
+/// conditional branch).
 pub fn target(ctx: &Context, op: Ptr<Operation>) -> Option<Ptr<BasicBlock>> {
     let op_ref = op.deref(ctx);
     (op_ref.get_num_successors() > 0).then(|| op_ref.get_successor(0))
+}
+
+/// Whether `op` ends its block (a branch, `ret` or `brk`).
+pub fn is_terminator(ctx: &Context, op: Ptr<Operation>) -> bool {
+    let operation = Operation::get_op_dyn(op, ctx);
+    crate::ir::op::op_impls::<dyn IsTerminatorInterface>(&*operation)
+}
+
+/// A conditional branch's not-taken block: its second CFG successor.
+pub fn not_taken(ctx: &Context, op: Ptr<Operation>) -> Option<Ptr<BasicBlock>> {
+    let op_ref = op.deref(ctx);
+    (op_ref.get_num_successors() > 1).then(|| op_ref.get_successor(1))
 }
 
 pub fn literal_label(ctx: &Context, op: Ptr<Operation>) -> Option<String> {
@@ -667,12 +694,25 @@ pub fn set_reg(ctx: &mut Context, op: Ptr<Operation>, key: &str, value: Register
         .set(key.try_into().unwrap(), RegisterAttr(value));
 }
 
-/// Point a branch at `target`, as its first (and only) CFG successor.
+/// Point a branch at `target`, as its first CFG successor.
 pub fn set_target(ctx: &mut Context, op: Ptr<Operation>, target: Ptr<BasicBlock>) {
     if op.deref(ctx).get_num_successors() == 0 {
         Operation::push_successor(op, ctx, target);
     } else {
         Operation::replace_successor(op, ctx, 0, target);
+    }
+}
+
+/// Point a conditional branch's not-taken edge at `block`, as its second
+/// CFG successor (after its [target]).
+pub fn set_not_taken(ctx: &mut Context, op: Ptr<Operation>, block: Ptr<BasicBlock>) {
+    let successors = op.deref(ctx).get_num_successors();
+    match successors {
+        0 => panic!("a branch's target is set before its not-taken block"),
+        1 => {
+            Operation::push_successor(op, ctx, block);
+        }
+        _ => Operation::replace_successor(op, ctx, 1, block),
     }
 }
 
@@ -813,6 +853,9 @@ fn print_instruction_fields(
     if let Some(value) = target(ctx, op) {
         scalars.push(("target", format!("^{}", value.deref(ctx).unique_name(ctx))));
     }
+    if let Some(value) = not_taken(ctx, op) {
+        scalars.push(("else", format!("^{}", value.deref(ctx).unique_name(ctx))));
+    }
     if let Some(value) = callee(ctx, op) {
         scalars.push(("callee", value));
     }
@@ -930,6 +973,15 @@ fn apply_instruction_field(
         }
         ("shift", Text(text)) => set_shift(ctx, op, int_value(&text)?),
         ("target", Block(block)) => set_target(ctx, op, block),
+        ("else", Block(block)) => {
+            if target(ctx, op).is_none() {
+                return Err(input_error!(
+                    loc.clone(),
+                    "`else` comes after the branch's `target`"
+                ));
+            }
+            set_not_taken(ctx, op, block);
+        }
         ("callee", Text(text)) => set_callee(ctx, op, text),
         ("label", Text(text)) => set_literal_label(ctx, op, text),
         ("hex", Text(text)) => {
@@ -1028,8 +1080,8 @@ macro_rules! define_aarch64_instruction {
 
         #[op_interface_impl]
         impl BinarySerializableOpInterface for $name {
-            fn byte_len(&self, _ctx: &Context) -> u64 {
-                encoding::byte_len_for(Self::OPCODE)
+            fn byte_len(&self, ctx: &Context) -> u64 {
+                encoding::byte_len(ctx, self.op, Self::OPCODE)
             }
             fn literal(&self, ctx: &Context) -> Option<(String, Vec<u8>)> {
                 encoding::literal_for_inst(ctx, self.op, Self::OPCODE)
@@ -1269,6 +1321,21 @@ define_aarch64_instructions! {
     AddTprelLo12Nc => AddTprelLo12NcOp, "aarch64.add_tprel_lo12_nc", "add_tprel_lo12_nc", [ATTR_KEY_AARCH64_RD => Def, ATTR_KEY_AARCH64_RN => Use];
 }
 
+// Every block ends in exactly one of these, and it names all of the block's
+// CFG successors: a conditional branch carries its taken and not-taken
+// blocks; which edge falls through is the encoder's business, decided by the
+// final layout.
+#[op_interface_impl]
+impl IsTerminatorInterface for BOp {}
+#[op_interface_impl]
+impl IsTerminatorInterface for BCondOp {}
+#[op_interface_impl]
+impl IsTerminatorInterface for CbnzOp {}
+#[op_interface_impl]
+impl IsTerminatorInterface for RetOp {}
+#[op_interface_impl]
+impl IsTerminatorInterface for BrkOp {}
+
 fn opcode_for_operation_opt(ctx: &Context, op: Ptr<Operation>) -> Option<Aarch64Opcode> {
     let operation = Operation::get_op_dyn(op, ctx);
     crate::ir::op::op_cast::<dyn Aarch64InstructionOpInterface>(&*operation)
@@ -1371,11 +1438,15 @@ mod tests {
 
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let then_label = then_block.deref(&ctx).unique_name(&ctx);
-        let inst = b_cond(&mut ctx, ConditionCode::Ne, then_block);
+        let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
+        let else_label = else_block.deref(&ctx).unique_name(&ctx);
+        let inst = b_cond(&mut ctx, ConditionCode::Ne, then_block, else_block);
         set_branch_weights(&mut ctx, inst, 2000, 1);
         assert_eq!(
             plain(&ctx, inst),
-            format!("aarch64.b_cond cond=ne, target=^{then_label}, weights=[2000, 1]")
+            format!(
+                "aarch64.b_cond cond=ne, target=^{then_label}, else=^{else_label}, weights=[2000, 1]"
+            )
         );
 
         let inst = adr_literal(
@@ -1493,10 +1564,9 @@ mod tests {
         let exit = BasicBlock::new(&mut ctx, Some("exit".try_into().unwrap()), vec![]);
         exit.insert_at_back(func.get_region(&ctx), &ctx);
 
-        // A forward branch and a backedge: the parser must resolve a target
-        // before its block is defined and one that is already defined.
-        b_cond(&mut ctx, ConditionCode::Eq, exit).insert_at_back(entry, &ctx);
-        b(&mut ctx, entry).insert_at_back(entry, &ctx);
+        // A forward edge and a backedge: the parser must resolve a block
+        // before it is defined and one that is already defined.
+        b_cond(&mut ctx, ConditionCode::Eq, exit, entry).insert_at_back(entry, &ctx);
         ret(&mut ctx).insert_at_back(exit, &ctx);
 
         let printed = plain(&ctx, func.get_operation());
@@ -1507,9 +1577,9 @@ mod tests {
         // The reparsed branches reference the reparsed blocks by identity.
         let blocks: Vec<_> = parsed.get_region(&ctx).deref(&ctx).iter(&ctx).collect();
         assert_eq!(blocks.len(), 2);
-        let entry_ops: Vec<_> = blocks[0].deref(&ctx).iter(&ctx).collect();
-        assert!(target(&ctx, entry_ops[0]) == Some(blocks[1]));
-        assert!(target(&ctx, entry_ops[1]) == Some(blocks[0]));
+        let branch = blocks[0].deref(&ctx).get_tail().unwrap();
+        assert!(target(&ctx, branch) == Some(blocks[1]));
+        assert!(not_taken(&ctx, branch) == Some(blocks[0]));
     }
 }
 

@@ -1576,7 +1576,7 @@ fn lower_function(
                     if is_128_bit_integer(ctx, compare.lhs_ty) {
                         let condition =
                             lower_compare_value(ctx, insert_block, compare, &mut next_vreg)?;
-                        let branch = aarch64_ops::cbnz(ctx, condition, true_target);
+                        let branch = aarch64_ops::cbnz(ctx, condition, true_target, false_target);
                         aarch64_ops::set_branch_weights(
                             ctx,
                             branch,
@@ -1584,7 +1584,6 @@ fn lower_function(
                             not_taken_weight,
                         );
                         branch.insert_at_back(insert_block, ctx);
-                        aarch64_ops::b(ctx, false_target).insert_at_back(insert_block, ctx);
                         continue;
                     }
                     let lhs_ty = compare_operand_ty(ctx, compare.predicate.clone(), compare.lhs_ty);
@@ -1606,8 +1605,12 @@ fn lower_function(
                         "icmp rhs",
                     )?;
                     aarch64_ops::cmp(ctx, lhs, rhs).insert_at_back(insert_block, ctx);
-                    let branch =
-                        aarch64_ops::b_cond(ctx, condition_code(compare.predicate), true_target);
+                    let branch = aarch64_ops::b_cond(
+                        ctx,
+                        condition_code(compare.predicate),
+                        true_target,
+                        false_target,
+                    );
                     aarch64_ops::set_branch_weights(ctx, branch, taken_weight, not_taken_weight);
                     branch.insert_at_back(insert_block, ctx);
                 } else {
@@ -1618,11 +1621,10 @@ fn lower_function(
                         &mut next_vreg,
                         "branch condition",
                     )?;
-                    let branch = aarch64_ops::cbnz(ctx, condition, true_target);
+                    let branch = aarch64_ops::cbnz(ctx, condition, true_target, false_target);
                     aarch64_ops::set_branch_weights(ctx, branch, taken_weight, not_taken_weight);
                     branch.insert_at_back(insert_block, ctx);
                 }
-                aarch64_ops::b(ctx, false_target).insert_at_back(insert_block, ctx);
             } else {
                 return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
                     opid.to_string()
