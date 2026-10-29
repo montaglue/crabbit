@@ -116,6 +116,4 @@ ranking with vs without sinking" is itself an experiment worth running.
 - The `lifted` level of `op_costs.json` is keyed by RA-boundary ids, so an
   allocator registered as an extension can consume measured per-decision
   costs in place of its estimates.
-- The analysis server answers `run_costs` (heat-map join of an op_costs
-  payload with the ops at the `source`/`ra` boundary, plus per-root
-  semantic accounting).
+

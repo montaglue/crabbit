@@ -27,9 +27,8 @@ level re-derives meaning from it heuristically.
    ids (encoder already knows per-op byte lengths).
 2. **Ingest**: perf samples → machine-op costs (extend
    `profile_ingest.py`), in cycles.
-3. **Backward interpretation**: the analysis server replays the pipeline
-   (it already materializes IR at every pass boundary deterministically);
-   walking passes in REVERSE order, costs are aggregated by
+3. **Backward interpretation**: the trace already holds the IR at every
+   pass boundary; walking passes in REVERSE order, costs are aggregated by
    `derived_from`: cost(input op) = Σ cost(output ops derived from it).
    At every boundary the costs are cached as attributes ON THAT LEVEL'S
    IR, in that dialect's vocabulary — semantic accounting (spill cost,
@@ -87,7 +86,7 @@ results.csv; profiles under profiles/. Support added:
 
 ## Prerequisites and status
 
-Substrate (block frequencies) + analysis server replay: landed. Real
+Substrate (block frequencies): landed. Real
 sampling still blocked on `kernel.perf_event_paranoid=4` (user sudo
 needed).
 
@@ -142,6 +141,8 @@ machine → LLVM level):
   op_costs payload with the ops at the `source` (default) or `ra`
   boundary — per-op cost + line + snippet for heat-mapping any pass view,
   plus per-synthetic-root semantic accounting; cached per (run, level).
+  (Removed 2026-10-29 with the analysis server; backward passes writing
+  into traces replace it.)
 
 Still not started (at the time of this round): experiments E2/E4; real
 sampling was blocked on `kernel.perf_event_paranoid=4`; intermediate

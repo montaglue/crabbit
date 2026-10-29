@@ -161,6 +161,3 @@ cargo rustc --release -- -Zcodegen-backend=$PWD/target/debug/libmy_crabbit.so -C
 - **Testing.** `CRABBIT_TEST_BACKEND=<your dylib> cargo test -p backend-tests
   --test backend_smoke` (in the crabbit checkout) compiles and runs
   crabbit's fixture programs through your backend.
-- **The analysis server** (`crabbit-analysisd`) builds pipelines through
-  the same API but sees only what its own process registered; the public
-  binary registers nothing.

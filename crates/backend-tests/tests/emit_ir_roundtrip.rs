@@ -1,7 +1,7 @@
-//! CRABBIT_EMIT_IR round-trip gate (docs/SERVERD-PLAN.md): the post-
-//! lower-dialect-mir IR that crabbit emits must parse back and re-print to
-//! the identical text, for every fixture. This is what lets the resident
-//! driver/server consume rustc-emitted modules losslessly.
+//! CRABBIT_EMIT_IR round-trip gate: the post-lower-dialect-mir IR that
+//! crabbit emits must parse back and re-print to the identical text, for
+//! every fixture. This is what lets tools that read crabbit's printed IR
+//! (traces, pliron-inspect, pliron-lsp) get the same module back.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ fn build_backend(root: &Path, cargo: &str) -> PathBuf {
     backend
 }
 
-/// Parse printed IR the way pliron-inspect's driver does. Dialects
+/// Parse printed IR the way pliron's top-level parser does. Dialects
 /// self-register on `Context::new()` through pliron's linkme
 /// CONTEXT_REGISTRATIONS — but only if the dialect crates are actually
 /// linked into this test binary, so touch a pliron-ll symbol first.
@@ -102,8 +102,6 @@ fn roundtrip_dir(dir: &Path) -> Vec<String> {
         // labels on EVERY parse (`block1v1` → `block1v1_block1v1` → …),
         // so strict textual fixpoint is unattainable without an upstream
         // fix; value names are stable (kept through builtin_given_names).
-        // The server always parses from the stored original text, so
-        // label growth never accumulates there.
         let mut ctx3 = Context::new();
         match parse_ir(&text2, &mut ctx3, true) {
             Ok(op3) => {

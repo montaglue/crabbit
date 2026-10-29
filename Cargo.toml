@@ -20,10 +20,6 @@ pliron = "0.20.0"
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
 pliron-llvm = { version = "0.20.0", default-features = false }
-# Our own sibling repo (github.com/montaglue/pliron-inspect), pinned by
-# rev; bump the pin after pushing changes there.
-pliron-inspect-driver = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "f560c782ccdc5eb38f7de0d51bbd340657798a22" }
-pliron-inspect-protocol = { git = "https://github.com/montaglue/pliron-inspect.git", rev = "f560c782ccdc5eb38f7de0d51bbd340657798a22" }
 # cuda-oxide's MIR-on-pliron stack, consumed unpatched from NVIDIA's
 # upstream repository at one pinned revision (the "CUDA Rust" monorepo
 # nests these crates under cuda-oxide/crates/; cargo resolves them by
@@ -71,11 +67,3 @@ expect-test = "1"
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 assert_cmd = "2"
-
-# pliron-inspect opens this workspace as a project (from its UI): the render
-# driver and the resident analysis server are built here, and traces,
-# emitted modules and profiles are read from .crabbit-traces/.
-[workspace.metadata.pliron-inspect]
-driver = "crabbit-inspect-driver"
-analysisd = "crabbit-analysisd"
-traces = [".crabbit-traces"]

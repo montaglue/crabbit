@@ -68,32 +68,28 @@ recorded. Run it on an idle machine; the timings are the point.
 
 ## Where the results become visible from the laptop
 
-The uncommitted crabbit/pliron-inspect work of October makes the UI open a
-cargo project and list, under its `.crabbit-traces/`, the per-pass traces,
-the emitted modules and any `*op_costs*.json` profile; the **costs** button
-of a run lifts a profile onto that run's IR (`run_costs`). The campaign
-drivers feed exactly that:
+The campaign drivers leave each kernel's traces and lifted profile next to
+the compiled crate:
 
 - GPU: each device crate is its own cargo project (`kernels/<k>/device`),
-  so the build with `CRABBIT_EMIT_IR=1 CRABBIT_TRACE=1` leaves
-  `kernels/<k>/device/.crabbit-traces/ir/<stem>-kernels.plir` (the lowered
-  kernel module the server replays) and the driver copies the lifted
-  profile to `kernels/<k>/device/.crabbit-traces/profiles/<k>.crabbit.op_costs.json`.
+  so the build with `CRABBIT_EMIT_IR=1 CRABBIT_TRACE=1` leaves the traces
+  and `kernels/<k>/device/.crabbit-traces/ir/<stem>-kernels.plir` (the
+  lowered kernel module), and the driver copies the lifted profile to
+  `kernels/<k>/device/.crabbit-traces/profiles/<k>.crabbit.op_costs.json`.
 - CPU: the CPU crates are workspace members, so the corpus root is the
   project; the driver publishes `<corpus>/.crabbit-traces/profiles/<k>.cpu.profile.json`
   and `<k>.cpu.profile.op_costs.json`.
 
-From the laptop, two equivalent setups:
+From the laptop, two setups:
 
-1. **UI on the Spark, browser on the laptop.** On the Spark:
-   `pliron-inspect` (it builds and runs `crabbit-analysisd` and the
-   pliron-lsp engine for the opened project). On the laptop:
-   `ssh -L 8080:localhost:8080 spark` and open `http://localhost:8080/analysis`,
-   project root `~/projects/montaglue/kernel-corpus/kernels/<k>/device`
-   (GPU) or `~/projects/montaglue/kernel-corpus` (CPU).
+1. **pliron-inspect on the Spark, browser on the laptop.** On the Spark:
+   `pliron-inspect --no-open`; on the laptop: `ssh -L 3000:localhost:3000 spark`
+   and open `http://localhost:3000`. Dialects folder: the crabbit checkout;
+   traces folder: the kernel crate's `.crabbit-traces/`. The traces show
+   per pass; the profiles do not show on the IR yet (see the next step).
 2. **Editor on the laptop.** VS Code Remote-SSH onto the Spark with the
    pliron-lsp extension: the `.plir` modules and traces open with the
-   dialects' hover/definition; the UI link above for the cost views.
+   dialects' hover/definition.
 
 The results directories themselves (`results/gpu-attribution/<ts>-campaign/summary.md`,
 `results/cpu-feedback/<ts>-pgo/summary.md`) are plain Markdown and read
@@ -103,8 +99,7 @@ no binaries except the snapshotted backend dylib, which can be excluded).
 ## What the loop can and cannot feed today
 
 Consumers that exist: measured per-decision costs for allocators that
-read them, block frequencies (`CRABBIT_BLOCK_FREQ=profile`), and
-the hot-line views at the `source`/`ra` boundaries. On GPU no pass consumes
+read them, and block frequencies (`CRABBIT_BLOCK_FREQ=profile`). On GPU no pass consumes
 a profile yet (ptxas allocates registers; the mid-end decisions that matter
 there — unroll factors, sinking under divergence, state spaces — are
 analytic), so the GPU campaign is a *diagnosis* instrument: it says which
@@ -112,11 +107,11 @@ source op the stall mass lands on and why, per kernel, against nvcc's
 counters. That is what located the state-space and addressing mechanisms
 in September; the 2026-10-26 run is the first over all 31 kernels.
 
-## Next step that would make the loop one click
+## Next step: backward passes that write into the trace
 
-A `run_profile` command on `crabbit-analysisd`: given a run of an opened
-project, build the matching binary or cubin with the sidecars, run `perf`
-or `ncu` on this host, ingest, and return the `op_costs` payload the UI
-already knows how to lift. Then the laptop never runs a campaign script;
-it presses a button on the Spark's server. The two drivers above are the
-reference implementation of what that command has to do.
+Backward passes in crabbit: after a profiled run, they take the
+compilation's trace and the measurement, walk the pipeline backward — each
+backward pass reading what its forward pass recorded — and write the
+profile information at every level into the trace, where pliron-inspect
+shows it. The two drivers above are the reference for building the binary
+or cubin with its sidecars and running `perf` or `ncu`.

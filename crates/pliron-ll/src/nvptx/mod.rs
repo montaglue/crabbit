@@ -240,8 +240,8 @@ pub fn write_ptx_and_linemap_from_ir(
 }
 
 /// [write_ptx_and_linemap_from_ir] with the linemap forced on regardless
-/// of environment — for callers (the analysis server) whose enablement
-/// comes from per-run config rather than process env.
+/// of environment — for callers (tests) whose enablement does not come
+/// from the process environment.
 pub fn write_ptx_with_forced_linemap(
     ctx: &Context,
     root: Ptr<Operation>,

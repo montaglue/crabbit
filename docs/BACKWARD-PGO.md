@@ -69,10 +69,7 @@ Two properties fall out that a flat map cannot have:
   splits at multi-parent merges.
 - **Consumers.** The `lifted` costs are keyed by RA-boundary ids, so an
   allocator registered as an extension (docs/EXTENDING.md) can replace its
-  estimates with measured per-decision costs. The analysis server's `run_costs`
-  command replays a compilation and returns per-op cost tables (with text
-  positions) at any supported boundary, plus per-root semantic accounting —
-  hot-line views at every level of the compiler, from one measurement.
+  estimates with measured per-decision costs.
 
 ## Evidence
 

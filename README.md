@@ -62,11 +62,11 @@ profile-guided optimization is new. → [docs/BACKWARD-PGO.md](docs/BACKWARD-PGO
 
 Around the compiler:
 
-- **`crabbit-analysisd`** — a resident analysis server: load printed IR, run
-  the pipeline under different configurations on a worker pool, fetch the IR
-  after any pass, ask hover/definition/references questions about it — over
-  stdio or loopback HTTP, with a web UI in the sibling
-  [`pliron-inspect`](https://github.com/montaglue/pliron-inspect) project.
+- **Per-pass traces** — `CRABBIT_TRACE=1` records the IR after every pass
+  of a compilation; the sibling
+  [`pliron-inspect`](https://github.com/montaglue/pliron-inspect) project
+  shows them in the browser, with this workspace's dialects answering hover,
+  definitions and diagnostics.
 - **Extensible pipelines** — every pass has a name and every pipeline stage
   is an order of names; a backend built with extensions registers its own
   passes and edits crabbit's orders: insert, remove, reorder or replace any
@@ -124,13 +124,6 @@ Around the compiler:
   where the analytic model mis-predicts
   (`kernel-corpus/results/cpu-feedback/20260920-pgo/`).
 
-![arrow-schema IR at the llvm-gvn boundary in the pliron-inspect UI: the
-24 MB module compiled by crabbit, replayed per pass, browsable with
-position→op hover/definition/references](docs/images/analysisd-arrow-gvn-ir.png)
-
-![arrow-schema running through the 43-pass pipeline on crabbit-analysisd,
-live progress in the UI](docs/images/analysisd-arrow-run.png)
-
 Real measured attribution, end to end (perf samples on the running
 binary, lifted through the machine and mid-end adjoints to source-level
 op ids — `elementwise_chain`, Cortex-X925, 2 kHz cycle sampling):
@@ -148,8 +141,9 @@ $ jq '.["..._elementwise_chain_cpu6kernel"].source' profile.op_costs.json \
 "166": 796
 ```
 
-(The UI's heat-map rendering over `run_costs` is tracked follow-up work;
-the server command and the data path above are live today.)
+(The data path above is live today. Showing these costs on the IR, at
+every pass, is the next step: backward passes that write the profile into
+the compilation's trace, which pliron-inspect shows.)
 
 ## Prerequisites
 
@@ -188,10 +182,10 @@ the server command and the data path above are live today.)
 > upstream repository at one pinned revision; crabbit's own front end
 > (`crates/crabbit/src/importer/`) produces the dialect and must satisfy
 > its verifier, which `mir-lower` runs before lowering anything (see
-> `docs/MIR-DIALECT.md`). The analysis tooling comes from
+> `docs/MIR-DIALECT.md`). Traces are viewed with
 > [pliron-inspect](https://github.com/montaglue/pliron-inspect).
 
-### Mode 1 — codegen backend
+### Codegen backend
 
 ```sh
 cargo build -p crabbit
@@ -207,40 +201,17 @@ sudoku solver, HashMap, i128, FP, a GPU kernel, ...) are worked examples;
 `cargo test -p backend-tests` compiles and *executes* all of them through
 the backend and asserts their output.
 
-### Mode 2 — analysis server
+### Inspecting a compilation
 
-```sh
-cargo build -p crabbit-inspect-driver
-target/debug/crabbit-analysisd --workers 4 --http 127.0.0.1:8177
-```
-
-Then over plain HTTP (same JSON over stdio):
-
-```sh
-# get a module: any crabbit compile with CRABBIT_EMIT_IR=<dir> writes .plir
-curl -d '{"cmd":"load_module","name":"m","text":"<contents of the .plir>"}' 127.0.0.1:8177
-curl -d '{"cmd":"start_run","moduleId":1,"target":"aarch64-linux",
-          "config":{"CRABBIT_SPILL_POLICY":"weighted","CRABBIT_BLOCK_FREQ":"spectral-loop"}}' 127.0.0.1:8177
-curl -d '{"cmd":"run_status","runId":1}' 127.0.0.1:8177      # per-pass progress
-curl -d '{"cmd":"run_ir","runId":1,"pass":"aarch64-register-allocate"}' 127.0.0.1:8177
-curl -d '{"cmd":"run_artifact","runId":1}' 127.0.0.1:8177    # the ELF object
-```
-
-Full command set: `server_health`, `list_targets`, `load_module`,
-`start_run`, `run_status`, `cancel_run`, `run_ir`, `run_artifact`,
-`run_costs` (profile lifting), and the language queries `ir_hover`,
-`ir_definition`, `ir_references`, `ir_diagnostics`.
-
-The browser UI, [`pliron-inspect`](https://github.com/montaglue/pliron-inspect),
-opens this workspace as a project: start `pliron-inspect`, open
-`/analysis`, enter this directory as the project root. It builds and runs
-`crabbit-analysisd` and `crabbit-inspect-driver` from here (named in
-`[workspace.metadata.pliron-inspect]`), lists the traces and emitted
-modules under `.crabbit-traces/` (`CRABBIT_TRACE=1` and `CRABBIT_EMIT_IR=1`
-write there), and gets hover, definition into the dialects' Rust source,
-references and diagnostics from a pliron-lsp engine built from this
-workspace's dialect crates. `pliron-inspect --server 127.0.0.1:8177`
-still works against a hand-started analysisd.
+`CRABBIT_TRACE=1` records the IR after every pass of a compilation as a
+trace (`.crt`) in `.crabbit-traces/` at the root of the compiled project
+(`CRABBIT_TRACE_DIR` overrides). The browser UI,
+[`pliron-inspect`](https://github.com/montaglue/pliron-inspect), shows a
+trace pass by pass — text, diff, control-flow graph, operation tree — with
+hover, go to definition into the dialects' Rust source, and diagnostics
+from this workspace's dialects: on its start page, choose this checkout as
+the dialects folder and the compiled project's `.crabbit-traces/` as the
+traces folder.
 
 ## Configuration knobs
 
@@ -274,8 +245,7 @@ metrics.
 | [`crabbit-mir`](crates/mir) | lib | crabbit's passes on NVIDIA's `mir` dialect and around its lowering to the `llvm` dialect (census, linkage, function addresses). |
 | [`crabbit-config`](crates/config) | lib | Compilation configuration (host and device targets) and the pipeline API: passes by name, stages as editable orders ([docs/EXTENDING.md](docs/EXTENDING.md)). |
 | [`pliron-ll`](crates/pliron-ll) | lib | The heart: LLVM-dialect mid-end (GVN, LICM, DSE, ADCE, sink, div strength reduction, `TargetProfile`), aarch64/x86_64 machine dialects and pipelines, ELF/Mach-O writers, native NVPTX emission, profile/blockmap infrastructure. |
-| [`crabbit-inspect-driver`](crates/inspect-driver) | bins | `crabbit-inspect-driver` (one-shot pipeline CLI) and `crabbit-analysisd` (resident server). |
-| [`backend-tests`](crates/backend-tests) | tests | Builds the dylib and compiles+**runs** fixture crates through it; round-trip, kernel-on-GPU, and server-equivalence gates. |
+| [`backend-tests`](crates/backend-tests) | tests | Builds the dylib and compiles+**runs** fixture crates through it; round-trip and kernel-on-GPU gates. |
 
 Design documents live in [`docs/`](docs) — notably
 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md),

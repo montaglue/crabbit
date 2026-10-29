@@ -54,9 +54,7 @@ Between the importer and `LowerDialectMirPass` sits a pass stage over the
 `mir` dialect itself (`crabbit_mir::passes::add_mir_passes`), added ahead
 of every lowering: inside `add_midend_passes` (host and kernel pipelines)
 and in the standalone `emit_lowered_ir` path that `CRABBIT_EMIT_IR` takes,
-so each module passes through it exactly once. The resident
-driver/server (`crates/inspect-driver`, `ServeHooks`) starts from
-post-lowering IR and never sees this stage.
+so each module passes through it exactly once.
 
 Today the stage holds one pure analysis, **`mir-census`**
 (`mir_census.rs`): per `mir.func` an op-kind histogram (full op ids, so
@@ -91,7 +89,7 @@ aggregate ops to `llvm.ptr`.
 ## 2. Shared mid-end (`crates/pliron-ll/src/passes/llvm/`)
 
 One default order (`passes::llvm::DEFAULT_ORDER`) serves the host
-pipeline, the kernel pipeline, and the analysis server, so they cannot
+pipeline and the kernel pipeline, so they cannot
 drift (section 3.1 for how an order is built and replaced):
 
 ```
@@ -157,8 +155,7 @@ dylib rustc loads; `docs/EXTENDING.md` shows the whole recipe. The plain
 
 Running a pipeline is pliron's pass manager (`Passes`, `PassManager`
 hooks: `PMConfig` printing, verification, timing, skipping by name);
-crabbit adds only building from an order and, for the analysis server, an
-observer between passes (`conversion::pass::run_observed`).
+crabbit adds only building from an order.
 
 ## 4. GPU kernel path
 
@@ -191,34 +188,26 @@ The substrate of [BACKWARD-PGO.md](BACKWARD-PGO.md):
 - Ingest: `scripts/perf-harness/profile_ingest.py` (perf) and
   `kernel-corpus/tools/ncu_ingest.py` (Nsight Compute) both emit one
   `op_costs.json` shape with costs at machine, lifted, and source levels.
-- Consumers: allocators that read measured per-decision costs, the server's
-  `run_costs` heat tables, and the analyses under `kernel-corpus/results/`.
+- Consumers: allocators that read measured per-decision costs, and the
+  analyses under `kernel-corpus/results/`.
 
-## 6. The analysis server
+## 6. Traces
 
-```mermaid
-flowchart LR
-    UI["pliron-inspect web UI"] -->|HTTP| SRV
-    CURL["curl / harness"] -->|HTTP| SRV
-    ED["editor (LSP, .plir)"] -->|stdio| LSP["pliron-inspect-lsp bundle"]
-    SRV["crabbit-analysisd<br/>crates/inspect-driver"] --> HOOKS["DriverHooks impl<br/>(dialect stack + pipelines)"]
-```
-
-`crabbit-analysisd` implements the `DriverHooks` trait from
-`pliron-inspect`'s driver library and speaks its line-JSON protocol
-(stdio; `--http` adds a loopback shim over the same handlers). Runs execute
-pass-by-pass on a worker pool with progress and cancel; per-pass IR is
-served by **deterministic replay** (re-run the first k passes) or captured;
-`run_costs` replays a run while walking measured costs backward through the
-provenance chain. Server-built objects are **byte-identical** to the rustc
-path for the same module and config (`crates/inspect-driver/tests/`).
+With `CRABBIT_TRACE=1`, pliron's pass manager prints the module after every
+pass (`PMConfig::print_after_all`), and crabbit assembles the printouts into
+one trace file (`.crt`, `crates/crabbit/src/trace.rs`): a JSON header (crate,
+target, the pipeline's pass names) followed by the IR before the first pass
+and after each pass. Traces go to `.crabbit-traces/` at the root of the
+compiled project (`CRABBIT_TRACE_DIR` overrides).
+[pliron-inspect](https://github.com/montaglue/pliron-inspect) shows them in
+the browser.
 
 ## 7. Verification & measurement
 
 - `crates/backend-tests`: builds the real dylib, compiles fixture crates
   through it, **executes them**, and checks output — including a GPU kernel
-  fixture run via the CUDA driver API, IR round-trip fixpoint, and the
-  server-equivalence gates. Runs under both allocator engines.
+  fixture run via the CUDA driver API, and IR round-trip fixpoint. Runs
+  under both allocator engines.
 - `crates/pliron-ll/tests/opmap_audit.rs`: attribution fidelity audits
   (E3) — injected samples must lift to the correct source op through the
   full pipeline, including a 50/50 GVN-merge split.

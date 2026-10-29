@@ -4,8 +4,7 @@
 //! [AnalysisManager] (print before/after into `{n}-after-{name}.plir`
 //! files, verify, time, skip — all or by pass name). crabbit adds only what
 //! pliron does not have: building a pipeline from an order of pass names
-//! ([passes_from_order], [into_passes]) and running one with an observer
-//! between passes ([run_observed]).
+//! ([passes_from_order], [into_passes]).
 //!
 //! `Pass::run` mutates the operation it is given and keeps its identity.
 //! Transformations that used to swap the root operation (instruction
@@ -73,43 +72,6 @@ impl Pass for Boxed {
     fn as_pass_manager(&mut self) -> Option<&mut dyn PassManager> {
         self.0.as_pass_manager()
     }
-}
-
-/// Callback invoked after each pass in [run_observed]: receives the pass
-/// index, name, and the module it just ran on.
-pub type PassObserver<'a> = dyn FnMut(usize, &str, &Context, Ptr<Operation>) -> PassControl + 'a;
-
-/// What [run_observed]'s observer returns: keep going or stop the pipeline
-/// cleanly after the current pass (used for cancellation and for "run the
-/// first k passes" replay).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PassControl {
-    Continue,
-    Stop,
-}
-
-/// Run `passes` on `op` the way pliron's [Passes] does — each pass through
-/// [PassManager::run_pass], so the [PMConfig] hooks apply, and analyses a
-/// pass does not preserve are dropped after it — calling `observer` after
-/// every pass (pliron has no such hook). [PassControl::Stop] ends the run
-/// cleanly (Ok) without running the remaining passes.
-pub fn run_observed(
-    passes: &mut [Box<dyn Pass>],
-    op: Ptr<Operation>,
-    ctx: &mut Context,
-    analyses: &mut AnalysisManager,
-    observer: &mut PassObserver<'_>,
-) -> pliron::result::Result<PassResult> {
-    let mut aggregate = PassResult::default();
-    for (index, pass) in passes.iter_mut().enumerate() {
-        let result = <Passes as PassManager>::run_pass(&mut **pass, op, ctx, analyses)?;
-        aggregate.ir_changed |= result.ir_changed;
-        analyses.retain_preserved(&result);
-        if observer(index, pass.name(), ctx, op) == PassControl::Stop {
-            break;
-        }
-    }
-    Ok(aggregate)
 }
 
 /// A [PassResult] reporting that the IR changed — the common case for every
