@@ -31,7 +31,7 @@ use rustc_session::config::{OutputFilenames, OutputType};
 use crate::{
     conversion::pass::{AnalysisManager, PMConfig, Pass as _, PassList, Passes, into_passes},
     printable::Printable,
-    trace::{CrabbitTraceFile, CrabbitTraceMeta},
+    trace::{Trace, TraceMeta},
 };
 use crabbit_config::{CrabbitConfig, Side, Stage};
 use pliron_ll::{
@@ -532,7 +532,7 @@ fn emit_object(
         let dumps = collect_pass_dumps(&dump_dir);
         let _ = std::fs::remove_dir_all(&dump_dir);
 
-        let mut trace = CrabbitTraceFile::new(CrabbitTraceMeta {
+        let mut trace = Trace::new(TraceMeta {
             name: project.clone(),
             kind: "compiler-run".to_string(),
             entry: None,
@@ -546,12 +546,12 @@ fn emit_object(
             note: Some(format!("version {version}")),
             extra: BTreeMap::new(),
         });
-        trace.push_dump("initial", initial_dump.take().unwrap_or_default());
+        trace.push_snapshot("initial", initial_dump.take().unwrap_or_default());
         if let Some(dump) = emitted_lowering_dump.take() {
-            trace.push_dump("lower-dialect-mir(emit-ir)", dump);
+            trace.push_snapshot("lower-dialect-mir(emit-ir)", dump);
         }
         for (name, dump) in dumps {
-            trace.push_dump(name, dump);
+            trace.push_snapshot(name, dump);
         }
         let trace_path = trace::project_trace_path(&project, &version);
         if let Err(error) = &run_result {
@@ -586,17 +586,6 @@ fn emit_object(
             reason: error.to_string(),
         })?;
     std::fs::write(&object, bytes).map_err(io_err("write object file", &object))?;
-    // CRABBIT_BLOCKMAP=1: the profile-feedback sidecar mapping final .text
-    // byte ranges back to RA-position block ids, next to the object
-    // (docs/PROFILE-FEEDBACK-PLAN.md). The ids were stamped by the
-    // aarch64-blockmap-ids pass; a module without them writes nothing.
-    if pliron_ll::passes::aarch64::blockmap::blockmap_enabled()
-        && let Some(json) =
-            pliron_ll::passes::aarch64::blockmap::blockmap_json_from_ir(&imported.ctx, imported.module)
-    {
-        let sidecar = object.with_extension("blockmap.json");
-        std::fs::write(&sidecar, json).map_err(io_err("write blockmap sidecar", &sidecar))?;
-    }
     let device_artifact = match kernels {
         Some(kernels) => Some(emit_kernels(imported, &object, kernels, &cfg, &sess.target.llvm_target)?),
         None => None,

@@ -20,6 +20,8 @@ pliron = "0.20.0"
 # The LLVM dialect itself comes from pliron; `default-features = false`
 # drops the `llvm-sys` binding so no LLVM libraries are linked.
 pliron-llvm = { version = "0.20.0", default-features = false }
+pliron-trace = { version = "0.1.0", path = "crates/pliron-trace" }
+pliron-bpgo = { version = "0.1.0", path = "crates/pliron-bpgo" }
 # cuda-oxide's MIR-on-pliron stack, consumed unpatched from NVIDIA's
 # upstream repository at one pinned revision (the "CUDA Rust" monorepo
 # nests these crates under cuda-oxide/crates/; cargo resolves them by

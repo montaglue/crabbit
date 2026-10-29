@@ -17,25 +17,23 @@ allocators decide differently when told the truth?
 
 ## v1 scope: measured block frequencies
 
-1. **Stable block IDs + block map.** At the RA pipeline position (where
-   frequencies are consumed) each machine block gets a `blockmap_id`
-   attribute: function symbol + block index in RA-time region order.
-   Block placement / branch relaxation / encode preserve the attribute.
-   The ELF writer emits a sidecar `<object stem>.blockmap.json`:
-   `{symbol: [{id, start, end}, …]}` with final .text offsets (a block
-   split/merged after RA maps every resulting range to its source id;
-   blocks created post-RA get id -1 and their samples are dropped).
-   Gated by `CRABBIT_BLOCKMAP=1` (cheap, but off by default).
-2. **Ingestion tool** `scripts/perf-harness/profile_ingest.py`:
-   `perf record -e cycles:u [-c PERIOD] -- <bin> …` then `perf script -F
-   ip,sym,symoff` (fallback: addresses resolved via nm on the binary);
-   aggregates samples per block id via the blockmap(s), normalizes per
-   function like spectral does (`freq[b] = samples[b]/samples[entry_id]`,
-   entry forced ≥ 1 sample; additive smoothing alpha=1 so a sampled zero is a floor, never a literal 0.0 — a literal zero marks uses as free-to-spill and measurably backfires; see profile_ingest.normalize), writes
-   `profile.json: {symbol: [freq per RA-order block index]}`. Multiple
-   runs merge additively.
-3. **Consumption.** `CRABBIT_BLOCK_FREQ=profile` + `CRABBIT_PROFILE=
-   <profile.json>`:
+1. **Stable block IDs.** At the RA pipeline position (where
+   frequencies are consumed) each machine block gets an
+   `aarch64_blockmap_id` attribute: its index in RA-time region order.
+   Block placement / branch relaxation / encode preserve it. Gated by
+   `CRABBIT_PROFILE_MAP=1` (or its older name `CRABBIT_BLOCKMAP=1`).
+2. **Measurement.** A traced build (`CRABBIT_TRACE=1
+   CRABBIT_PROFILE_MAP=1`) run under `crabbit-bpgo run` (`perf record`
+   of `cycles` and `instructions`) gives a profiled trace: per op of
+   every snapshot reached, `cycles` and `executions`
+   ([BACKWARD-PGO.md](BACKWARD-PGO.md)).
+3. **Consumption.** `CRABBIT_BLOCK_FREQ=profile` +
+   `CRABBIT_PROFILE=<profiled trace>`: `passes/profile_freq.rs` reads
+   how often each block ran at the allocator's input (the snapshot of
+   `aarch64-blockmap-ids`), per function symbol, normalized like spectral
+   (`freq[b] = runs[b]/runs[entry]`); a block with no samples is floored
+   at half the least measured one, never a literal 0.0 — a literal zero
+   marks uses as free-to-spill and measurably backfires.
    - linear engine: `BlockFreqModel::Profile` in codegen_opts, looked up
      by function symbol in the allocator (fall back to uniform when a
      function or block is missing — a stale profile must never error).
@@ -57,10 +55,11 @@ allocators decide differently when told the truth?
 
 ## Gates
 
-Unit: blockmap ids survive placement/relax (test asserts contiguous
-coverage of .text per function and monotone offsets); ingestion on a
-synthetic perf script fixture; provider fallback on stale/missing
-profiles. End to end: one corpus kernel (elementwise_chain — it showed
+Unit: block ids survive placement/relax
+(`blockmap::blockmap_ids_survive_placement_and_relax`); the frequency
+provider reads a profiled trace and falls back on stale/missing profiles
+(`profile_freq` tests, `backward_pgo::profile_consumers_read_a_profiled_trace`).
+End to end: one corpus kernel (elementwise_chain — it showed
 the largest allocator-policy runtime delta, +34%) profiled and rebuilt
 with `profile` under each allocator configuration, checksums unchanged,
 and the freq vectors

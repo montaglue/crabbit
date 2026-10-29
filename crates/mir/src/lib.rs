@@ -1,7 +1,7 @@
 //! crabbit's adapter over cuda-oxide's `mir` dialect (dialect-mir): the
 //! [LowerDialectMirPass](passes::lower_dialect_mir::LowerDialectMirPass)
-//! wrapper plus re-exports. A plain rlib so tooling (inspect drivers) can
-//! link it without the rustc-plugin dylib machinery.
+//! wrapper plus re-exports. A plain rlib so tooling (the backward-PGO
+//! tool) can link it without the rustc-plugin dylib machinery.
 
 pub mod passes;
 

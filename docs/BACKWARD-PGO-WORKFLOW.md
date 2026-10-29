@@ -1,11 +1,10 @@
 # Backward PGO on the existing kernels: the laptop ↔ Spark workflow
 
-*2026-10-26. Companion to [BACKWARD-PGO.md](BACKWARD-PGO.md) (the design)
-and [PROFILE-FEEDBACK-BACKWARD.md](PROFILE-FEEDBACK-BACKWARD.md) (the
-mechanism). This note answers one practical question: how to run the
-backward profile loop over the two kernel corpora when the person works
-from a laptop and the hardware, the profilers and the backends live on the
-DGX Spark.*
+*2026-10-26, updated 2026-10-29. Companion to
+[BACKWARD-PGO.md](BACKWARD-PGO.md) (the design and its mechanism). This
+note answers one practical question: how to run the backward profile loop
+over the two kernel corpora when the person works from a laptop and the
+hardware, the profilers and the backends live on the DGX Spark.*
 
 ## The split
 
@@ -14,20 +13,43 @@ browser and an editor over SSH. There is no step a laptop can do better:
 
 | step | needs | where |
 |---|---|---|
-| build with provenance (`ll.op_id`, blockmap, PTX linemap) | the backend dylib for the Spark's targets | Spark |
+| build traced, with provenance (`CRABBIT_TRACE=1 CRABBIT_PROFILE_MAP=1`; PTX linemap on the GPU) | the backend dylib for the Spark's targets | Spark |
 | measure | `perf` (CPU, `perf_event_paranoid=1`) and `ncu` (GPU; counters are unlocked for non-admin via `/etc/modprobe.d/nvidia-profiler.conf`, verified 2026-10-26) | Spark |
-| ingest and lift (`profile.json`, `op_costs.json`) | the sidecars of that exact build | Spark |
-| consume: rebuild under `CRABBIT_PROFILE` / `CRABBIT_MEASURED_COSTS`, time | the same hardware the profile came from | Spark |
+| walk back (`crabbit-bpgo`, CPU) | the trace of that exact build, and its binary while `perf` resolves the samples | Spark |
+| consume: rebuild under `CRABBIT_PROFILE=<profiled trace>`, time | the same hardware the profile came from | Spark |
 | look: hot ops at every level, decisions changed, A/B tables | a browser | laptop |
 
-Copying profiles to the laptop and replaying there would need the same
-backend build and the same module text to reproduce the op ids — fragile,
-and it buys nothing because the rebuild must run on the Spark anyway.
+The profiled trace (`<version>.bpgo.crt`) stands on its own: it can be
+copied anywhere and opened in pliron-inspect. Rebuilding from it must
+still happen on the Spark, on the hardware it measured.
+
+## CPU: one program, measured and walked back
+
+Build the program through crabbit with a trace and provenance, run it
+under `crabbit-bpgo`, open the result:
+
+```sh
+cd ~/projects/montaglue/kernel-corpus
+RUSTUP_TOOLCHAIN=1.99.1 RUSTC_BOOTSTRAP=1 CRABBIT_TRACE=1 CRABBIT_PROFILE_MAP=1 \
+    cargo rustc -p gemm-tiled-cpu --release -- \
+    -Zcodegen-backend=<crabbit backend dylib> -Coverflow-checks=off
+crabbit-bpgo run --trace .crabbit-traces/gemm_tiled_cpu/<version>.crt -- \
+    target/release/gemm-tiled-cpu --size large --repeat 5
+```
+
+`crabbit-bpgo run` pins the program to the fastest core (`--cpu` picks
+another), records `cycles` and `instructions` with that core's counters
+(`--period`, default 100003), and writes `<version>.bpgo.crt` and the
+recording `<version>.perf.data` next to the trace. It reports how many
+samples landed on the traced code and where each function's profile
+stops. `crabbit-bpgo lift --trace <version>.crt --perf-data <file>
+--period <n>` walks a recording made elsewhere (or again, after a
+backward pass changed) — `perf` needs the program's binary to resolve it.
 
 ## The two campaign drivers (Spark side)
 
-Both are stdlib Python, one command per corpus, every artifact under the
-corpus's `results/`, nothing committed by the tools.
+Both are stdlib Python in the kernel corpus, one command per corpus, every
+artifact under the corpus's `results/`, nothing committed by the tools.
 
 **GPU — `kernel-corpus/tools/attribution_campaign.py`** (both corpora by
 default, 31 kernels, ~5 minutes end to end):
@@ -58,35 +80,32 @@ python3 tools/cpu_pgo_campaign.py \
     --corpus ../kernel-corpus-real --runs 10 --cpu 7
 ```
 
-Per kernel: profile build (blockmap) → perf record pinned → ingest with
+Per kernel: profile build → perf record pinned → ingest with
 smoothing → every cell rebuilt from one profile (`linear`,
 `linear-w-specloop`, `linear-w-prof`, `c2-specloop`, `c2-prof`,
 `c2-prof-meas`), correctness-gated on both sizes, kernel-function
 disassembly hashed (so "did the profile change a decision" is a fact, not a
 guess), static spill metrics, timed pinned runs with the load average
-recorded. Run it on an idle machine; the timings are the point.
+recorded. Run it on an idle machine; the timings are the point. It still
+calls crabbit's former ingest script, removed on 2026-10-29: it needs
+porting to `crabbit-bpgo` before it runs again.
 
 ## Where the results become visible from the laptop
 
-The campaign drivers leave each kernel's traces and lifted profile next to
-the compiled crate:
-
-- GPU: each device crate is its own cargo project (`kernels/<k>/device`),
-  so the build with `CRABBIT_EMIT_IR=1 CRABBIT_TRACE=1` leaves the traces
-  and `kernels/<k>/device/.crabbit-traces/ir/<stem>-kernels.plir` (the
-  lowered kernel module), and the driver copies the lifted profile to
-  `kernels/<k>/device/.crabbit-traces/profiles/<k>.crabbit.op_costs.json`.
-- CPU: the CPU crates are workspace members, so the corpus root is the
-  project; the driver publishes `<corpus>/.crabbit-traces/profiles/<k>.cpu.profile.json`
-  and `<k>.cpu.profile.op_costs.json`.
+Traces land in `.crabbit-traces/` at the root of the compiled project:
+each GPU device crate is its own cargo project (`kernels/<k>/device`);
+the CPU crates are workspace members, so the corpus root is the project.
+The profiled traces sit next to the traces they came from.
 
 From the laptop, two setups:
 
 1. **pliron-inspect on the Spark, browser on the laptop.** On the Spark:
-   `pliron-inspect --no-open`; on the laptop: `ssh -L 3000:localhost:3000 spark`
-   and open `http://localhost:3000`. Dialects folder: the crabbit checkout;
-   traces folder: the kernel crate's `.crabbit-traces/`. The traces show
-   per pass; the profiles do not show on the IR yet (see the next step).
+   `pliron-inspect --no-open` and, on the laptop,
+   `ssh -L 3000:localhost:3000 spark` then `http://localhost:3000`; or
+   `pliron-inspect --listen-all` on a trusted network. Dialects folder:
+   the crabbit checkout; traces folder: the project's `.crabbit-traces/`.
+   A profiled trace shows its profile on every snapshot it reaches —
+   heat and values per op in the text, per block in the CFG.
 2. **Editor on the laptop.** VS Code Remote-SSH onto the Spark with the
    pliron-lsp extension: the `.plir` modules and traces open with the
    dialects' hover/definition.
@@ -106,12 +125,3 @@ analytic), so the GPU campaign is a *diagnosis* instrument: it says which
 source op the stall mass lands on and why, per kernel, against nvcc's
 counters. That is what located the state-space and addressing mechanisms
 in September; the 2026-10-26 run is the first over all 31 kernels.
-
-## Next step: backward passes that write into the trace
-
-Backward passes in crabbit: after a profiled run, they take the
-compilation's trace and the measurement, walk the pipeline backward — each
-backward pass reading what its forward pass recorded — and write the
-profile information at every level into the trace, where pliron-inspect
-shows it. The two drivers above are the reference for building the binary
-or cubin with its sidecars and running `perf` or `ncu`.

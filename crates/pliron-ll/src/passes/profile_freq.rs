@@ -1,34 +1,27 @@
-//! Measured block execution frequencies from a perf-derived profile.
+//! Measured block execution frequencies from a profiled trace.
 //!
 //! The third block-frequency source next to `uniform` and
-//! [spectral](crate::passes::spectral_freq) (docs/PROFILE-FEEDBACK-PLAN.md):
-//! `CRABBIT_BLOCK_FREQ=profile` reads `CRABBIT_PROFILE=<profile.json>`, a
-//! file produced by `scripts/perf-harness/profile_ingest.py` from `perf`
-//! samples and the `CRABBIT_BLOCKMAP=1` sidecars. Shape:
+//! [spectral](crate::passes::spectral_freq): `CRABBIT_BLOCK_FREQ=profile`
+//! reads `CRABBIT_PROFILE=<trace>`, a trace with the profile of a measured
+//! run (written by `crabbit-bpgo` from a compilation traced with
+//! `CRABBIT_TRACE=1 CRABBIT_PROFILE_MAP=1`). The frequencies are how often
+//! each block of the IR the allocator received ran, per function, in
+//! region order — the same order and unit the spectral model uses:
+//! normalized so `freq[entry] == 1.0`, with a block nothing was measured
+//! in raised to half the least measured block of its function (a sampled
+//! zero is a resolution floor, not "never executes"). Determinism of the
+//! pipeline makes the allocator's CFG identical between the profiled build
+//! and the rebuild as long as compiler, flags, and sources match.
 //!
-//! ```json
-//! { "<function symbol>": [1.0, 12.5, 0.0, ...], ... }
-//! ```
-//!
-//! One `f64` per machine block in RA-time region order, normalized the way
-//! [spectral_frequencies](crate::passes::spectral_freq::spectral_frequencies)
-//! normalizes with additive smoothing (a sampled zero is a resolution
-//! floor, not "never executes") and rescales so `freq[entry] == 1.0`
-//! exactly — the same unit the spectral model guarantees, so cross-model
-//! comparisons stay on one scale.
-//! Determinism of the pipeline makes the RA-time CFG (and so the indices)
-//! identical between the profiled build and the rebuild as long as
-//! compiler, flags, and sources match.
-//!
-//! A profile is advisory: a missing file, unparsable JSON, an absent
-//! symbol, a wrong-length vector, or non-finite/negative entries all fall
-//! back to uniform frequencies for the affected function — a stale profile
-//! must never fail a build.
+//! A profile is advisory: a missing or unprofiled trace, an absent symbol,
+//! or a block count that does not match all fall back to uniform
+//! frequencies for the affected function — a stale profile must never
+//! fail a build.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Environment variable naming the profile JSON file.
+/// Environment variable naming the profiled trace.
 pub const PROFILE_ENV: &str = "CRABBIT_PROFILE";
 
 type Profile = Arc<HashMap<String, Vec<f64>>>;
@@ -42,14 +35,12 @@ fn cache() -> &'static Mutex<Option<(String, Profile)>> {
 }
 
 fn load(path: &str) -> HashMap<String, Vec<f64>> {
-    let parsed = std::fs::read_to_string(path)
-        .map_err(|error| error.to_string())
-        .and_then(|text| {
-            serde_json::from_str::<HashMap<String, Vec<f64>>>(&text)
-                .map_err(|error| error.to_string())
-        });
-    match parsed {
-        Ok(map) => map,
+    use crate::passes::aarch64::backward::{ALLOCATOR_INPUT, block_executions, profiled_snapshot};
+    match profiled_snapshot(std::path::Path::new(path), ALLOCATOR_INPUT) {
+        Ok(snapshot) => block_executions(&snapshot)
+            .into_iter()
+            .map(|(symbol, runs)| (symbol, normalize(&runs)))
+            .collect(),
         Err(error) => {
             // eprintln! rather than log::warn!: this runs inside a rustc codegen
             // dylib where no logger is installed; the warning must reach the user.
@@ -60,6 +51,22 @@ fn load(path: &str) -> HashMap<String, Vec<f64>> {
             HashMap::new()
         }
     }
+}
+
+/// Runs per block → frequencies relative to the entry block, unmeasured
+/// blocks raised to half the least measured one.
+fn normalize(runs: &[f64]) -> Vec<f64> {
+    let least = runs
+        .iter()
+        .copied()
+        .filter(|&r| r > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    if !least.is_finite() {
+        return vec![1.0; runs.len()];
+    }
+    let floored: Vec<f64> = runs.iter().map(|&r| r.max(least / 2.0)).collect();
+    let entry = floored.first().copied().unwrap_or(1.0);
+    floored.iter().map(|r| r / entry).collect()
 }
 
 /// The profile named by `CRABBIT_PROFILE`, or `None` when the variable is
@@ -126,44 +133,17 @@ mod tests {
 
     #[test]
     fn missing_file_falls_back_to_uniform_lookups() {
-        with_profile_env(Some("/nonexistent/profile.json"), || {
+        with_profile_env(Some("/nonexistent/profile.bpgo.crt"), || {
             assert!(frequencies_for("anything", 3).is_none());
         });
     }
 
     #[test]
-    fn matching_vector_is_returned_and_mismatches_fall_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profile.json");
-        std::fs::write(
-            &path,
-            r#"{"hot_fn": [1.0, 8.0, 0.5], "bad_fn": [1.0, -3.0]}"#,
-        )
-        .unwrap();
-        with_profile_env(Some(path.to_str().unwrap()), || {
-            assert_eq!(
-                frequencies_for("hot_fn", 3),
-                Some(vec![1.0, 8.0, 0.5]),
-                "exact symbol + length match returns the measured vector"
-            );
-            assert!(frequencies_for("hot_fn", 4).is_none(), "wrong length");
-            assert!(frequencies_for("cold_fn", 3).is_none(), "missing symbol");
-            assert!(frequencies_for("bad_fn", 2).is_none(), "negative value");
-        });
-    }
-
-    #[test]
-    fn changing_the_env_path_reloads() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first.json");
-        let second = dir.path().join("second.json");
-        std::fs::write(&first, r#"{"f": [1.0]}"#).unwrap();
-        std::fs::write(&second, r#"{"f": [1.0, 2.0]}"#).unwrap();
-        with_profile_env(Some(first.to_str().unwrap()), || {
-            assert_eq!(frequencies_for("f", 1), Some(vec![1.0]));
-        });
-        with_profile_env(Some(second.to_str().unwrap()), || {
-            assert_eq!(frequencies_for("f", 2), Some(vec![1.0, 2.0]));
-        });
+    fn runs_normalize_to_the_entry_with_a_floor() {
+        assert_eq!(
+            normalize(&[100.0, 800.0, 0.0, 50.0]),
+            vec![1.0, 8.0, 0.25, 0.5]
+        );
+        assert_eq!(normalize(&[0.0, 0.0]), vec![1.0, 1.0]);
     }
 }

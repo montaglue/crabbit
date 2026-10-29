@@ -3,7 +3,8 @@
 
 use combine::{Parser, between, many1, optional, satisfy, sep_by, token};
 
-use pliron::derive::pliron_attr;
+use pliron::builtin::attr_interfaces::OutlinedAttr;
+use pliron::derive::{attr_interface_impl, pliron_attr};
 use pliron::{
     context::Context,
     irfmt::parsers::{int_parser, spaced},
@@ -267,6 +268,12 @@ pub struct BlockmapIdAttr(pub u32);
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct OpIdAttr(pub u32);
 
+// The attribution attributes below are metadata no op format mentions:
+// outlined, pliron prints them in the module's `outlined_attributes:`
+// section (and parses them back), so traces carry them.
+#[attr_interface_impl]
+impl OutlinedAttr for OpIdAttr {}
+
 /// Which op a machine op was lowered from, for backward profile
 /// attribution: a non-negative value is the [OpIdAttr] of the LLVM-dialect
 /// source op; a negative value is a synthetic per-pass root (see
@@ -276,6 +283,9 @@ pub struct OpIdAttr(pub u32);
 #[pliron_attr(name = "ll.derived_from", format = "$0", verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct DerivedFromAttr(pub i64);
+
+#[attr_interface_impl]
+impl OutlinedAttr for DerivedFromAttr {}
 
 /// Multi-parent `derived_from` for backward profile attribution
 /// (docs/PROFILE-FEEDBACK-BACKWARD.md): the op is the merged survivor of
@@ -292,6 +302,9 @@ pub struct DerivedFromAttr(pub i64);
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct DerivedFromManyAttr(pub Vec<i64>);
 
+#[attr_interface_impl]
+impl OutlinedAttr for DerivedFromManyAttr {}
+
 /// The cross-function hop of backward attribution: this op was inlined
 /// into its function, and its cost belongs to the CALL SITE op whose id
 /// this attr carries (the callee-local [OpIdAttr] is preserved alongside
@@ -299,6 +312,9 @@ pub struct DerivedFromManyAttr(pub Vec<i64>);
 #[pliron_attr(name = "ll.inlined_from", format = "$0", verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct InlinedFromAttr(pub i64);
+
+#[attr_interface_impl]
+impl OutlinedAttr for InlinedFromAttr {}
 
 /// Relative weights of a terminator's successors, one per successor.
 /// The probability of an edge is its weight divided by the sum of all weights.

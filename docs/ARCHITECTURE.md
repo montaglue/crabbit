@@ -2,7 +2,7 @@
 
 crabbit is a rustc codegen backend built as a stack of
 [pliron](https://github.com/pliron-org/pliron) dialects and passes, plus a
-toolchain (server, profiler, harness) built on the same stack. This
+toolchain (backward PGO, harness) built on the same stack. This
 document maps the pipeline to the actual modules.
 
 ```mermaid
@@ -133,7 +133,8 @@ ELF/Mach-O translation happens outside the pass pipeline
 The linear allocator's spill policy and block frequencies are options
 (`codegen_opts.rs`): uniform, analytic spectral
 (`passes/spectral_freq.rs`), or a **measured profile**
-(`passes/profile_freq.rs`, fed by `CRABBIT_PROFILE`).
+(`passes/profile_freq.rs`, read from the profiled trace named by
+`CRABBIT_PROFILE`).
 
 ### 3.1 Pipelines as orders of named passes (`crates/config`)
 
@@ -170,35 +171,44 @@ module as textual LLVM IR (`crates/crabbit/src/kernel_llvm_export.rs`) so
 the identical front half can be compiled by `llc` — the apples-to-apples
 "rust-llvm" comparison arm.
 
-## 5. Provenance & profile attribution layer
+## 5. Provenance & backward PGO
 
-The substrate of [BACKWARD-PGO.md](BACKWARD-PGO.md):
+The substrate of [BACKWARD-PGO.md](BACKWARD-PGO.md), gated by
+`CRABBIT_PROFILE_MAP`:
 
 - `llvm-op-ids` stamps every mid-end-input op; each transforming pass
-  records its **adjoint** (`ll.derived_from`, multi-parent
-  `ll.derived_from_many`, `ll.inlined_from`) next to its own code.
+  records where what it created came from (`ll.derived_from`,
+  multi-parent `ll.derived_from_many`, `ll.inlined_from`) next to its own
+  code.
 - The machine boundary (`passes/aarch64/opmap.rs`) re-stamps: isel brackets
   every emitted machine op with its source op; RA/frame/placement stamp
   the code they create (or named synthetic roots: `isel:abi`, `regalloc`,
-  `frame`, `placement`).
-- Sidecars: `<obj>.blockmap.json` (blocks + per-op byte ranges +
-  provenance) for the CPU; `<ptx>.linemap.json` (PTX line → source op) for
-  the GPU. Both gated (`CRABBIT_BLOCKMAP` / `CRABBIT_PTX_LINEMAP`) and
-  verified not to perturb codegen.
-- Ingest: `scripts/perf-harness/profile_ingest.py` (perf) and
-  `kernel-corpus/tools/ncu_ingest.py` (Nsight Compute) both emit one
-  `op_costs.json` shape with costs at machine, lifted, and source levels.
-- Consumers: allocators that read measured per-decision costs, and the
-  analyses under `kernel-corpus/results/`.
+  `frame`, `placement`). Machine blocks get their RA-time position
+  (`passes/aarch64/blockmap.rs`).
+- Backward passes (`crates/pliron-bpgo`: `BackwardPass`, `walk`): each is
+  paired with a forward pass by name and puts the profile of the pass's
+  output on its input, reading back its forward pass's stamps. crabbit's
+  live next to their forward passes (`passes/aarch64/backward.rs`,
+  `passes/llvm/backward.rs`).
+- `crabbit-bpgo` (`crates/bpgo`) measures a run with `perf`, walks the
+  trace of the build, and writes the profiled trace.
+- The GPU path maps PTX lines to source ops (`<ptx>.linemap.json`,
+  `CRABBIT_PTX_LINEMAP`), verified not to perturb codegen; it has no
+  backward passes yet.
+- Consumers: measured block frequencies (`CRABBIT_BLOCK_FREQ=profile`),
+  allocators that read measured per-decision costs, and the analyses
+  under `kernel-corpus/results/`.
 
 ## 6. Traces
 
 With `CRABBIT_TRACE=1`, pliron's pass manager prints the module after every
 pass (`PMConfig::print_after_all`), and crabbit assembles the printouts into
-one trace file (`.crt`, `crates/crabbit/src/trace.rs`): a JSON header (crate,
-target, the pipeline's pass names) followed by the IR before the first pass
-and after each pass. Traces go to `.crabbit-traces/` at the root of the
-compiled project (`CRABBIT_TRACE_DIR` overrides).
+one trace file (`.crt`, format in `crates/pliron-trace`): a JSON header
+(crate, target, the pipeline's pass names) followed by the IR before the
+first pass and after each pass. Traces go to `.crabbit-traces/` at the root
+of the compiled project (`CRABBIT_TRACE_DIR` overrides). A profiled trace
+(`<version>.bpgo.crt`) is the same trace with the profile of every snapshot
+reached in its header.
 [pliron-inspect](https://github.com/montaglue/pliron-inspect) shows them in
 the browser.
 
@@ -208,9 +218,10 @@ the browser.
   through it, **executes them**, and checks output — including a GPU kernel
   fixture run via the CUDA driver API, and IR round-trip fixpoint. Runs
   under both allocator engines.
-- `crates/pliron-ll/tests/opmap_audit.rs`: attribution fidelity audits
-  (E3) — injected samples must lift to the correct source op through the
-  full pipeline, including a 50/50 GVN-merge split.
+- `crates/pliron-ll/tests/backward_pgo.rs`: backward-PGO fidelity (E3) —
+  synthetic cycles on machine code must come back onto the correct
+  source ops through the full traced pipeline, including a 50/50
+  GVN-merge split, with the total conserved at every snapshot.
 - `scripts/perf-harness/`: config-matrix A/B over fixtures + arrow-rs +
   the kernel-corpus CPU variants; miscompile gates; objdump spill metrics
   (whole-object and per-kernel-function); backend snapshotting so a sweep

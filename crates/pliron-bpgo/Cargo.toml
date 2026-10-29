@@ -1,0 +1,13 @@
+[package]
+name = "pliron-bpgo"
+description = "Backward profile-guided optimization over pliron traces: profiles flow back through the passes that produced the code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pliron.workspace = true
+pliron-trace.workspace = true
+serde.workspace = true
+serde_json.workspace = true

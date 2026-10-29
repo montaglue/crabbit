@@ -37,6 +37,7 @@ dialect-nvvm.workspace = true
 reserved-oxide-symbols.workspace = true
 oxide-artifacts.workspace = true
 anyhow.workspace = true
+pliron-trace.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 combine.workspace = true

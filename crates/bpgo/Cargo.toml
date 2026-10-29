@@ -1,0 +1,21 @@
+[package]
+name = "crabbit-bpgo"
+description = "Backward PGO for crabbit: a measured run's profile, walked back through the compilation's trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crabbit-bpgo"
+path = "src/main.rs"
+
+[dependencies]
+pliron.workspace = true
+pliron-ll.workspace = true
+crabbit-mir.workspace = true
+pliron-bpgo.workspace = true
+pliron-trace.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true

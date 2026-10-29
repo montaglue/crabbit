@@ -1,67 +1,40 @@
-//! Stable RA-position block ids and the blockmap sidecar
-//! (docs/PROFILE-FEEDBACK-PLAN.md).
+//! Stable RA-position block ids.
 //!
 //! [Aarch64BlockmapIdPass] runs at the register-allocation pipeline
 //! position (immediately before the allocator — the point whose CFG the
-//! block-frequency models describe) and, when `CRABBIT_BLOCKMAP` is set,
+//! block-frequency models describe) and, when [blockmap_enabled],
 //! stamps every machine block with a [BlockmapIdAttr]: its index in
 //! RA-time region order. **Mechanism**: pliron 0.17 [BasicBlock]s carry
 //! their own attribute dictionary, and no pass after RA recreates, splits,
 //! or merges blocks (placement only unlinks/relinks them, relaxation and
 //! post-RA opts only edit ops), so the attribute survives to final layout
 //! on the block's own identity — no side table, no first-op anchoring.
-//! A block created after RA would simply lack the attribute and is
-//! reported with id `-1` (its samples are dropped at ingestion).
+//! A block created after RA simply lacks the attribute.
 //!
-//! After encoding, [collect_blockmap] recomputes each block's final
-//! `.text` byte range (function offsets accumulate exactly like
-//! `collect_object_parts`; block offsets are `byte_len` sums in final
-//! layout order, exactly like the encoder's own `block_offsets`) and
-//! [blockmap_json_from_ir] renders the sidecar payload:
-//!
-//! ```json
-//! { "<function symbol>": [ {"id": 0, "start": 0, "end": 24}, ... ], ... }
-//! ```
-//!
-//! Symbols are the un-mangled `FuncOp` names — the same keys the
-//! frequency consumers look up
-//! ([profile_freq](crate::passes::profile_freq)); on ELF/Linux they equal
-//! the object's symbol names (Darwin prepends `_`, which the ingestion
-//! tool strips when matching).
-
-use std::collections::BTreeMap;
+//! The frequency consumers ([profile_freq](crate::passes::profile_freq))
+//! index blocks in this RA-time order.
 
 use crate::ll::BlockmapIdAttr;
 use crate::{
     context::{Context, Ptr},
-    dialects::{
-        aarch64::op_interfaces::BinarySerializableOpInterface,
-        aarch64::ops::FuncOp,
-        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
-    },
-    ir::{basic_block::BasicBlock, op::op_cast, operation::Operation},
+    dialects::{aarch64::ops::FuncOp, builtin::op_interfaces::OneRegionInterface},
+    ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
-use super::{
-    attrs::ATTR_KEY_AARCH64_ENCODED,
-    frontend::module_op,
-    util::{cast_operation, get_bytes_attr},
-};
+use super::{frontend::module_op, util::cast_operation};
 
 use crate::dict_key;
 
 dict_key!(ATTR_KEY_AARCH64_BLOCKMAP_ID, "aarch64_blockmap_id");
 
-/// Whether the blockmap sidecar is requested (`CRABBIT_BLOCKMAP` set,
-/// non-empty, not `0`).
+/// Whether block ids and op provenance are stamped (`CRABBIT_PROFILE_MAP`
+/// or its older name `CRABBIT_BLOCKMAP` set, non-empty, not `0`).
 pub fn blockmap_enabled() -> bool {
     let set = |var: &str| {
         std::env::var(var).is_ok_and(|value| !value.is_empty() && value != "0")
     };
-    // CRABBIT_PROFILE_MAP is the rename-friendly alias now that the map
-    // carries op-level attribution, not only block ranges.
     set("CRABBIT_BLOCKMAP") || set("CRABBIT_PROFILE_MAP")
 }
 
@@ -121,188 +94,6 @@ pub fn blockmap_id(ctx: &Context, block: Ptr<BasicBlock>) -> Option<u32> {
         .map(|attr| attr.0)
 }
 
-/// One block's byte range in the final `.text`: `[start, end)`, absolute
-/// section offsets. `id` is the RA-position block id, or `-1` for a block
-/// created after RA (no samples are attributed to it). When op-level
-/// attribution ran (docs/PROFILE-FEEDBACK-BACKWARD.md), `ops` carries the
-/// per-instruction ranges in layout order.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct BlockRange {
-    pub id: i64,
-    pub start: u64,
-    pub end: u64,
-    pub ops: Vec<OpRange>,
-}
-
-/// One machine instruction's byte range and backward attribution: `index`
-/// is its per-function position in final layout order; `derived_from` is
-/// the LLVM-level op id it was lowered from (≥ 0) or a synthetic root
-/// (< 0, see [super::opmap::roots]; [super::opmap::roots::UNATTRIBUTED]
-/// for ops nothing stamped).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OpRange {
-    pub index: u32,
-    pub derived_from: i64,
-    pub start: u64,
-    pub end: u64,
-}
-
-/// The blockmap of a fully-encoded module: per function symbol, the block
-/// ranges in final layout order. Functions without stamped ids (blockmap
-/// disabled during RA) are omitted; an empty map means "no sidecar".
-pub fn collect_blockmap(
-    ctx: &Context,
-    root: Ptr<Operation>,
-) -> pliron::result::Result<BTreeMap<String, Vec<BlockRange>>> {
-    let module = module_op(ctx, root)?;
-    let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
-    let mut map = BTreeMap::new();
-    let mut function_offset = 0u64;
-    for op in body.deref(ctx).iter(ctx) {
-        let Some(func) = cast_operation::<FuncOp>(ctx, op) else {
-            continue;
-        };
-        // Function offsets accumulate over the encoded payloads exactly the
-        // way `collect_object_parts` builds `.text`.
-        let encoded_len = get_bytes_attr(op, ctx, ATTR_KEY_AARCH64_ENCODED.as_ref())
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or_default();
-        let mut ranges = Vec::new();
-        let mut stamped = false;
-        // Whether op-level stamping ran for this function at all: any op
-        // anywhere carrying attribution. Distinguishes blockmap-only mode
-        // (no per-op rows wanted) from a stamping run with a block the
-        // stampers missed — whose rows must SURVIVE as `unattributed`
-        // (roots::UNATTRIBUTED exists so nothing is silently dropped).
-        let op_stamping_ran = func.get_region(ctx).deref(ctx).iter(ctx).any(|block| {
-            block
-                .deref(ctx)
-                .iter(ctx)
-                .any(|inst| super::opmap::derived_from(ctx, inst).is_some())
-        });
-        let mut offset = function_offset;
-        let mut op_index = 0u32;
-        for block in func.get_region(ctx).deref(ctx).iter(ctx) {
-            let mut ops = Vec::new();
-            let mut size = 0u64;
-            for inst in block.deref(ctx).iter(ctx) {
-                let op_obj = Operation::get_op_dyn(inst, ctx);
-                let Some(bytes) = op_cast::<dyn BinarySerializableOpInterface>(&*op_obj)
-                    .map(|serializable| serializable.byte_len(ctx))
-                else {
-                    continue;
-                };
-                if bytes > 0 {
-                    ops.push(OpRange {
-                        index: op_index,
-                        derived_from: super::opmap::derived_from(ctx, inst)
-                            .unwrap_or(super::opmap::roots::UNATTRIBUTED),
-                        start: offset + size,
-                        end: offset + size + bytes,
-                    });
-                }
-                op_index += 1;
-                size += bytes;
-            }
-            // Op-level attribution rows are only kept when stamping ran
-            // (blockmap-only mode wants block ranges, not op rows). When
-            // stamping DID run, an all-UNATTRIBUTED block is a stamping
-            // gap and its rows are kept so ingest reports the cost under
-            // the `unattributed` root instead of dropping it.
-            if !op_stamping_ran {
-                ops.clear();
-            }
-            let id = match blockmap_id(ctx, block) {
-                Some(id) => {
-                    stamped = true;
-                    id as i64
-                }
-                None => -1,
-            };
-            ranges.push(BlockRange {
-                id,
-                start: offset,
-                end: offset + size,
-                ops,
-            });
-            offset += size;
-        }
-        debug_assert_eq!(
-            offset - function_offset,
-            encoded_len,
-            "byte_len sum disagrees with the encoded payload"
-        );
-        if stamped {
-            map.insert(func.get_symbol_name(ctx).to_string(), ranges);
-        }
-        function_offset += encoded_len;
-    }
-    Ok(map)
-}
-
-/// The `<object stem>.blockmap.json` payload for a fully-encoded module,
-/// or `None` when there is nothing to write (no machine functions carry
-/// ids — blockmap disabled, or a non-aarch64 module). Never fails the
-/// build: collection errors degrade to `None`.
-pub fn blockmap_json_from_ir(ctx: &Context, root: Ptr<Operation>) -> Option<String> {
-    let map = match collect_blockmap(ctx, root) {
-        Ok(map) => map,
-        Err(_) => return None,
-    };
-    if map.is_empty() {
-        return None;
-    }
-    let mut top = serde_json::Map::new();
-    if let Some(midend) = super::opmap::midend_boundary_json(ctx, root)
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&midend) {
-            // Per-function fresh-id → source-parents table from the
-            // RA-boundary pass; consumers must skip this non-function key.
-            top.insert("__midend__".to_string(), parsed);
-        }
-    let value = serde_json::Value::Object(
-        map.iter()
-            .map(|(symbol, ranges)| {
-                (
-                    symbol.clone(),
-                    serde_json::Value::Array(
-                        ranges
-                            .iter()
-                            .map(|range| {
-                                let mut object = serde_json::json!({
-                                    "id": range.id,
-                                    "start": range.start,
-                                    "end": range.end,
-                                });
-                                if !range.ops.is_empty() {
-                                    object["ops"] = serde_json::Value::Array(
-                                        range
-                                            .ops
-                                            .iter()
-                                            .map(|op| {
-                                                serde_json::json!({
-                                                    "index": op.index,
-                                                    "derived_from": op.derived_from,
-                                                    "start": op.start,
-                                                    "end": op.end,
-                                                })
-                                            })
-                                            .collect(),
-                                    );
-                                }
-                                object
-                            })
-                            .collect(),
-                    ),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>()
-            .into_iter()
-            .chain(top)
-            .collect(),
-    );
-    serde_json::to_string_pretty(&value).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZero;
@@ -329,7 +120,7 @@ mod tests {
             builtin::{
                 self,
                 attributes::IntegerAttr,
-                op_interfaces::{OneRegionInterface, OneResultInterface},
+                op_interfaces::{OneRegionInterface, OneResultInterface, SymbolOpInterface},
             },
             llvm::{
                 attributes::LinkageAttr,
@@ -351,11 +142,10 @@ mod tests {
     }
 
     /// Two functions; the first has a weighted diamond whose hot side gets
-    /// moved next to the entry by block placement, so the blockmap must
-    /// report the RA-order ids out of layout order while still covering
-    /// the function's final bytes contiguously.
+    /// moved next to the entry by block placement, so its blocks must end
+    /// up out of RA order with their RA-order ids intact.
     #[test]
-    fn blockmap_ids_survive_placement_and_relax_with_contiguous_coverage() {
+    fn blockmap_ids_survive_placement_and_relax() {
         let mut ctx = context();
         let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
@@ -403,8 +193,7 @@ mod tests {
                 .insert_at_back(block, &ctx);
         }
 
-        // A second, single-block function behind the first: its blockmap
-        // ranges must start exactly where the first function's bytes end.
+        // A second, single-block function behind the first.
         let tail = LlvmFuncOp::new(&mut ctx, "tail".try_into().unwrap(), func_ty);
         tail.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
         tail.get_or_create_entry_block(&mut ctx);
@@ -452,51 +241,30 @@ mod tests {
             .run(root, &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
-        let map = collect_blockmap(&ctx, root).unwrap();
-        assert_eq!(map.keys().collect::<Vec<_>>(), vec!["biased", "tail"]);
-
-        let biased = &map["biased"];
-        assert_eq!(biased.len(), 3, "all three RA-time blocks survive");
-        // Contiguous, monotone coverage of the function's final bytes.
-        assert_eq!(biased[0].start, 0, "first function starts .text");
-        for pair in biased.windows(2) {
-            assert!(pair[0].start < pair[0].end, "empty range {pair:?}");
-            assert_eq!(pair[0].end, pair[1].start, "gap or overlap {pair:?}");
-        }
         // Every RA id survived, exactly once, and placement really did
         // reorder: the hot else block (RA id 2) now sits right after the
         // entry, before the cold then block (RA id 1).
-        let layout_ids: Vec<i64> = biased.iter().map(|range| range.id).collect();
-        assert_eq!(layout_ids, vec![0, 2, 1], "hot path moved up, ids intact");
-
-        let tail_ranges = &map["tail"];
-        assert_eq!(tail_ranges.len(), 1);
-        assert_eq!(tail_ranges[0].id, 0);
+        let layout_ids = |symbol: &str| -> Vec<Option<u32>> {
+            let func = pliron_bpgo::walk::ops_under(&ctx, root)
+                .into_iter()
+                .find(|&op| {
+                    Operation::get_op_dyn(op, &ctx)
+                        .downcast_ref::<aarch64::ops::FuncOp>()
+                        .is_some_and(|func| func.get_symbol_name(&ctx).to_string() == symbol)
+                })
+                .unwrap();
+            let region = func.deref(&ctx).regions().next().unwrap();
+            region
+                .deref(&ctx)
+                .iter(&ctx)
+                .map(|block| blockmap_id(&ctx, block))
+                .collect()
+        };
         assert_eq!(
-            tail_ranges[0].start,
-            biased.last().unwrap().end,
-            "second function's ranges continue where the first ends"
+            layout_ids("biased"),
+            vec![Some(0), Some(2), Some(1)],
+            "hot path moved up, ids intact"
         );
-        assert!(tail_ranges[0].end > tail_ranges[0].start);
-
-        // The sidecar payload renders and round-trips as JSON.
-        let json = blockmap_json_from_ir(&ctx, root).expect("stamped module yields a sidecar");
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["biased"][1]["id"], serde_json::json!(2));
-        assert_eq!(
-            parsed["biased"][1]["start"],
-            serde_json::json!(biased[1].start)
-        );
-    }
-
-    /// Without stamped ids (blockmap disabled) nothing is collected and no
-    /// sidecar is produced.
-    #[test]
-    fn unstamped_module_yields_no_sidecar() {
-        let mut ctx = context();
-        let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
-        let root = module.get_operation();
-        assert!(collect_blockmap(&ctx, root).unwrap().is_empty());
-        assert!(blockmap_json_from_ir(&ctx, root).is_none());
+        assert_eq!(layout_ids("tail"), vec![Some(0)]);
     }
 }

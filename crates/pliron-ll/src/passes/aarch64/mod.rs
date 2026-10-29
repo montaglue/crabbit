@@ -11,6 +11,7 @@ pub mod aarch64_post_ra_opts;
 pub mod aarch64_register_allocate;
 pub mod aarch64_target_opts_pre_ra;
 mod attrs;
+pub mod backward;
 pub mod blockmap;
 mod elf;
 mod error;

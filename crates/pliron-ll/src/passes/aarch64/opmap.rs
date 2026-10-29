@@ -40,7 +40,6 @@ dict_key!(ATTR_KEY_AARCH64_OP_ID, "aarch64_op_id");
 dict_key!(ATTR_KEY_AARCH64_DERIVED_FROM, "aarch64_derived_from");
 dict_key!(ATTR_KEY_DERIVED_FROM_MANY, "ll_derived_from_many");
 dict_key!(ATTR_KEY_INLINED_FROM, "ll_inlined_from");
-dict_key!(ATTR_KEY_MIDEND_BOUNDARY, "aarch64_midend_boundary");
 
 /// Synthetic `derived_from` roots: code created from nothing is attributed
 /// to the pass that created it. Negative so they can never collide with
@@ -88,11 +87,10 @@ pub fn root_name(id: i64) -> Option<&'static str> {
 /// mid-end HEAD (and were not inlined) KEEP it — so machine-level
 /// `derived_from` refers directly to the pre-mid-end numbering for
 /// surviving ops. Ops the mid-end created (or inlined, whose callee-local
-/// ids would collide) get FRESH ids past the preserved maximum, and the
-/// fresh-id → source-parents mapping (the mid-end adjoint boundary table)
-/// is serialized as JSON into a `builtin.string` attribute on the module
-/// (key `aarch64_midend_boundary`) for the sidecar and offline lift. A
-/// created op with no declared adjoint maps to [roots::MIDEND].
+/// ids would collide) get FRESH ids past the preserved maximum; their
+/// parents stay on the op itself, in the `derived_from`,
+/// `derived_from_many` and `inlined_from` attributes the mid-end's passes
+/// stamped.
 pub struct Aarch64OpIdPass;
 
 impl Pass for Aarch64OpIdPass {
@@ -123,7 +121,6 @@ pub fn assign_boundary_ids(
     let module = module_op(ctx, root)?;
     let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
     let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
-    let mut boundary = serde_json::Map::new();
     for func_op in funcs {
         let op_obj = Operation::get_op_dyn(func_op, ctx);
         let Some(func) = op_obj.downcast_ref::<LlvmFuncOp>() else {
@@ -132,10 +129,6 @@ pub fn assign_boundary_ids(
         let Some(region) = func.get_region(ctx) else {
             continue;
         };
-        let symbol = pliron::builtin::op_interfaces::SymbolOpInterface::get_symbol_name(
-            func, ctx,
-        )
-        .to_string();
         let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
         // Pass 1: which ids are preserved; the fresh range starts above.
         let mut preserved = std::collections::HashSet::new();
@@ -167,68 +160,22 @@ pub fn assign_boundary_ids(
             continue;
         }
         let mut next = u32::try_from(max_id + 1).unwrap_or(0);
-        let mut table = serde_json::Map::new();
         for &block in &blocks {
             let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
             for op in ops {
                 let keep = op_id(ctx, op)
                     .is_some_and(|_| inlined_from(ctx, op).is_none());
                 if keep {
-                    // A preserved op that absorbed others (GVN merge)
-                    // still needs its multi-parent adjoint in the table,
-                    // or the merged identities would be lost.
-                    let own = i64::from(op_id(ctx, op).unwrap());
-                    let merged = derived_from_many(ctx, op)
-                        .or_else(|| derived_from(ctx, op).map(|d| vec![d]));
-                    if let Some(sources) = merged
-                        && sources != vec![own] {
-                            table.insert(
-                                own.to_string(),
-                                serde_json::Value::Array(
-                                    sources.into_iter().map(Into::into).collect(),
-                                ),
-                            );
-                        }
                     continue;
                 }
-                // Source parents BEFORE the fresh id overwrites op_id.
-                let mut sources = effective_sources(ctx, op);
-                if sources.is_empty() {
-                    sources.push(roots::MIDEND);
-                }
-                table.insert(
-                    next.to_string(),
-                    serde_json::Value::Array(
-                        sources.into_iter().map(Into::into).collect(),
-                    ),
-                );
                 op.deref_mut(ctx)
                     .attributes
                     .set(ATTR_KEY_AARCH64_OP_ID.clone(), OpIdAttr(next));
                 next += 1;
             }
         }
-        if !table.is_empty() {
-            boundary.insert(symbol, serde_json::Value::Object(table));
-        }
-    }
-    if !boundary.is_empty() {
-        let json = serde_json::Value::Object(boundary).to_string();
-        root.deref_mut(ctx).attributes.set(
-            ATTR_KEY_MIDEND_BOUNDARY.clone(),
-            pliron::builtin::attributes::StringAttr::new(json),
-        );
     }
     Ok(())
-}
-
-/// The mid-end boundary table serialized by [assign_boundary_ids], if any:
-/// `{function symbol: {fresh RA-boundary id: [source parents]}}`.
-pub fn midend_boundary_json(ctx: &Context, root: Ptr<Operation>) -> Option<String> {
-    root.deref(ctx)
-        .attributes
-        .get::<pliron::builtin::attributes::StringAttr>(&ATTR_KEY_MIDEND_BOUNDARY)
-        .map(|attr| attr.as_str().to_string())
 }
 
 /// Stamp every op of every `llvm.func` definition with its dense

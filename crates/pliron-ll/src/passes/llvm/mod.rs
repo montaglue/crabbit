@@ -1,5 +1,6 @@
 pub mod adce;
 pub mod analysis;
+pub mod backward;
 pub mod div_strength_reduce;
 pub mod dse;
 pub mod gvn;

@@ -23,12 +23,11 @@
 //! computes analytical block frequencies via Perron–Frobenius power
 //! iteration ([crate::passes::spectral_freq]); `uniform` weights every
 //! block equally. `profile` reads *measured* frequencies from the
-//! `CRABBIT_PROFILE` JSON (produced by
-//! `scripts/perf-harness/profile_ingest.py` from `perf` samples and the
-//! `CRABBIT_BLOCKMAP=1` sidecars, normalized to entry = 1.0 like
-//! spectral; see docs/PROFILE-FEEDBACK-PLAN.md and
-//! [crate::passes::profile_freq]); functions or blocks missing from the
-//! profile fall back to uniform — a stale profile never errors. Note that
+//! profiled trace named by `CRABBIT_PROFILE` (written by `crabbit-bpgo`
+//! from `perf` samples on a traced, stamped build; normalized to
+//! entry = 1.0 like spectral; see [crate::passes::profile_freq]);
+//! functions or blocks missing from the profile fall back to uniform — a
+//! stale profile never errors. Note that
 //! the linear allocator only consumes frequencies through the `weighted`
 //! spill policy: `profile` (or `spectral`) with the default `furthest`
 //! policy changes nothing, and the allocator prints a one-time note.
