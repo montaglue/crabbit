@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::{
     codegen_opts::{BlockFreqModel, CodegenOpts, RestoreEstimate, SpillVictimPolicy},
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         aarch64::{
             op_interfaces::RegisterOperandKind,
@@ -13,7 +14,6 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::spectral_freq::spectral_frequencies,
     result::CrabbitResult,
 };
@@ -129,9 +129,9 @@ fn pool_register(bank: Bank, phys_index: usize, class: RegisterClass) -> Registe
 fn saved_reg_mask_bit(bank: Bank, phys_index: usize) -> u64 {
     match bank {
         Bank::Gpr => {
-            let Register::Physical(
-                crate::dialects::aarch64::registers::PhysicalRegister::Gpr64(number),
-            ) = CALLEE_SAVED_GPRS[phys_index - ALLOCATABLE_GPRS.len()]
+            let Register::Physical(crate::dialects::aarch64::registers::PhysicalRegister::Gpr64(
+                number,
+            )) = CALLEE_SAVED_GPRS[phys_index - ALLOCATABLE_GPRS.len()]
             else {
                 unreachable!("callee-saved GPR pool holds physical x registers");
             };
@@ -150,7 +150,12 @@ impl Pass for Aarch64RegisterAllocatePass {
         "aarch64-register-allocate"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let opts = CodegenOpts::from_env()?;
         if opts.freq != BlockFreqModel::Uniform && opts.victim != SpillVictimPolicy::WeightedCost {
             // The linear allocator only reads frequencies through the
@@ -227,7 +232,12 @@ fn allocate_function(ctx: &mut Context, func: FuncOp, opts: &CodegenOpts) -> Cra
     let symbol = func.get_symbol_name(ctx).to_string();
     dump_spectral_freqs(&live, &symbol);
     let weights = spill_weights(&live, &remat_imms, opts, &symbol);
-    let allocation = linear_scan(&live.intervals, &live.classes, &call_crossing, weights.as_ref());
+    let allocation = linear_scan(
+        &live.intervals,
+        &live.classes,
+        &call_crossing,
+        weights.as_ref(),
+    );
     let base_stack_size = func.stack_size(ctx);
     rewrite_allocated_registers(
         ctx,
@@ -267,7 +277,11 @@ fn dump_spectral_freqs(live: &FunctionLiveness, symbol: &str) {
         entries.join(",")
     );
     use std::io::Write as _;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -780,8 +794,7 @@ fn rewrite_allocated_registers(
         let mut scratch_index = [0usize; 2];
         let use_operands = virtual_use_operands(ctx, *op);
         let def_operands = virtual_def_operands(ctx, *op);
-        let mut spilled_use_scratch =
-            HashMap::<(&'static str, VirtualRegister), Register>::new();
+        let mut spilled_use_scratch = HashMap::<(&'static str, VirtualRegister), Register>::new();
 
         for (key, vreg, class) in use_operands {
             let bank = bank_of(class).expect("operand collected without an allocatable class");
@@ -930,15 +943,17 @@ fn next_spill_scratch(
     };
     let scratch = match bank {
         Bank::Gpr => SPILL_SCRATCH_GPRS.get(*index).copied(),
-        Bank::Fpr => SPILL_SCRATCH_FPR_NUMBERS.get(*index).map(|number| match class {
-            RegisterClass::Fpr32 => Register::fpr32(*number),
-            // q20–q22 are the full-vector views of the d20–d22 scratch
-            // registers: caller-saved and outside every pool, so the q view
-            // is just as free (the shared index keeps d/q scratch of one
-            // instruction from colliding on the same number).
-            RegisterClass::Simd128 => Register::simd128(*number),
-            _ => Register::fpr64(*number),
-        }),
+        Bank::Fpr => SPILL_SCRATCH_FPR_NUMBERS
+            .get(*index)
+            .map(|number| match class {
+                RegisterClass::Fpr32 => Register::fpr32(*number),
+                // q20–q22 are the full-vector views of the d20–d22 scratch
+                // registers: caller-saved and outside every pool, so the q view
+                // is just as free (the shared index keeps d/q scratch of one
+                // instruction from colliding on the same number).
+                RegisterClass::Simd128 => Register::simd128(*number),
+                _ => Register::fpr64(*number),
+            }),
     };
     let Some(scratch) = scratch else {
         return Err(crate::input_error_noloc!(Aarch64Err::UnsupportedOp(
@@ -953,9 +968,7 @@ fn next_spill_scratch(
 /// spill through FP loads/stores (an f32 still occupies a full 8-byte slot;
 /// a q value takes two consecutive 16-aligned slots — see
 /// [take_spill_slots]).
-fn spill_opcodes(
-    class: RegisterClass,
-) -> (aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode) {
+fn spill_opcodes(class: RegisterClass) -> (aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode) {
     match class {
         RegisterClass::Simd128 => (
             aarch64_ops::StrqSpOffsetOp::OPCODE,
@@ -985,9 +998,9 @@ mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
         dialects::aarch64::{
-                self,
-                ops::{self as aarch64_ops, ATTR_KEY_AARCH64_RD},
-            },
+            self,
+            ops::{self as aarch64_ops, ATTR_KEY_AARCH64_RD},
+        },
         linked_list::ContainsLinkedList,
     };
 
@@ -1009,9 +1022,11 @@ mod tests {
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
         aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(0), 1).insert_at_back(entry, &ctx);
-        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
         aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(1), 2).insert_at_back(entry, &ctx);
-        aarch64_ops::mov(&mut ctx, Register::gpr(1), Register::virtual_gpr(1)).insert_at_back(entry, &ctx);
+        aarch64_ops::mov(&mut ctx, Register::gpr(1), Register::virtual_gpr(1))
+            .insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
         let insts: Vec<_> = entry.deref(&ctx).iter(&ctx).collect();
@@ -1034,7 +1049,8 @@ mod tests {
         let entry = func.entry_block(&ctx);
         aarch64_ops::mov_imm(&mut ctx, Register::virtual_gpr(0), 1).insert_at_back(entry, &ctx);
         aarch64_ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
-        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
         assert_eq!(func.stack_size(&ctx), 0, "no spill slot is needed");
@@ -1064,7 +1080,8 @@ mod tests {
             aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(index))
                 .insert_at_back(entry, &ctx);
         }
-        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
         assert_eq!(func.stack_size(&ctx), 16, "exactly one value spills");
@@ -1103,7 +1120,8 @@ mod tests {
                 .insert_at_back(entry, &ctx);
         }
         aarch64_ops::movk(&mut ctx, Register::virtual_gpr(0), 2, 16).insert_at_back(entry, &ctx);
-        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
 
@@ -1142,8 +1160,12 @@ mod tests {
                 .insert_at_back(entry, &ctx);
         }
         for index in 0..values {
-            aarch64_ops::mov(&mut ctx, Register::gpr((index % 8) as u8), Register::virtual_gpr(index))
-                .insert_at_back(entry, &ctx);
+            aarch64_ops::mov(
+                &mut ctx,
+                Register::gpr((index % 8) as u8),
+                Register::virtual_gpr(index),
+            )
+            .insert_at_back(entry, &ctx);
         }
 
         allocate_function(&mut ctx, func, &CodegenOpts::default()).unwrap();
@@ -1165,7 +1187,11 @@ mod tests {
         );
     }
 
-    fn count_opcode(ctx: &Context, entry: Ptr<BasicBlock>, opcode: crate::dialects::aarch64::op_interfaces::Aarch64Opcode) -> usize {
+    fn count_opcode(
+        ctx: &Context,
+        entry: Ptr<BasicBlock>,
+        opcode: crate::dialects::aarch64::op_interfaces::Aarch64Opcode,
+    ) -> usize {
         entry
             .deref(ctx)
             .iter(ctx)
@@ -1192,7 +1218,8 @@ mod tests {
             aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(index))
                 .insert_at_back(entry, &ctx);
         }
-        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
 
         let opts = CodegenOpts {
             restore: RestoreEstimate::TrivialRemat,
@@ -1200,10 +1227,16 @@ mod tests {
         };
         allocate_function(&mut ctx, func, &opts).unwrap();
 
-        assert_eq!(count_opcode(&ctx, entry, aarch64_ops::LdrSpOffsetOp::OPCODE), 0);
+        assert_eq!(
+            count_opcode(&ctx, entry, aarch64_ops::LdrSpOffsetOp::OPCODE),
+            0
+        );
         // The 11 original defs plus one rematerialization at the use.
         assert_eq!(count_opcode(&ctx, entry, aarch64_ops::MovImmOp::OPCODE), 12);
-        assert_eq!(count_opcode(&ctx, entry, aarch64_ops::StrSpOffsetOp::OPCODE), 1);
+        assert_eq!(
+            count_opcode(&ctx, entry, aarch64_ops::StrSpOffsetOp::OPCODE),
+            1
+        );
     }
 
     /// Simd128 vregs allocate from the shared Fpr pool: the q vreg takes
@@ -1285,9 +1318,7 @@ mod tests {
         let reload = entry
             .deref(&ctx)
             .iter(&ctx)
-            .find(|op| {
-                aarch64_ops::opcode(&ctx, *op) == Some(aarch64_ops::LdrqSpOffsetOp::OPCODE)
-            })
+            .find(|op| aarch64_ops::opcode(&ctx, *op) == Some(aarch64_ops::LdrqSpOffsetOp::OPCODE))
             .unwrap();
         assert_eq!(
             aarch64_ops::reg(&ctx, reload, ATTR_KEY_AARCH64_RD.as_ref()).unwrap(),

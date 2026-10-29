@@ -35,12 +35,12 @@ use crate::{
     context::{Context, Ptr},
     conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
     dialects::{
+        builtin::ops::ConstantOp,
         builtin::{
             attributes::IntegerAttr,
             op_interfaces::OneResultInterface,
             types::{IntegerType, Signedness},
         },
-        builtin::ops::ConstantOp,
         llvm::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
@@ -50,12 +50,7 @@ use crate::{
             },
         },
     },
-    ir::{
-        op::Op,
-        operation::Operation,
-        r#type::TypedHandle,
-        value::Value,
-    },
+    ir::{op::Op, operation::Operation, r#type::TypedHandle, value::Value},
     result::CrabbitResult,
     utils::apint::APInt,
 };
@@ -66,7 +61,9 @@ use super::midend_gate::midend_disabled;
 // `simplify::replace_op_with_value`, whose chain walk stamps the whole
 // freshly built multiply-high/shift sequence as derived from the divide
 // it replaces (1→N, single parent). No per-site stamping needed here.
-use super::simplify::{as_const_operand, function_ops, mask_to_width, replace_op_with_value, sign_extend};
+use super::simplify::{
+    as_const_operand, function_ops, mask_to_width, replace_op_with_value, sign_extend,
+};
 
 pub struct LLVMDivStrengthReducePass;
 
@@ -572,8 +569,9 @@ emit_plain_bin!(emit_ashr, AShrOp);
 
 #[cfg(test)]
 mod tests {
-    use crate::r#type::TypeHandle;
+    use super::super::simplify::LLVMSimplifyPass;
     use super::*;
+    use crate::r#type::TypeHandle;
     use crate::{
         dialects::llvm::{
             attributes::LinkageAttr,
@@ -582,7 +580,6 @@ mod tests {
         },
         printable::Printable,
     };
-    use super::super::simplify::LLVMSimplifyPass;
 
     fn int_ty(ctx: &mut Context, width: u32) -> TypedHandle<IntegerType> {
         IntegerType::get(ctx, width, Signedness::Signless)
@@ -692,11 +689,9 @@ mod tests {
         let got = run_case(width, kind, a_bits, b_bits);
         let want = expected(width, kind, a_bits, b_bits);
         assert_eq!(
-            got,
-            want,
+            got, want,
             "w={width} {kind:?} a={:#x} b={:#x}: got {got:#x} want {want:#x}",
-            a_bits,
-            b_bits
+            a_bits, b_bits
         );
     }
 
@@ -776,7 +771,10 @@ mod tests {
     /// exhaustively, i16 with the standard list.
     #[test]
     fn sweeps_narrow_widths_via_widening() {
-        let dividends8: Vec<u128> = (0..=255u128).step_by(17).chain([1, 127, 128, 129, 255]).collect();
+        let dividends8: Vec<u128> = (0..=255u128)
+            .step_by(17)
+            .chain([1, 127, 128, 129, 255])
+            .collect();
         for d in 2..=255u128 {
             for &a in &dividends8 {
                 for kind in [Kind::SDiv, Kind::UDiv, Kind::SRem, Kind::URem] {

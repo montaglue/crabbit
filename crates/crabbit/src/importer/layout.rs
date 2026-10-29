@@ -93,7 +93,10 @@ pub(super) fn struct_like_field_offsets<'tcx>(
     Ok(offsets)
 }
 
-pub(super) fn struct_like_size<'tcx>(tcx: TyCtxt<'tcx>, fields: &[Ty<'tcx>]) -> Result<u64, String> {
+pub(super) fn struct_like_size<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    fields: &[Ty<'tcx>],
+) -> Result<u64, String> {
     let offsets = struct_like_field_offsets(tcx, fields)?;
     let mut align = 1u64;
     let mut unpadded = 0u64;
@@ -171,7 +174,10 @@ pub(super) fn layout_align_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Resul
     }
 }
 
-pub(super) fn struct_like_align<'tcx>(tcx: TyCtxt<'tcx>, fields: &[Ty<'tcx>]) -> Result<u64, String> {
+pub(super) fn struct_like_align<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    fields: &[Ty<'tcx>],
+) -> Result<u64, String> {
     let mut align = 1u64;
     for field in fields {
         if layout_size_of_ty(tcx, *field)? == 0 {
@@ -245,14 +251,20 @@ pub(super) fn layout_size_of_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Result
 }
 
 /// The struct-like fields of `ty` in converted (memory) order.
-pub(super) fn memory_ordered_fields<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Result<Vec<Ty<'tcx>>, String> {
+pub(super) fn memory_ordered_fields<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+) -> Result<Vec<Ty<'tcx>>, String> {
     let source = struct_like_source_fields(tcx, ty)
         .ok_or_else(|| format!("expected struct-like type: {ty:?}"))?;
     let order = struct_memory_order(tcx, ty, source.len());
     Ok(order.into_iter().map(|idx| source[idx]).collect())
 }
 
-pub(super) fn array_len<'tcx>(tcx: TyCtxt<'tcx>, len: rustc_middle::ty::Const<'tcx>) -> Result<u64, String> {
+pub(super) fn array_len<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    len: rustc_middle::ty::Const<'tcx>,
+) -> Result<u64, String> {
     if let Some(value) = len.try_to_target_usize(tcx) {
         return Ok(value);
     }

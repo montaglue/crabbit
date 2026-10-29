@@ -35,11 +35,7 @@ impl TargetBackend {
 
     /// Writes a module lowered by the machine pipeline into
     /// object-container bytes (Mach-O or ELF, per the backend's triple).
-    pub fn write_object(
-        &self,
-        ctx: &mut Context,
-        root: Ptr<Operation>,
-    ) -> CrabbitResult<Vec<u8>> {
+    pub fn write_object(&self, ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
         (self.write_object)(ctx, root)
     }
 }
@@ -54,9 +50,7 @@ static BACKENDS: &[TargetBackend] = &[
     },
     TargetBackend {
         name: "aarch64-linux",
-        matches: |triple| {
-            triple.arch == Arch::Aarch64 && triple.os == crate::triple::Os::Linux
-        },
+        matches: |triple| triple.arch == Arch::Aarch64 && triple.os == crate::triple::Os::Linux,
         default_order: aarch64::default_order(aarch64::TargetOs::Linux),
         construct: |name| aarch64::construct(name, aarch64::TargetOs::Linux),
         write_object: aarch64::write_elf_object_from_ir,

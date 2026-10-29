@@ -8,6 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         builtin::types::IntegerType,
         llvm::{
@@ -21,7 +22,6 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{inline::collect_functions, simplify::as_const_operand};
@@ -35,12 +35,19 @@ impl Pass for LLVMSimplifyCfgPass {
         "llvm-simplify-cfg"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;
             }
-            let region = func.get_region(ctx).expect("llvm.func definition must have a body");
+            let region = func
+                .get_region(ctx)
+                .expect("llvm.func definition must have a body");
             for _ in 0..MAX_ITERATIONS {
                 let mut changed = fold_constant_branches(ctx, region);
                 changed |= remove_unreachable_blocks(ctx, region);
@@ -54,7 +61,6 @@ impl Pass for LLVMSimplifyCfgPass {
         Ok(changed())
     }
 }
-
 
 /// `llvm.cond_br` on a constant condition, or with identical destinations
 /// and operands on both edges, becomes `llvm.br`.
@@ -72,7 +78,8 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
 
         // cond_br (icmp eq/ne %c, const-i1) — branch on %c directly,
         // swapping the destinations when the comparison negates it.
-        if let Some((direct_cond, negated)) = negated_i1_condition(ctx, cond_br.get_operand_condition(ctx))
+        if let Some((direct_cond, negated)) =
+            negated_i1_condition(ctx, cond_br.get_operand_condition(ctx))
         {
             let (true_dest, true_ops, false_dest, false_ops) = if negated {
                 (
@@ -90,7 +97,8 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 )
             };
             {
-                let new_term = CondBrOp::new(ctx, direct_cond, true_dest, true_ops, false_dest, false_ops);
+                let new_term =
+                    CondBrOp::new(ctx, direct_cond, true_dest, true_ops, false_dest, false_ops);
                 let new_op = new_term.get_operation();
                 new_op.insert_before(ctx, term);
                 // ADJOINT: the rewritten terminator derives from the one
@@ -105,7 +113,8 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
 
         let taken = if let Some(cond) = as_const_operand(ctx, cond_br.get_operand_condition(ctx)) {
             Some(cond.is_true())
-        } else if cond_br.get_operation().deref(ctx).get_successor(0) == cond_br.get_operation().deref(ctx).get_successor(1)
+        } else if cond_br.get_operation().deref(ctx).get_successor(0)
+            == cond_br.get_operation().deref(ctx).get_successor(1)
             && cond_br.successor_operands(ctx, 0) == cond_br.successor_operands(ctx, 1)
         {
             Some(true)
@@ -117,20 +126,26 @@ fn fold_constant_branches(ctx: &mut Context, region: Ptr<Region>) -> bool {
         };
 
         let (dest, operands) = if taken {
-            (cond_br.get_operation().deref(ctx).get_successor(0), cond_br.successor_operands(ctx, 0))
+            (
+                cond_br.get_operation().deref(ctx).get_successor(0),
+                cond_br.successor_operands(ctx, 0),
+            )
         } else {
-            (cond_br.get_operation().deref(ctx).get_successor(1), cond_br.successor_operands(ctx, 1))
+            (
+                cond_br.get_operation().deref(ctx).get_successor(1),
+                cond_br.successor_operands(ctx, 1),
+            )
         };
         {
-                let new_term = BrOp::new(ctx, dest, operands);
-                let new_op = new_term.get_operation();
-                new_op.insert_before(ctx, term);
-                // ADJOINT: the rewritten terminator derives from the one
-                // it replaces (branch-threading / constant-fold of a
-                // cond-br is 1→1).
-                crate::passes::aarch64::opmap::derive_new_from(ctx, new_op, term);
-            }
-            Operation::erase(term, ctx);
+            let new_term = BrOp::new(ctx, dest, operands);
+            let new_op = new_term.get_operation();
+            new_op.insert_before(ctx, term);
+            // ADJOINT: the rewritten terminator derives from the one
+            // it replaces (branch-threading / constant-fold of a
+            // cond-br is 1→1).
+            crate::passes::aarch64::opmap::derive_new_from(ctx, new_op, term);
+        }
+        Operation::erase(term, ctx);
         changed = true;
     }
     changed
@@ -150,7 +165,9 @@ fn negated_i1_condition(ctx: &Context, cond: Value) -> Option<(Value, bool)> {
         _ => return None,
     };
     // Accept the constant on either side.
-    let (value, constant) = if let Some(c) = as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(1)) {
+    let (value, constant) = if let Some(c) =
+        as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(1))
+    {
         (icmp.get_operation().deref(ctx).get_operand(0), c)
     } else if let Some(c) = as_const_operand(ctx, icmp.get_operation().deref(ctx).get_operand(0)) {
         (icmp.get_operation().deref(ctx).get_operand(1), c)
@@ -359,8 +376,10 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
                 changed = true;
             } else if pred_opid == CondBrOp::get_opid_static() {
                 let pred_cbr = CondBrOp::from_operation(pred_term);
-                let (mut true_dest, mut true_ops) =
-                    (pred_cbr.get_operation().deref(ctx).get_successor(0), pred_cbr.successor_operands(ctx, 0));
+                let (mut true_dest, mut true_ops) = (
+                    pred_cbr.get_operation().deref(ctx).get_successor(0),
+                    pred_cbr.successor_operands(ctx, 0),
+                );
                 let (mut false_dest, mut false_ops) = (
                     pred_cbr.get_operation().deref(ctx).get_successor(1),
                     pred_cbr.successor_operands(ctx, 1),
@@ -405,31 +424,26 @@ fn bypass_forwarding_blocks(ctx: &mut Context, region: Ptr<Region>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::dialects::builtin::ops::ConstantOp;
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::{
-        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
-    };
-    #[allow(unused_imports)]
-    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
+    use crate::dialects::builtin::ops::ConstantOp;
     use crate::dialects::llvm::ops::FuncOp;
     use crate::{
         dialects::{
             builtin::{
-                self, attributes::IntegerAttr, op_interfaces::OneResultInterface,
-                types::Signedness,
+                self, attributes::IntegerAttr, op_interfaces::OneResultInterface, types::Signedness,
             },
-            llvm::{
-                attributes::LinkageAttr,
-                ops::{ReturnOp},
-                types::FuncType,
-            },
+            llvm::{attributes::LinkageAttr, ops::ReturnOp, types::FuncType},
         },
         ir::r#type::{TypeHandle, TypedHandle},
         printable::Printable,
         utils::apint::APInt,
     };
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::BinArithOp as _;
     use std::num::NonZero;
 
     fn test_context() -> Context {
@@ -449,11 +463,25 @@ mod tests {
         let entry = func.get_entry_block(&ctx).unwrap();
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
-        else_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        then_block.insert_at_back(
+            func.get_region(&ctx)
+                .expect("llvm.func definition must have a body"),
+            &ctx,
+        );
+        else_block.insert_at_back(
+            func.get_region(&ctx)
+                .expect("llvm.func definition must have a body"),
+            &ctx,
+        );
 
         let i1_ty = builtin::types::IntegerType::get(&mut ctx, 1, Signedness::Signless);
-        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
+        let cond = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i1_ty,
+                APInt::from_u64(1, NonZero::new(1).unwrap()),
+            )),
+        );
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_v = cond.get_result(&ctx);
         CondBrOp::new(&mut ctx, cond_v, then_block, vec![], else_block, vec![])
@@ -461,14 +489,26 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         let i64_int = builtin::types::IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let ten = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_int, APInt::from_u64(10, NonZero::new(64).unwrap()))));
+        let ten = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_int,
+                APInt::from_u64(10, NonZero::new(64).unwrap()),
+            )),
+        );
         ten.get_operation().insert_at_back(then_block, &ctx);
         let ten_v = ten.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(ten_v))
             .get_operation()
             .insert_at_back(then_block, &ctx);
 
-        let twenty = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_int, APInt::from_u64(20, NonZero::new(64).unwrap()))));
+        let twenty = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_int,
+                APInt::from_u64(20, NonZero::new(64).unwrap()),
+            )),
+        );
         twenty.get_operation().insert_at_back(else_block, &ctx);
         let twenty_v = twenty.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(twenty_v))
@@ -476,7 +516,11 @@ mod tests {
             .insert_at_back(else_block, &ctx);
 
         LLVMSimplifyCfgPass
-            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                func.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", func.get_operation().disp(&ctx));

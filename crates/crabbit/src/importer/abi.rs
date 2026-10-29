@@ -64,7 +64,11 @@ pub(super) enum ArgAbi {
 /// because the host launch pushes them as separate arguments
 /// (docs/KERNEL-ABI.md). Zero-sized types keep their no-presence rule so
 /// parameter indices stay aligned with the host launch.
-pub(super) fn kernel_param_abi(ctx: &Context, ty: TypeHandle, flattened: bool) -> Result<ArgAbi, String> {
+pub(super) fn kernel_param_abi(
+    ctx: &Context,
+    ty: TypeHandle,
+    flattened: bool,
+) -> Result<ArgAbi, String> {
     if let Ok(0) = crabbit_ty_size(ctx, ty) {
         return Ok(ArgAbi::Leaves(Vec::new()));
     }
@@ -94,7 +98,12 @@ fn collect_kernel_param_leaves(
     }
     let fields = match ty.deref(ctx).downcast_ref::<llvm::types::StructType>() {
         Some(struct_ty) if !struct_ty.is_opaque() => struct_ty.fields().collect::<Vec<_>>(),
-        _ => return Err(format!("kernel parameter field of type {:?} cannot be flattened", ty.deref(ctx))),
+        _ => {
+            return Err(format!(
+                "kernel parameter field of type {:?} cannot be flattened",
+                ty.deref(ctx)
+            ));
+        }
     };
     for (index, field_ty) in fields.into_iter().enumerate() {
         let mut field_prefix = prefix.clone();
@@ -136,7 +145,9 @@ pub(super) fn crabbit_ty_size(ctx: &Context, ty: TypeHandle) -> Result<u64, Stri
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         return Ok((int_ty.width() as u64).div_ceil(8).max(1));
     }
-    if ty_ref.is::<llvm::types::PointerType>() || ty_ref.is::<crate::dialects::dialect_mir::types::MirPtrType>() {
+    if ty_ref.is::<llvm::types::PointerType>()
+        || ty_ref.is::<crate::dialects::dialect_mir::types::MirPtrType>()
+    {
         return Ok(8);
     }
     if ty_ref.is::<FP32Type>() {
@@ -243,10 +254,16 @@ pub(super) enum RustReturn {
     Indirect,
     /// A scalar pair whose second scalar sits at `second_offset` (below 8):
     /// it comes back in x1, not in the upper half of x0.
-    Pair { second_offset: u64, second_size: u64 },
+    Pair {
+        second_offset: u64,
+        second_size: u64,
+    },
 }
 
-pub(super) fn rust_abi_return<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Option<RustReturn> {
+pub(super) fn rust_abi_return<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+) -> Option<RustReturn> {
     use rustc_target::callconv::PassMode;
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
     let fn_abi = tcx
@@ -255,7 +272,11 @@ pub(super) fn rust_abi_return<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>)
     Some(match &fn_abi.ret.mode {
         PassMode::Indirect { .. } => RustReturn::Indirect,
         PassMode::Pair(..) => match fn_abi.ret.layout.backend_repr {
-            rustc_abi::BackendRepr::ScalarPair { b: second, b_offset, .. } => {
+            rustc_abi::BackendRepr::ScalarPair {
+                b: second,
+                b_offset,
+                ..
+            } => {
                 let second_offset = b_offset.bytes();
                 if second_offset < 8 {
                     RustReturn::Pair {
@@ -313,7 +334,11 @@ pub(super) fn rust_abi_args<'tcx>(
         .map(|arg| {
             Some(match &arg.mode {
                 PassMode::Ignore => RustArg::Ignore,
-                PassMode::Indirect { meta_attrs: None, on_stack: false, .. } => RustArg::Indirect,
+                PassMode::Indirect {
+                    meta_attrs: None,
+                    on_stack: false,
+                    ..
+                } => RustArg::Indirect,
                 PassMode::Indirect { .. } => return None,
                 PassMode::Cast { .. } if arg.layout.size.bytes() <= 8 => RustArg::Cast,
                 PassMode::Cast { .. } => return None,
@@ -324,10 +349,12 @@ pub(super) fn rust_abi_args<'tcx>(
                     _ => return None,
                 },
                 PassMode::Pair(..) => match arg.layout.backend_repr {
-                    rustc_abi::BackendRepr::ScalarPair { a, b, b_offset } => RustArg::Scalars(vec![
-                        (0, scalar_abi_ty(tcx, ctx, a)?),
-                        (b_offset.bytes(), scalar_abi_ty(tcx, ctx, b)?),
-                    ]),
+                    rustc_abi::BackendRepr::ScalarPair { a, b, b_offset } => {
+                        RustArg::Scalars(vec![
+                            (0, scalar_abi_ty(tcx, ctx, a)?),
+                            (b_offset.bytes(), scalar_abi_ty(tcx, ctx, b)?),
+                        ])
+                    }
                     _ => return None,
                 },
             })
@@ -336,7 +363,11 @@ pub(super) fn rust_abi_args<'tcx>(
 }
 
 /// The register type of one ABI scalar.
-fn scalar_abi_ty<'tcx>(tcx: TyCtxt<'tcx>, ctx: &mut Context, scalar: rustc_abi::Scalar) -> Option<TypeHandle> {
+fn scalar_abi_ty<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ctx: &mut Context,
+    scalar: rustc_abi::Scalar,
+) -> Option<TypeHandle> {
     use rustc_abi::{Float, Primitive};
     Some(match scalar.primitive() {
         Primitive::Int(int, _) => {

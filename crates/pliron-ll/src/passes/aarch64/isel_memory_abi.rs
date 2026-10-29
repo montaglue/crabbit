@@ -427,7 +427,8 @@ fn emit_direct_aggregate_to_gprs(
                     zero
                 }
             };
-            aarch64_ops::mov(ctx, Register::gpr((*next_reg + reg) as u8), src).insert_at_back(entry, ctx);
+            aarch64_ops::mov(ctx, Register::gpr((*next_reg + reg) as u8), src)
+                .insert_at_back(entry, ctx);
         }
         *next_reg += 2;
         return Ok(());
@@ -529,14 +530,8 @@ fn merge_packed_half(
     *half = Some(match half.take() {
         Some(existing) => {
             let joined = fresh_vreg(next_vreg);
-            aarch64_ops::binary(
-                ctx,
-                aarch64_ops::OrOp::OPCODE,
-                joined,
-                existing,
-                value,
-            )
-            .insert_at_back(entry, ctx);
+            aarch64_ops::binary(ctx, aarch64_ops::OrOp::OPCODE, joined, existing, value)
+                .insert_at_back(entry, ctx);
             joined
         }
         None => value,
@@ -561,14 +556,8 @@ fn unpack_aggregate_from_reg(
             let shift = fresh_vreg(next_vreg);
             materialize_u64_immediate(ctx, entry, shift, byte_offset * 8);
             let shifted = fresh_vreg(next_vreg);
-            aarch64_ops::binary(
-                ctx,
-                aarch64_ops::LsrOp::OPCODE,
-                shifted,
-                value,
-                shift,
-            )
-            .insert_at_back(entry, ctx);
+            aarch64_ops::binary(ctx, aarch64_ops::LsrOp::OPCODE, shifted, value, shift)
+                .insert_at_back(entry, ctx);
             value = shifted;
         }
         if size < 8 {
@@ -655,14 +644,8 @@ fn pack_aggregate_to_reg(
             )?;
             acc = Some(if let Some(acc) = acc {
                 let joined = fresh_vreg(next_vreg);
-                aarch64_ops::binary(
-                    ctx,
-                    aarch64_ops::OrOp::OPCODE,
-                    joined,
-                    acc,
-                    field_reg,
-                )
-                .insert_at_back(entry, ctx);
+                aarch64_ops::binary(ctx, aarch64_ops::OrOp::OPCODE, joined, acc, field_reg)
+                    .insert_at_back(entry, ctx);
                 joined
             } else {
                 field_reg
@@ -762,8 +745,7 @@ pub(super) fn load_stack_value(
             FpKind::F32 => aarch64_ops::LdrsSpOffsetOp::OPCODE,
         };
         let dst = fresh_fpr(next_vreg, kind);
-        aarch64_ops::ldr_sp_offset_sized(ctx, opcode, dst, offset)
-            .insert_at_back(entry, ctx);
+        aarch64_ops::ldr_sp_offset_sized(ctx, opcode, dst, offset).insert_at_back(entry, ctx);
         return Ok(LoweredValue::Reg(dst));
     }
     if is_stack_scalar_ty(ctx, ty) {
@@ -868,13 +850,11 @@ fn store_stack_value(
         return store_stack_value(ctx, entry, offset, value, word_ty, next_vreg);
     }
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-            format!(
-                "aggregate store requires aggregate value, got {value:?} for type {} size {}",
-                ty.deref(ctx).disp(ctx),
-                stack_size_of(ctx, ty)?
-            )
-        )));
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+            "aggregate store requires aggregate value, got {value:?} for type {} size {}",
+            ty.deref(ctx).disp(ctx),
+            stack_size_of(ctx, ty)?
+        ))));
     };
     let layout = aggregate_field_layout(ctx, ty)?;
     for (index, (field_offset, field_ty)) in layout.into_iter().enumerate() {
@@ -953,14 +933,8 @@ fn load_register_address_value(
             return Ok(LoweredValue::RegPair(lo, hi));
         }
         let dst = fresh_vreg(next_vreg);
-        aarch64_ops::ldr_reg_offset_sized(
-            ctx,
-            load_reg_opcode(ctx, ty)?,
-            dst,
-            base,
-            offset,
-        )
-        .insert_at_back(entry, ctx);
+        aarch64_ops::ldr_reg_offset_sized(ctx, load_reg_opcode(ctx, ty)?, dst, base, offset)
+            .insert_at_back(entry, ctx);
         let dst = normalize_integer_reg(ctx, entry, dst, ty, next_vreg)?;
         return Ok(LoweredValue::Reg(dst));
     }
@@ -1050,13 +1024,11 @@ fn store_register_address_value(
         return store_register_address_value(ctx, entry, base, offset, value, word_ty, next_vreg);
     }
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-            format!(
-                "aggregate store requires aggregate value, got {value:?} for type {} size {}",
-                ty.deref(ctx).disp(ctx),
-                stack_size_of(ctx, ty)?
-            )
-        )));
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+            "aggregate store requires aggregate value, got {value:?} for type {} size {}",
+            ty.deref(ctx).disp(ctx),
+            stack_size_of(ctx, ty)?
+        ))));
     };
     let layout = aggregate_field_layout(ctx, ty)?;
     for (index, (field_offset, field_ty)) in layout.into_iter().enumerate() {
@@ -1152,10 +1124,7 @@ fn flatten_aggregate_value(value: LoweredValue) -> CrabbitResult<Vec<LoweredValu
     }
 }
 
-pub(super) fn stack_size_of(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> CrabbitResult<u64> {
+pub(super) fn stack_size_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(0);
     }
@@ -1178,9 +1147,10 @@ pub(super) fn stack_size_of(
         .downcast_ref::<crate::dialects::llvm::types::StructType>()
         .is_none()
     {
-        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-            format!("non-stack type {}", ty_ref.disp(ctx))
-        )));
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+            "non-stack type {}",
+            ty_ref.disp(ctx)
+        ))));
     }
     drop(ty_ref);
 
@@ -1192,10 +1162,7 @@ pub(super) fn stack_size_of(
     Ok(align_to(unpadded_size, stack_align_of(ctx, ty)?))
 }
 
-pub(super) fn stack_align_of(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> CrabbitResult<u64> {
+pub(super) fn stack_align_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(1);
     }
@@ -1246,9 +1213,10 @@ pub(super) fn aggregate_field_layout(
     }
 
     let Some(struct_ty) = ty_ref.downcast_ref::<crate::dialects::llvm::types::StructType>() else {
-        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-            format!("non-aggregate layout type {}", ty_ref.disp(ctx))
-        )));
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+            "non-aggregate layout type {}",
+            ty_ref.disp(ctx)
+        ))));
     };
     if struct_ty.is_opaque() {
         return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
@@ -1273,10 +1241,7 @@ pub(super) fn aggregate_field_layout(
     Ok(layout)
 }
 
-pub(super) fn scalar_size_of(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> CrabbitResult<u64> {
+pub(super) fn scalar_size_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<crate::dialects::builtin::types::IntegerType>() {
         let size = (int_ty.width() as u64).div_ceil(8).max(1);
@@ -1300,7 +1265,8 @@ pub(super) fn scalar_size_of(
     {
         return Ok(8);
     }
-    Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-        format!("non-scalar memory type {}", ty_ref.disp(ctx))
-    )))
+    Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+        "non-scalar memory type {}",
+        ty_ref.disp(ctx)
+    ))))
 }

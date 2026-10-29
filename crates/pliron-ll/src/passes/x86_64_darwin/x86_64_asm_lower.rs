@@ -1,13 +1,13 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
-        x86_64::op_interfaces::BinarySerializableOpInterface,
         builtin::op_interfaces::OneRegionInterface,
+        x86_64::op_interfaces::BinarySerializableOpInterface,
     },
     input_error_noloc,
     ir::{op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{error::X86_64DarwinErr, frontend::module_op};
@@ -19,7 +19,12 @@ impl Pass for X86_64AsmLowerPass {
         "x86-64-asm-lower"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {

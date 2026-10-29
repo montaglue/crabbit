@@ -135,11 +135,18 @@ pub(super) fn import_rvalue<'tcx>(
             // A fat pointer cast to a thin one (`*const [T] as *const T`,
             // `<[T]>::as_ptr`) keeps the data word and drops the metadata.
             if fat_pointer_leaf_types(ctx, input).is_some()
-                && result_type.deref(ctx).is::<crate::dialects::dialect_mir::types::MirPtrType>()
+                && result_type
+                    .deref(ctx)
+                    .is::<crate::dialects::dialect_mir::types::MirPtrType>()
             {
                 let data = mir_dialect::ops::ExtractValueOp::new(ctx, input, vec![0], result_type);
                 data.get_operation().insert_at_back(insert_block, ctx);
-                return Ok(cast_value_to_type(ctx, insert_block, data.get_result(ctx), result_type));
+                return Ok(cast_value_to_type(
+                    ctx,
+                    insert_block,
+                    data.get_result(ctx),
+                    result_type,
+                ));
             }
             let cast = mir_dialect::ops::CastOp::new(ctx, input, result_type);
             cast.get_operation().insert_at_back(insert_block, ctx);
@@ -191,7 +198,7 @@ pub(super) fn import_rvalue<'tcx>(
                         value_ty_ref.disp(ctx)
                     ));
                 }
-                
+
                 struct_ty.field_type(1)
             };
             let extract = mir_dialect::ops::ExtractValueOp::new(ctx, value, vec![1], result_ty);
@@ -322,8 +329,12 @@ pub(super) fn import_rvalue<'tcx>(
                 };
                 let undef = mir_dialect::ops::UndefOp::new(ctx, aggregate_ty);
                 undef.get_operation().insert_at_back(insert_block, ctx);
-                let with_value =
-                    mir_dialect::ops::InsertValueOp::new(ctx, value, undef.get_result(ctx), vec![0]);
+                let with_value = mir_dialect::ops::InsertValueOp::new(
+                    ctx,
+                    value,
+                    undef.get_result(ctx),
+                    vec![0],
+                );
                 with_value.get_operation().insert_at_back(insert_block, ctx);
                 let with_formatter = mir_dialect::ops::InsertValueOp::new(
                     ctx,
@@ -848,7 +859,11 @@ pub(super) fn aggregate_result_ty<'tcx>(
                 .iter()
                 .map(|operand_ty| convert_ty(tcx, ctx, mono_ty(tcx, state, *operand_ty)))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(llvm::types::StructType::get_unnamed(ctx, (fields, llvm::types::StructLayout::Unpacked)).into())
+            Ok(llvm::types::StructType::get_unnamed(
+                ctx,
+                (fields, llvm::types::StructLayout::Unpacked),
+            )
+            .into())
         }
         rustc_mir::AggregateKind::RawPtr(pointee_ty, mutability) => {
             let pointee_ty = mono_ty(tcx, state, *pointee_ty);
@@ -956,11 +971,17 @@ fn lower_fat_pointer_cmp(
     };
     Ok(match op {
         BinOp::Eq => {
-            let (d, m) = (binary(ctx, BinOp::Eq, a0, b0), binary(ctx, BinOp::Eq, a1, b1));
+            let (d, m) = (
+                binary(ctx, BinOp::Eq, a0, b0),
+                binary(ctx, BinOp::Eq, a1, b1),
+            );
             binary(ctx, BinOp::BitAnd, d, m)
         }
         BinOp::Ne => {
-            let (d, m) = (binary(ctx, BinOp::Ne, a0, b0), binary(ctx, BinOp::Ne, a1, b1));
+            let (d, m) = (
+                binary(ctx, BinOp::Ne, a0, b0),
+                binary(ctx, BinOp::Ne, a1, b1),
+            );
             binary(ctx, BinOp::BitOr, d, m)
         }
         // Lexicographic: data decides unless equal, then the metadata.

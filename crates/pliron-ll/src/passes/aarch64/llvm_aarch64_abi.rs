@@ -1,13 +1,12 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
-        aarch64::attributes::FunctionAbiAttr,
-        builtin::op_interfaces::SymbolOpInterface,
+        aarch64::attributes::FunctionAbiAttr, builtin::op_interfaces::SymbolOpInterface,
         llvm::ops::FuncOp,
     },
     ir::{op::Op, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
 };
 

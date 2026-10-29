@@ -7,14 +7,6 @@
 
 use std::num::NonZero;
 
-use rustc_abi::{Size, TagEncoding, VariantIdx, Variants};
-use rustc_middle::{
-    mir::{
-        self as rustc_mir, BasicBlock as RustBasicBlock, BinOp, Body, ConstOperand, Local, Operand,
-        Place, Rvalue, StatementKind, TerminatorKind,
-    },
-    ty::{EarlyBinder, Instance, InstanceKind, ShimKind, Ty, TyCtxt, TypeVisitableExt},
-};
 use crate::{
     context::{Context, Ptr},
     dialects::{
@@ -33,11 +25,19 @@ use crate::{
     ir::{
         basic_block::BasicBlock,
         operation::Operation,
-        r#type::{TypeHandle, TypedHandle, Typed},
+        r#type::{TypeHandle, Typed, TypedHandle},
         value::Value,
     },
     linked_list::ContainsLinkedList,
     utils::apint::APInt,
+};
+use rustc_abi::{Size, TagEncoding, VariantIdx, Variants};
+use rustc_middle::{
+    mir::{
+        self as rustc_mir, BasicBlock as RustBasicBlock, BinOp, Body, ConstOperand, Local, Operand,
+        Place, Rvalue, StatementKind, TerminatorKind,
+    },
+    ty::{EarlyBinder, Instance, InstanceKind, ShimKind, Ty, TyCtxt, TypeVisitableExt},
 };
 
 // The emission shims stand in for the old cmir op paths; the body below is
@@ -45,40 +45,40 @@ use crate::{
 use self::ox as mir_dialect;
 
 // Submodules (rustc MIR -> dialect-mir import, split by concern):
-mod entry;       // crate walk, kernel detection, function import, decls
-mod globals;     // static/TLS/allocation globals, allocator shims
-mod strings;     // string/byte-string constant materialization + parsers
-mod stmt;        // statements, terminators, calls, SIMD, dyn dispatch
-mod intrinsics;  // the intrinsic lowering match + bit/float-math helpers
-mod abi;         // parameter/argument ABI classification
-mod arith;       // i128 + overflow arithmetic, bool/cast helpers
-mod rvalue;      // Rvalue lowering, casts, unsizing, fn-pointer reification
-mod constants;   // constant/allocation import (scalar, pointer, enum, str)
-mod place;       // place load/store, projections, address computation
-mod layout;      // field offsets, size/align computation
-mod helpers;     // slot/block lookup, cached types, ty predicates
-mod convert;     // rustc Ty -> dialect type conversion, enum layout
-mod ox;          // constructor shims over dialect-mir / llvm ops
-mod typing;      // pointer typing + foreign-call signatures, after the walk
+mod abi; // parameter/argument ABI classification
+mod arith; // i128 + overflow arithmetic, bool/cast helpers
+mod constants; // constant/allocation import (scalar, pointer, enum, str)
+mod convert; // rustc Ty -> dialect type conversion, enum layout
 mod cuda_device; // cuda-oxide's device API (`#[kernel]`, cuda_device::*)
+mod entry; // crate walk, kernel detection, function import, decls
+mod globals; // static/TLS/allocation globals, allocator shims
+mod helpers; // slot/block lookup, cached types, ty predicates
+mod intrinsics; // the intrinsic lowering match + bit/float-math helpers
+mod layout; // field offsets, size/align computation
+mod ox; // constructor shims over dialect-mir / llvm ops
+mod place; // place load/store, projections, address computation
+mod rvalue; // Rvalue lowering, casts, unsizing, fn-pointer reification
+mod stmt; // statements, terminators, calls, SIMD, dyn dispatch
+mod strings; // string/byte-string constant materialization + parsers
 #[cfg(test)]
 mod tests;
+mod typing; // pointer typing + foreign-call signatures, after the walk
 
-pub use entry::{create_context, import_crate};
-use entry::*;
-use globals::*;
-use strings::*;
-use stmt::*;
-use intrinsics::*;
 use abi::*;
 use arith::*;
-use rvalue::*;
 use constants::*;
-use place::*;
-use layout::*;
-use helpers::*;
 use convert::*;
 use cuda_device::*;
+use entry::*;
+pub use entry::{create_context, import_crate};
+use globals::*;
+use helpers::*;
+use intrinsics::*;
+use layout::*;
+use place::*;
+use rvalue::*;
+use stmt::*;
+use strings::*;
 
 /// A single unsupported MIR body or construct discovered during import.
 #[derive(Debug, Clone)]
@@ -95,7 +95,6 @@ pub struct ImportedCrate {
     pub kernel_count: usize,
     pub unsupported: Vec<ImportError>,
 }
-
 
 struct FunctionImportState<'tcx> {
     module_body: Ptr<BasicBlock>,

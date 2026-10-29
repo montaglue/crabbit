@@ -14,6 +14,9 @@
 //! through an `addrspacecast` to the generic address space, which is
 //! exactly what the native path's `cvta.shared` does.
 
+use pliron::builtin::op_interfaces::{
+    AtMostOneRegionInterface as _, OneResultInterface, SymbolOpInterface,
+};
 use pliron::{
     builtin::{attributes::StringAttr, op_interfaces::OneRegionInterface, ops::ModuleOp},
     context::{Context, Ptr},
@@ -21,7 +24,6 @@ use pliron::{
     op::Op,
     operation::Operation,
 };
-use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, OneResultInterface, SymbolOpInterface};
 use pliron_llvm::{
     attributes::LinkageAttr,
     op_interfaces::{CastOpInterface as _, IsDeclaration},
@@ -133,11 +135,8 @@ pub fn export_kernel_module(ctx: &mut Context, root: Ptr<Operation>) -> Result<S
                         ctx,
                         |ctx, use_| {
                             let user = use_.user_op();
-                            let result_space = user
-                                .deref(ctx)
-                                .results()
-                                .next()
-                                .and_then(|result| {
+                            let result_space =
+                                user.deref(ctx).results().next().and_then(|result| {
                                     use pliron::r#type::Typed;
                                     let ty = result.get_type(ctx);
                                     let ty = ty.deref(ctx);
@@ -191,7 +190,8 @@ fn lower_barrier_for_llvm18(ctx: &mut Context, body: Ptr<pliron::basic_block::Ba
         for block in blocks {
             let inner: Vec<Ptr<Operation>> = block.deref(ctx).iter(ctx).collect();
             for inner_op in inner {
-                let Some(call) = Operation::get_op::<pliron_llvm::ops::CallOp>(inner_op, ctx) else {
+                let Some(call) = Operation::get_op::<pliron_llvm::ops::CallOp>(inner_op, ctx)
+                else {
                     continue;
                 };
                 let CallOpCallable::Direct(callee) = call.callee(ctx) else {

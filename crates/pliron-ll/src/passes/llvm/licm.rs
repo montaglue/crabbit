@@ -24,6 +24,7 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
     dialects::llvm::op_interfaces::IsDeclaration,
     ir::{
         basic_block::BasicBlock,
@@ -33,7 +34,6 @@ use crate::{
         value::{DefiningEntity, Value},
     },
     linked_list::{ContainsLinkedList, LinkedList as _},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
 };
 
 use super::{
@@ -99,11 +99,7 @@ fn defined_in(ctx: &Context, value: Value, body: &FxHashSet<Ptr<BasicBlock>>) ->
     }
 }
 
-fn hoist_in_region(
-    ctx: &mut Context,
-    region: Ptr<Region>,
-    hoistable: &FxHashSet<OpId>,
-) -> bool {
+fn hoist_in_region(ctx: &mut Context, region: Ptr<Region>, hoistable: &FxHashSet<OpId>) -> bool {
     let dom = dominator_tree(ctx, region);
     let loops = natural_loops(ctx, &dom);
     let mut changed = false;
@@ -156,8 +152,6 @@ fn hoist_in_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pliron::builtin::op_interfaces::OneResultInterface as _;
-    use pliron_llvm::op_interfaces::{BinArithOp as _, IntBinArithOpWithOverflowFlag as _};
     use crate::{
         dialects::{
             builtin::types::{IntegerType, Signedness},
@@ -176,6 +170,8 @@ mod tests {
         },
         printable::Printable,
     };
+    use pliron::builtin::op_interfaces::OneResultInterface as _;
+    use pliron_llvm::op_interfaces::{BinArithOp as _, IntBinArithOpWithOverflowFlag as _};
 
     fn int_ty(ctx: &mut Context, width: u32) -> TypedHandle<IntegerType> {
         IntegerType::get(ctx, width, Signedness::Signless)
@@ -256,7 +252,11 @@ mod tests {
         store.get_operation().insert_before(&ctx, terminator);
 
         LLVMLicmPass
-            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                func.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
         let entry_text = block_ops_text(&ctx, entry);
         let body_text = block_ops_text(&ctx, body);
@@ -269,12 +269,12 @@ mod tests {
 
     #[test]
     fn hoists_invariant_fp_chain_to_preheader() {
+        use crate::dialects::builtin::types::FP32Type;
+        use crate::dialects::llvm::ops::{FMulOp, SIToFPOp};
         use pliron_llvm::attributes::FastmathFlagsAttr;
         use pliron_llvm::op_interfaces::{
             CastOpInterface as _, FloatBinArithOpWithFastMathFlags as _,
         };
-        use crate::dialects::builtin::types::FP32Type;
-        use crate::dialects::llvm::ops::{FMulOp, SIToFPOp};
         let mut ctx = Context::new();
         let (func, entry, _header, body, _exit, a, p) = loop_scaffold(&mut ctx);
         let f32_ty: TypeHandle = FP32Type::get(&ctx).into();
@@ -284,7 +284,12 @@ mod tests {
         // Neither op was hoistable before the shared classification.
         let cast = SIToFPOp::new(&mut ctx, a, f32_ty);
         let cast_v = cast.get_result(&ctx);
-        let mul = FMulOp::new_with_fast_math_flags(&mut ctx, cast_v, cast_v, FastmathFlagsAttr::default());
+        let mul = FMulOp::new_with_fast_math_flags(
+            &mut ctx,
+            cast_v,
+            cast_v,
+            FastmathFlagsAttr::default(),
+        );
         let mul_v = mul.get_result(&ctx);
         let store = StoreOp::new(&mut ctx, mul_v, p);
         let terminator = body.deref(&ctx).get_terminator(&ctx).unwrap();
@@ -293,7 +298,11 @@ mod tests {
         store.get_operation().insert_before(&ctx, terminator);
 
         LLVMLicmPass
-            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                func.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
         let entry_text = block_ops_text(&ctx, entry);
         let body_text = block_ops_text(&ctx, body);
@@ -330,7 +339,11 @@ mod tests {
         load.get_operation().insert_before(&ctx, terminator);
 
         LLVMLicmPass
-            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                func.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
         let entry_text = block_ops_text(&ctx, entry);
         let body_text = block_ops_text(&ctx, body);

@@ -2,17 +2,17 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
+        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
         x86_64::op_interfaces::{
             BinaryFixup, BinarySerializableOpInterface, BinarySerializationContext,
         },
         x86_64::ops::{self as x86_64_ops, FuncOp},
-        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
     },
     input_error_noloc,
     ir::{basic_block::BasicBlock, op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{
@@ -29,7 +29,12 @@ impl Pass for X86_64EncodePass {
         "x86-64-encode"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -161,16 +166,15 @@ mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
+        conversion::pass::{AnalysisManager, Pass},
         dialects::{
-            x86_64,
+            builtin::{self, op_interfaces::OneRegionInterface},
+            macho, x86_64,
             x86_64::op_interfaces::{BinaryFixup, FixupKind},
             x86_64::registers::{R12, R13, RBX},
-            builtin::{self, op_interfaces::OneRegionInterface},
-            macho,
         },
         ir::{basic_block::BasicBlock, op::Op},
         linked_list::ContainsLinkedList,
-        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::{
@@ -204,7 +208,11 @@ mod tests {
         let ignored = builtin::ops::ModuleOp::new(&mut ctx, "ignored".try_into().unwrap());
         ignored.get_operation().insert_at_back(body, &ctx);
 
-        let caller = x86_64::ops::FuncOp::new(&mut ctx, "caller".try_into().unwrap(), LinkageAttr::External);
+        let caller = x86_64::ops::FuncOp::new(
+            &mut ctx,
+            "caller".try_into().unwrap(),
+            LinkageAttr::External,
+        );
         caller.get_operation().insert_at_back(body, &ctx);
         let entry = caller.entry_block(&ctx);
         let exit = BasicBlock::new(&mut ctx, Some("exit".try_into().unwrap()), vec![]);
@@ -219,16 +227,25 @@ mod tests {
         x86_64::ops::jmp(&mut ctx, exit).insert_at_back(entry, &ctx);
         x86_64::ops::ret(&mut ctx).insert_at_back(exit, &ctx);
 
-        let callee = x86_64::ops::FuncOp::new(&mut ctx, "callee".try_into().unwrap(), LinkageAttr::External);
+        let callee = x86_64::ops::FuncOp::new(
+            &mut ctx,
+            "callee".try_into().unwrap(),
+            LinkageAttr::External,
+        );
         callee.get_operation().insert_at_back(body, &ctx);
         x86_64::ops::ret(&mut ctx).insert_at_back(callee.entry_block(&ctx), &ctx);
-        let third = x86_64::ops::FuncOp::new(&mut ctx, "third".try_into().unwrap(), LinkageAttr::External);
+        let third =
+            x86_64::ops::FuncOp::new(&mut ctx, "third".try_into().unwrap(), LinkageAttr::External);
         third.get_operation().insert_at_back(body, &ctx);
         x86_64::ops::call(&mut ctx, "caller".try_into().unwrap())
             .insert_at_back(third.entry_block(&ctx), &ctx);
 
         X86_64EncodePass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -270,7 +287,11 @@ mod tests {
             Some(bytes("aabbccdd01020304"))
         );
         assert_eq!(
-            get_fixups_attr(module.get_operation(), &ctx, ATTR_KEY_X86_64_FIXUPS.as_ref()),
+            get_fixups_attr(
+                module.get_operation(),
+                &ctx,
+                ATTR_KEY_X86_64_FIXUPS.as_ref()
+            ),
             // The fixup names the disp32 field: call at 10, disp at 11.
             Some(vec![BinaryFixup {
                 offset: 11,

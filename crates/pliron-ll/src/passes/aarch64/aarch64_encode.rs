@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         aarch64::op_interfaces::{
             BinaryFixup, BinarySerializableOpInterface, BinarySerializationContext,
@@ -12,7 +13,6 @@ use crate::{
     input_error_noloc,
     ir::{basic_block::BasicBlock, op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{
@@ -29,7 +29,12 @@ impl Pass for Aarch64EncodePass {
         "aarch64-encode"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -161,6 +166,7 @@ mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
+        conversion::pass::{AnalysisManager, Pass},
         dialects::{
             aarch64,
             aarch64::op_interfaces::{BinaryFixup, FixupKind},
@@ -170,14 +176,12 @@ mod tests {
         },
         ir::{basic_block::BasicBlock, op::Op},
         linked_list::ContainsLinkedList,
-        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::{
         super::{
             attrs::{
-                ATTR_KEY_AARCH64_ENCODED, ATTR_KEY_AARCH64_FIXUPS,
-                ATTR_KEY_AARCH64_MODULE_LITERALS,
+                ATTR_KEY_AARCH64_ENCODED, ATTR_KEY_AARCH64_FIXUPS, ATTR_KEY_AARCH64_MODULE_LITERALS,
             },
             util::{get_bytes_attr, get_fixups_attr},
         },
@@ -205,7 +209,11 @@ mod tests {
         let ignored = builtin::ops::ModuleOp::new(&mut ctx, "ignored".try_into().unwrap());
         ignored.get_operation().insert_at_back(body, &ctx);
 
-        let caller = aarch64::ops::FuncOp::new(&mut ctx, "caller".try_into().unwrap(), LinkageAttr::External);
+        let caller = aarch64::ops::FuncOp::new(
+            &mut ctx,
+            "caller".try_into().unwrap(),
+            LinkageAttr::External,
+        );
         caller.get_operation().insert_at_back(body, &ctx);
         let entry = caller.entry_block(&ctx);
         let exit = BasicBlock::new(&mut ctx, Some("exit".try_into().unwrap()), vec![]);
@@ -213,23 +221,42 @@ mod tests {
         aarch64::ops::mov_imm(&mut ctx, Register::gpr(0), 1).insert_at_back(entry, &ctx);
         aarch64::ops::call(&mut ctx, "puts".try_into().unwrap()).insert_at_back(entry, &ctx);
         aarch64::ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
-        aarch64::ops::adr_literal(&mut ctx, Register::gpr(1), "lit0", vec![0xaa, 0xbb, 0xcc, 0xdd])
-            .insert_at_back(entry, &ctx);
-        aarch64::ops::adr_literal(&mut ctx, Register::gpr(2), "lit1", vec![0x01, 0x02, 0x03, 0x04])
-            .insert_at_back(entry, &ctx);
+        aarch64::ops::adr_literal(
+            &mut ctx,
+            Register::gpr(1),
+            "lit0",
+            vec![0xaa, 0xbb, 0xcc, 0xdd],
+        )
+        .insert_at_back(entry, &ctx);
+        aarch64::ops::adr_literal(
+            &mut ctx,
+            Register::gpr(2),
+            "lit1",
+            vec![0x01, 0x02, 0x03, 0x04],
+        )
+        .insert_at_back(entry, &ctx);
         aarch64::ops::b(&mut ctx, exit).insert_at_back(entry, &ctx);
         aarch64::ops::ret(&mut ctx).insert_at_back(exit, &ctx);
 
-        let callee = aarch64::ops::FuncOp::new(&mut ctx, "callee".try_into().unwrap(), LinkageAttr::External);
+        let callee = aarch64::ops::FuncOp::new(
+            &mut ctx,
+            "callee".try_into().unwrap(),
+            LinkageAttr::External,
+        );
         callee.get_operation().insert_at_back(body, &ctx);
         aarch64::ops::ret(&mut ctx).insert_at_back(callee.entry_block(&ctx), &ctx);
-        let third = aarch64::ops::FuncOp::new(&mut ctx, "third".try_into().unwrap(), LinkageAttr::External);
+        let third =
+            aarch64::ops::FuncOp::new(&mut ctx, "third".try_into().unwrap(), LinkageAttr::External);
         third.get_operation().insert_at_back(body, &ctx);
         aarch64::ops::call(&mut ctx, "caller".try_into().unwrap())
             .insert_at_back(third.entry_block(&ctx), &ctx);
 
         Aarch64EncodePass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         assert_eq!(

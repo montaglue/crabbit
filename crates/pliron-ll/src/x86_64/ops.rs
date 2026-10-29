@@ -1,7 +1,7 @@
 use awint::bw;
 use combine::{Parser, attempt, many, many1, optional, satisfy, token};
-use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use pliron::derive::op_interface_impl;
+use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 
 use crate::ll::BranchWeightsAttr;
 use crate::ll::op_interfaces::ATTR_KEY_BRANCH_WEIGHTS;
@@ -12,8 +12,8 @@ use crate::{
     dialects::builtin::{
         attributes::{IntegerAttr, StringAttr},
         op_interfaces::{
-            IsolatedFromAboveInterface, OneRegionInterface,
-            SymbolOpInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
+            IsolatedFromAboveInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
+            OneRegionInterface, SymbolOpInterface,
         },
         types::{IntegerType, Signedness},
     },
@@ -42,9 +42,8 @@ use super::{
     attributes::{ConditionCode, ConditionCodeAttr, RegisterAttr},
     encoding,
     op_interfaces::{
-        BinaryEncoding, BinarySerializableOpInterface, BinarySerializationContext,
-        RegisterOperand, RegisterOperandKind, RegisterOperandsOpInterface,
-        X86_64InstructionOpInterface,
+        BinaryEncoding, BinarySerializableOpInterface, BinarySerializationContext, RegisterOperand,
+        RegisterOperandKind, RegisterOperandsOpInterface, X86_64InstructionOpInterface,
     },
     registers::Register,
 };
@@ -349,11 +348,7 @@ pub fn adr_literal(
 
 /// Materialize the address of a function defined in this module (rip-relative
 /// `lea` resolved against the function's offset in the text section).
-pub fn adr_function(
-    ctx: &mut Context,
-    rd: Register,
-    symbol: Identifier,
-) -> Ptr<Operation> {
+pub fn adr_function(ctx: &mut Context, rd: Register, symbol: Identifier) -> Ptr<Operation> {
     let op = AdrFunctionOp::new(ctx).op;
     set_reg(ctx, op, ATTR_KEY_X86_64_RD.as_ref(), rd);
     set_callee(ctx, op, symbol.to_string());
@@ -662,8 +657,8 @@ enum ParsedInstructionField {
 
 fn instruction_field_value_parser<'a>()
 -> impl Parser<StateStream<'a>, Output = ParsedInstructionField> {
-    let list = delimited_list_parser('[', ']', ',', int_parser::<u32>())
-        .map(ParsedInstructionField::List);
+    let list =
+        delimited_list_parser('[', ']', ',', int_parser::<u32>()).map(ParsedInstructionField::List);
     let block = attempt(block_opd_parser()).map(ParsedInstructionField::Block);
     let text = many1::<String, _, _>(satisfy(|c: char| {
         c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '+' | '-' | '^')
@@ -888,7 +883,7 @@ macro_rules! define_x86_64_instructions {
         }
 
         fn register_instructions(_ctx: &mut Context) {
-            
+
         }
 
         $(define_x86_64_instruction!($name, $id, $variant, $mnemonic, [$($reg_key => $reg_kind),*]);)+
@@ -986,10 +981,8 @@ mod tests {
     }
 
     fn parse_op_text(ctx: &mut Context, text: &str) -> Ptr<Operation> {
-        let state_stream = state_stream_from_iterator(
-            text.chars(),
-            State::new(ctx, location::Source::InMemory),
-        );
+        let state_stream =
+            state_stream_from_iterator(text.chars(), State::new(ctx, location::Source::InMemory));
         <Operation as Parsable>::parser(OperationParserConfig {
             look_for_outlined_attrs: false,
         })
@@ -1016,7 +1009,13 @@ mod tests {
     fn factory_emits_a_concrete_instruction_operation() {
         let mut ctx = context();
 
-        let inst = binary(&mut ctx, AddOp::OPCODE, Register::virtual_gpr(0), Register::virtual_gpr(1), Register::virtual_gpr(2));
+        let inst = binary(
+            &mut ctx,
+            AddOp::OPCODE,
+            Register::virtual_gpr(0),
+            Register::virtual_gpr(1),
+            Register::virtual_gpr(2),
+        );
         assert!(Operation::get_opid(inst, &ctx) == AddOp::get_opid_static());
     }
 
@@ -1025,10 +1024,7 @@ mod tests {
         let mut ctx = context();
 
         let inst = binary(&mut ctx, AddOp::OPCODE, RAX, RBX, Register::virtual_gpr(7));
-        assert_eq!(
-            plain(&ctx, inst),
-            "x86_64.add rd=rax, rn=rbx, rm=vr7"
-        );
+        assert_eq!(plain(&ctx, inst), "x86_64.add rd=rax, rn=rbx, rm=vr7");
 
         let inst = mov_imm(&mut ctx, RAX, 42);
         assert_eq!(plain(&ctx, inst), "x86_64.mov_imm rd=rax, imm=42");
@@ -1062,7 +1058,12 @@ mod tests {
             // `branch_targets_round_trip_inside_a_func`.
             set_reg(&mut ctx, op, ATTR_KEY_X86_64_RD.as_ref(), RAX);
             set_reg(&mut ctx, op, ATTR_KEY_X86_64_RN.as_ref(), RSP_REG);
-            set_reg(&mut ctx, op, ATTR_KEY_X86_64_RM.as_ref(), Register::virtual_gpr(7));
+            set_reg(
+                &mut ctx,
+                op,
+                ATTR_KEY_X86_64_RM.as_ref(),
+                Register::virtual_gpr(7),
+            );
             set_imm(&mut ctx, op, 42);
             set_cond(&mut ctx, op, ConditionCode::Np);
             set_callee(&mut ctx, op, "_callee");

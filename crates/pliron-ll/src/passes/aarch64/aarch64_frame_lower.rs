@@ -1,5 +1,6 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         aarch64::{
             ops::{self as aarch64_ops, ATTR_KEY_AARCH64_RD, FuncOp},
@@ -9,7 +10,6 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{frontend::module_op, util::cast_operation};
@@ -21,7 +21,12 @@ impl Pass for Aarch64FrameLowerPass {
         "aarch64-frame-lower"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -180,8 +185,7 @@ fn legalize_large_sp_address_offsets(ctx: &mut Context, func: FuncOp) {
             let fixup = aarch64_ops::binary(ctx, aarch64_ops::AddOp::OPCODE, X17, X17, X16);
             fixup.insert_after(ctx, mark);
             super::opmap::inherit_derived_from(ctx, op, fixup, super::opmap::roots::FRAME);
-            let access =
-                aarch64_ops::ldr_reg_offset_sized(ctx, reg_offset_opcode, rt, X17, 0);
+            let access = aarch64_ops::ldr_reg_offset_sized(ctx, reg_offset_opcode, rt, X17, 0);
             access.insert_before(ctx, op);
             super::opmap::inherit_derived_from(ctx, op, access, super::opmap::roots::FRAME);
             Operation::erase(op, ctx);
@@ -248,7 +252,12 @@ fn sp_mem_reg_offset_form(
 fn save_slots(
     saved: &[Register],
     stack_size: u64,
-) -> Vec<(Register, aarch64_ops::Aarch64Opcode, aarch64_ops::Aarch64Opcode, u64)> {
+) -> Vec<(
+    Register,
+    aarch64_ops::Aarch64Opcode,
+    aarch64_ops::Aarch64Opcode,
+    u64,
+)> {
     saved
         .iter()
         .enumerate()
@@ -402,7 +411,11 @@ fn stack_chunks(mut bytes: u64) -> Vec<u64> {
 mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
-        dialects::{aarch64, aarch64::registers::{FP, Register}, builtin},
+        dialects::{
+            aarch64,
+            aarch64::registers::{FP, Register},
+            builtin,
+        },
         ir::op::Op,
     };
 
@@ -456,7 +469,11 @@ mod tests {
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         Aarch64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -514,7 +531,11 @@ mod tests {
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         Aarch64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -547,7 +568,11 @@ mod tests {
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         Aarch64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -618,7 +643,11 @@ mod tests {
         aarch64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         Aarch64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         assert_eq!(

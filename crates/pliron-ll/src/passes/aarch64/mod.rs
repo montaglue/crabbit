@@ -6,7 +6,6 @@ pub mod aarch64_frame_lower;
 pub mod aarch64_legalize;
 pub mod aarch64_machine_cfg_cleanup;
 pub mod aarch64_object_lower;
-pub mod opmap;
 pub mod aarch64_post_ra_opts;
 pub mod aarch64_register_allocate;
 pub mod aarch64_target_opts_pre_ra;
@@ -22,21 +21,26 @@ mod isel_memory_abi;
 pub mod llvm_aarch64_abi;
 pub mod llvm_to_aarch64_isel;
 mod macho;
+pub mod opmap;
 pub mod target;
 mod util;
 pub mod verify_llvm_for_aarch64;
 
 use crate::{
     context::{Context, Ptr},
-    ir::operation::Operation,
     conversion::pass::{AnalysisManager, Pass, Passes, into_passes, passes_from_order},
+    ir::operation::Operation,
     result::CrabbitResult,
 };
 
+pub use self::target::TargetOs;
 use self::{
-    aarch64_asm_lower::Aarch64AsmLowerPass, aarch64_block_placement::Aarch64BlockPlacementPass,
-    aarch64_branch_relax::Aarch64BranchRelaxPass, aarch64_encode::Aarch64EncodePass,
-    aarch64_frame_lower::Aarch64FrameLowerPass, aarch64_legalize::Aarch64LegalizePass,
+    aarch64_asm_lower::Aarch64AsmLowerPass,
+    aarch64_block_placement::Aarch64BlockPlacementPass,
+    aarch64_branch_relax::Aarch64BranchRelaxPass,
+    aarch64_encode::Aarch64EncodePass,
+    aarch64_frame_lower::Aarch64FrameLowerPass,
+    aarch64_legalize::Aarch64LegalizePass,
     aarch64_machine_cfg_cleanup::Aarch64MachineCfgCleanupPass,
     aarch64_object_lower::{aarch64_macho_lower, collect_object_parts},
     aarch64_post_ra_opts::Aarch64PostRaOptsPass,
@@ -46,7 +50,6 @@ use self::{
     llvm_to_aarch64_isel::LlvmToAarch64IselPass,
     verify_llvm_for_aarch64::VerifyLlvmForAarch64Pass,
 };
-pub use self::target::TargetOs;
 
 /// The default order of the aarch64 lowering pipeline for `os`: every step
 /// is a pass on the `builtin.module`, from LLVM-dialect verification down
@@ -104,7 +107,9 @@ pub fn construct(name: &str, os: TargetOs) -> Option<Box<dyn Pass>> {
         "verify-llvm-for-aarch64-linux" if os == TargetOs::Linux => {
             Box::new(VerifyLlvmForAarch64Pass::new(os))
         }
-        "llvm-aarch64-darwin-abi" if os == TargetOs::Darwin => Box::new(LlvmAarch64AbiPass::new(os)),
+        "llvm-aarch64-darwin-abi" if os == TargetOs::Darwin => {
+            Box::new(LlvmAarch64AbiPass::new(os))
+        }
         "llvm-aarch64-linux-abi" if os == TargetOs::Linux => Box::new(LlvmAarch64AbiPass::new(os)),
         "aarch64-op-ids" => Box::new(opmap::Aarch64OpIdPass),
         "llvm-to-aarch64-isel" => Box::new(LlvmToAarch64IselPass),
@@ -148,7 +153,10 @@ pub fn emit_elf_object_bytes(ctx: &mut Context, root: Ptr<Operation>) -> Crabbit
 }
 
 /// Translates a module lowered by [pipeline] into Mach-O object bytes.
-pub fn write_macho_object_from_ir(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitResult<Vec<u8>> {
+pub fn write_macho_object_from_ir(
+    ctx: &mut Context,
+    root: Ptr<Operation>,
+) -> CrabbitResult<Vec<u8>> {
     let object = aarch64_macho_lower(ctx, root)?;
     Ok(macho::write_macho_object(ctx, object))
 }
@@ -185,8 +193,8 @@ mod tests {
                 attributes::LinkageAttr,
                 ops::GepIndex,
                 ops::{
-                    AddOp, AllocaOp, BrOp, CondBrOp, FuncOp, GetElementPtrOp, LoadOp,
-                    ReturnOp, SDivOp, SRemOp, StoreOp, UDivOp,
+                    AddOp, AllocaOp, BrOp, CondBrOp, FuncOp, GetElementPtrOp, LoadOp, ReturnOp,
+                    SDivOp, SRemOp, StoreOp, UDivOp,
                 },
                 types::{ArrayType, FuncType},
             },
@@ -211,12 +219,19 @@ mod tests {
     /// construct, for its OS only, a pass that reports exactly that name.
     #[test]
     fn default_orders_construct_passes_by_their_names() {
-        for (os, other) in [(TargetOs::Linux, TargetOs::Darwin), (TargetOs::Darwin, TargetOs::Linux)] {
+        for (os, other) in [
+            (TargetOs::Linux, TargetOs::Darwin),
+            (TargetOs::Darwin, TargetOs::Linux),
+        ] {
             for name in default_order(os) {
-                let pass = construct(name, os).unwrap_or_else(|| panic!("`{name}` does not construct"));
+                let pass =
+                    construct(name, os).unwrap_or_else(|| panic!("`{name}` does not construct"));
                 assert_eq!(pass.name(), *name);
             }
-            assert!(construct(default_order(os)[0], other).is_none(), "{os:?} verifier built for {other:?}");
+            assert!(
+                construct(default_order(os)[0], other).is_none(),
+                "{os:?} verifier built for {other:?}"
+            );
         }
     }
 
@@ -277,7 +292,13 @@ mod tests {
         func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
         let entry = func.get_entry_block(&ctx).unwrap();
-        let constant = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(7, NonZero::new(64).unwrap()))));
+        let constant = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(7, NonZero::new(64).unwrap()),
+            )),
+        );
         constant.get_operation().insert_at_back(entry, &ctx);
         let ret_value = constant.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(ret_value))
@@ -383,12 +404,7 @@ mod tests {
         passes
             .run(root, ctx, &mut AnalysisManager::default())
             .unwrap();
-        let machine_body = root
-            .deref(ctx)
-            .get_region(0)
-            .deref(ctx)
-            .get_head()
-            .unwrap();
+        let machine_body = root.deref(ctx).get_region(0).deref(ctx).get_head().unwrap();
         machine_body
             .deref(ctx)
             .iter(ctx)
@@ -434,7 +450,12 @@ mod tests {
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let int_ty =
             builtin::types::IntegerType::get(ctx, width, builtin::types::Signedness::Signless);
-        let func_ty = FuncType::get(ctx, int_ty.into(), vec![int_ty.into(), int_ty.into()], false);
+        let func_ty = FuncType::get(
+            ctx,
+            int_ty.into(),
+            vec![int_ty.into(), int_ty.into()],
+            false,
+        );
         let func = FuncOp::new(ctx, "binop".try_into().unwrap(), func_ty);
         func.set_attr_llvm_function_linkage(ctx, LinkageAttr::ExternalLinkage);
         func.get_or_create_entry_block(ctx);
@@ -609,7 +630,10 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(sp_adjusts_before_call, 1, "only the prologue adjusts sp before the call");
+        assert_eq!(
+            sp_adjusts_before_call, 1,
+            "only the prologue adjusts sp before the call"
+        );
         let outgoing_stores: Vec<u64> = caller_insts[..bl_index]
             .iter()
             .filter(|op| aarch64::ops::mnemonic(&ctx, **op) == Some("str_sp_offset"))
@@ -622,7 +646,10 @@ mod tests {
         // sp-relative loads rebased past the frame; `ldr_stack_arg` is gone.
         let callee_entry = machine_callee.entry_block(&ctx);
         let callee_mnemonics = block_mnemonics(&ctx, callee_entry);
-        assert!(!callee_mnemonics.contains(&"ldr_stack_arg"), "{callee_mnemonics:?}");
+        assert!(
+            !callee_mnemonics.contains(&"ldr_stack_arg"),
+            "{callee_mnemonics:?}"
+        );
         let frame = machine_callee.stack_size(&ctx);
         let arg_loads: Vec<u64> = callee_entry
             .deref(&ctx)
@@ -707,7 +734,13 @@ mod tests {
         func.get_operation().insert_at_back(body, &ctx);
         let entry = func.get_entry_block(&ctx).unwrap();
         let arg = entry.deref(&ctx).get_argument(0);
-        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
+        let one = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
         one.get_operation().insert_at_back(entry, &ctx);
         let one_result = one.get_result(&ctx);
         let alloca = AllocaOp::new(&mut ctx, i64_ty.into(), one_result, 0);
@@ -747,7 +780,13 @@ mod tests {
         BrOp::new(&mut ctx, second, vec![])
             .get_operation()
             .insert_at_back(entry, &ctx);
-        let constant = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap()))));
+        let constant = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(0, NonZero::new(64).unwrap()),
+            )),
+        );
         constant.get_operation().insert_at_back(second, &ctx);
         let constant_result = constant.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(constant_result))
@@ -780,7 +819,13 @@ mod tests {
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
         else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
+        let cond = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i1_ty,
+                APInt::from_u64(1, NonZero::new(1).unwrap()),
+            )),
+        );
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
         CondBrOp::new(
@@ -794,14 +839,26 @@ mod tests {
         .get_operation()
         .insert_at_back(entry, &ctx);
 
-        let then_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
+        let then_value = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
         then_value.get_operation().insert_at_back(then_block, &ctx);
         let then_result = then_value.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(then_result))
             .get_operation()
             .insert_at_back(then_block, &ctx);
 
-        let else_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap()))));
+        let else_value = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(0, NonZero::new(64).unwrap()),
+            )),
+        );
         else_value.get_operation().insert_at_back(else_block, &ctx);
         let else_result = else_value.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(else_result))
@@ -834,7 +891,13 @@ mod tests {
         );
         target.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(42, NonZero::new(64).unwrap()))));
+        let value = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(42, NonZero::new(64).unwrap()),
+            )),
+        );
         value.get_operation().insert_at_back(entry, &ctx);
         let value_result = value.get_result(&ctx);
         BrOp::new(&mut ctx, target, vec![value_result])
@@ -879,11 +942,29 @@ mod tests {
         );
         else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
+        let cond = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i1_ty,
+                APInt::from_u64(1, NonZero::new(1).unwrap()),
+            )),
+        );
         cond.get_operation().insert_at_back(entry, &ctx);
-        let true_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(7, NonZero::new(64).unwrap()))));
+        let true_value = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(7, NonZero::new(64).unwrap()),
+            )),
+        );
         true_value.get_operation().insert_at_back(entry, &ctx);
-        let false_value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(9, NonZero::new(64).unwrap()))));
+        let false_value = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(9, NonZero::new(64).unwrap()),
+            )),
+        );
         false_value.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
         let true_result = true_value.get_result(&ctx);
@@ -929,15 +1010,32 @@ mod tests {
         func.get_operation().insert_at_back(body, &ctx);
         let entry = func.get_entry_block(&ctx).unwrap();
 
-        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
+        let one = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
         one.get_operation().insert_at_back(entry, &ctx);
         let one_result = one.get_result(&ctx);
         let slot = AllocaOp::new(&mut ctx, array_ty.into(), one_result, 0);
         slot.get_operation().insert_at_back(entry, &ctx);
-        let value = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(99, NonZero::new(64).unwrap()))));
+        let value = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(99, NonZero::new(64).unwrap()),
+            )),
+        );
         value.get_operation().insert_at_back(entry, &ctx);
         let slot_result = slot.get_result(&ctx);
-        let elem = GetElementPtrOp::new(&mut ctx, slot_result, vec![GepIndex::Constant(2)], i64_ty.into());
+        let elem = GetElementPtrOp::new(
+            &mut ctx,
+            slot_result,
+            vec![GepIndex::Constant(2)],
+            i64_ty.into(),
+        );
         elem.get_operation().insert_at_back(entry, &ctx);
         let value_result = value.get_result(&ctx);
         let elem_result = elem.get_result(&ctx);
@@ -980,7 +1078,13 @@ mod tests {
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
         else_block.insert_at_back(func.get_region(&ctx).unwrap(), &ctx);
 
-        let cond = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i1_ty, APInt::from_u64(1, NonZero::new(1).unwrap()))));
+        let cond = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i1_ty,
+                APInt::from_u64(1, NonZero::new(1).unwrap()),
+            )),
+        );
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
         let cond_br = CondBrOp::new(
@@ -996,7 +1100,13 @@ mod tests {
         cond_br.get_operation().insert_at_back(entry, &ctx);
 
         for (block, value) in [(then_block, 1u64), (else_block, 0u64)] {
-            let constant = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(value, NonZero::new(64).unwrap()))));
+            let constant = ConstantOp::new(
+                &mut ctx,
+                Box::new(IntegerAttr::new(
+                    i64_ty,
+                    APInt::from_u64(value, NonZero::new(64).unwrap()),
+                )),
+            );
             constant.get_operation().insert_at_back(block, &ctx);
             let result = constant.get_result(&ctx);
             ReturnOp::new(&mut ctx, Some(result))
@@ -1083,7 +1193,13 @@ mod tests {
         func.get_or_create_entry_block(&mut ctx);
         func.get_operation().insert_at_back(body, &ctx);
         let entry = func.get_entry_block(&ctx).unwrap();
-        let zero = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(0, NonZero::new(64).unwrap()))));
+        let zero = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(0, NonZero::new(64).unwrap()),
+            )),
+        );
         zero.get_operation().insert_at_back(entry, &ctx);
         let zero_result = zero.get_result(&ctx);
         ReturnOp::new(&mut ctx, Some(zero_result))

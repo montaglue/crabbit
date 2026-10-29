@@ -1,5 +1,6 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         builtin::op_interfaces::OneRegionInterface,
         x86_64::{
@@ -9,7 +10,6 @@ use crate::{
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{frontend::module_op, util::cast_operation};
@@ -35,7 +35,12 @@ impl Pass for X86_64FrameLowerPass {
         "x86-64-frame-lower"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -164,7 +169,11 @@ mod tests {
         x86_64_ops::ret(&mut ctx).insert_at_back(entry, &ctx);
 
         X86_64FrameLowerPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let expected: Vec<(String, Option<String>)> = CALLEE_SAVED_GPRS
@@ -190,8 +199,10 @@ mod tests {
         let mut ctx = context();
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
-        x86_64_ops::ldr_stack_arg(&mut ctx, Register::virtual_gpr(0), 0).insert_at_back(entry, &ctx);
-        x86_64_ops::mov(&mut ctx, Register::virtual_gpr(1), Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        x86_64_ops::ldr_stack_arg(&mut ctx, Register::virtual_gpr(0), 0)
+            .insert_at_back(entry, &ctx);
+        x86_64_ops::mov(&mut ctx, Register::virtual_gpr(1), Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
 
         insert_prologue(&mut ctx, entry, 48);
 
@@ -217,7 +228,9 @@ mod tests {
         let mnemonics: Vec<_> = ops.iter().map(|(mnemonic, _)| mnemonic.as_str()).collect();
         assert_eq!(
             mnemonics,
-            ["push", "push", "push", "push", "push", "pop", "pop", "pop", "pop", "pop", "ret"]
+            [
+                "push", "push", "push", "push", "push", "pop", "pop", "pop", "pop", "pop", "ret"
+            ]
         );
     }
 }

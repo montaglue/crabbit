@@ -21,11 +21,11 @@ use std::collections::HashMap;
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::aarch64::ops::{self as aarch64_ops, BCondOp, BOp, BrkOp, CbnzOp, FuncOp, RetOp},
     dialects::builtin::op_interfaces::OneRegionInterface,
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::hot_path::{CfgEdge, HotPathInfo},
 };
 
@@ -38,7 +38,12 @@ impl Pass for Aarch64BlockPlacementPass {
         "aarch64-block-placement"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let ops: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -151,11 +156,7 @@ fn materialize_fallthrough_branches(ctx: &mut Context, blocks: &[Ptr<BasicBlock>
             let branch = aarch64_ops::b(ctx, next);
             branch.insert_at_back(block, ctx);
             if super::blockmap::blockmap_enabled() {
-                super::opmap::set_derived_from(
-                    ctx,
-                    branch,
-                    super::opmap::roots::PLACEMENT,
-                );
+                super::opmap::set_derived_from(ctx, branch, super::opmap::roots::PLACEMENT);
             }
         }
     }
@@ -296,8 +297,8 @@ fn simplify_branches_for_layout(ctx: &mut Context, layout: &[Ptr<BasicBlock>]) {
 
 #[cfg(test)]
 mod tests {
-    use crate::ll::LinkageAttr;
     use super::*;
+    use crate::ll::LinkageAttr;
     use crate::{
         common_traits::Named,
         dialects::aarch64::{self, attributes::ConditionCode},

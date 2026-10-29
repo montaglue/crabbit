@@ -48,12 +48,7 @@ pub mod types {
             elem: TypeHandle,
             mutable: bool,
         ) -> TypedHandle<dm_types::MirPtrType> {
-            dm_types::MirPtrType::get(
-                ctx,
-                elem,
-                mutable,
-                dm_types::address_space::GENERIC,
-            )
+            dm_types::MirPtrType::get(ctx, elem, mutable, dm_types::address_space::GENERIC)
         }
     }
 }
@@ -68,9 +63,12 @@ pub(super) fn ptr_like(ctx: &mut Context, like: TypeHandle, pointee: TypeHandle)
         .map(|p| (p.is_mutable, p.address_space, p.kind));
     match shape {
         Some((is_mutable, address_space, kind)) => {
-            dm_types::MirPtrType::get_with_kind(ctx, pointee, is_mutable, address_space, kind).into()
+            dm_types::MirPtrType::get_with_kind(ctx, pointee, is_mutable, address_space, kind)
+                .into()
         }
-        None => dm_types::MirPtrType::get(ctx, pointee, true, dm_types::address_space::GENERIC).into(),
+        None => {
+            dm_types::MirPtrType::get(ctx, pointee, true, dm_types::address_space::GENERIC).into()
+        }
     }
 }
 
@@ -169,8 +167,7 @@ macro_rules! shim_cmpop {
                         op: icmp.get_operation(),
                     };
                 }
-                let i1: TypeHandle =
-                    IntegerType::get(ctx, 1, Signedness::Signless).into();
+                let i1: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
                 let op = Operation::new(
                     ctx,
                     dm_ops::$Theirs::get_concrete_op_info(),
@@ -194,11 +191,7 @@ pub mod ops {
     }
 
     impl FuncOp {
-        pub fn new(
-            ctx: &mut Context,
-            name: Identifier,
-            ty: TypedHandle<FunctionType>,
-        ) -> Self {
+        pub fn new(ctx: &mut Context, name: Identifier, ty: TypedHandle<FunctionType>) -> Self {
             let op = Operation::new(
                 ctx,
                 dm_ops::MirFuncOp::get_concrete_op_info(),
@@ -211,8 +204,11 @@ pub mod ops {
             func.set_symbol_name(ctx, name);
             let arg_types = ty.deref(ctx).arg_types();
             let region = op.deref(ctx).get_region(0);
-            let entry =
-                BasicBlock::new(ctx, Some("entry".try_into().expect("static identifier literal")), arg_types);
+            let entry = BasicBlock::new(
+                ctx,
+                Some("entry".try_into().expect("static identifier literal")),
+                arg_types,
+            );
             entry.insert_at_front(region, ctx);
             FuncOp { op }
         }
@@ -252,8 +248,7 @@ pub mod ops {
                     vec![],
                     0,
                 );
-                dm_ops::MirFloatConstantOp::new(op)
-                    .set_attr_float_value(ctx, fp32);
+                dm_ops::MirFloatConstantOp::new(op).set_attr_float_value(ctx, fp32);
                 return ConstantOp { op };
             }
             if let Some(fp64) = (*attr).downcast_ref::<FPDoubleAttr>() {
@@ -267,8 +262,7 @@ pub mod ops {
                     vec![],
                     0,
                 );
-                dm_ops::MirFloatConstantOp::new(op)
-                    .set_attr_float_value_f64(ctx, fp64);
+                dm_ops::MirFloatConstantOp::new(op).set_attr_float_value_f64(ctx, fp64);
                 return ConstantOp { op };
             }
             panic!("oxide constant shim: unsupported constant attribute kind");
@@ -309,11 +303,7 @@ pub mod ops {
     }
 
     impl AddressOfOp {
-        pub fn new(
-            ctx: &mut Context,
-            symbol: Identifier,
-            _result_ty: TypeHandle,
-        ) -> Self {
+        pub fn new(ctx: &mut Context, symbol: Identifier, _result_ty: TypeHandle) -> Self {
             let addr = pllvm::ops::AddressOfOp::new(ctx, symbol, 0);
             AddressOfOp {
                 op: addr.get_operation(),
@@ -328,8 +318,7 @@ pub mod ops {
 
     impl AllocaOp {
         pub fn new(ctx: &mut Context, elem_type: TypeHandle) -> Self {
-            let ptr_ty: TypeHandle =
-                super::types::PtrType::get(ctx, elem_type, true).into();
+            let ptr_ty: TypeHandle = super::types::PtrType::get(ctx, elem_type, true).into();
             let op = Operation::new(
                 ctx,
                 dm_ops::MirAllocaOp::get_concrete_op_info(),
@@ -435,14 +424,16 @@ pub mod ops {
                     .downcast_ref::<dm_types::MirPtrType>()
                     .map(|p| (p.pointee, p.is_mutable, p.address_space));
                 match raw {
-                    Some((pointee, is_mutable, address_space)) => dm_types::MirPtrType::get_with_kind(
-                        ctx,
-                        pointee,
-                        is_mutable,
-                        address_space,
-                        dm_types::MirPointerKind::from_raw_mutability(is_mutable),
-                    )
-                    .into(),
+                    Some((pointee, is_mutable, address_space)) => {
+                        dm_types::MirPtrType::get_with_kind(
+                            ctx,
+                            pointee,
+                            is_mutable,
+                            address_space,
+                            dm_types::MirPointerKind::from_raw_mutability(is_mutable),
+                        )
+                        .into()
+                    }
                     None => result_type,
                 }
             } else {
@@ -501,12 +492,7 @@ pub mod ops {
     impl InsertValueOp {
         /// Old cmir operand order is `(value, aggregate, ..)`; the llvm op
         /// takes `(aggregate, value, ..)`.
-        pub fn new(
-            ctx: &mut Context,
-            value: Value,
-            aggregate: Value,
-            indices: Vec<u32>,
-        ) -> Self {
+        pub fn new(ctx: &mut Context, value: Value, aggregate: Value, indices: Vec<u32>) -> Self {
             let insert = pllvm::ops::InsertValueOp::new(ctx, aggregate, value, indices);
             InsertValueOp {
                 op: insert.get_operation(),
@@ -539,11 +525,7 @@ pub mod ops {
     }
 
     impl GotoOp {
-        pub fn new(
-            ctx: &mut Context,
-            dest: Ptr<BasicBlock>,
-            dest_operands: Vec<Value>,
-        ) -> Self {
+        pub fn new(ctx: &mut Context, dest: Ptr<BasicBlock>, dest_operands: Vec<Value>) -> Self {
             let op = Operation::new(
                 ctx,
                 dm_ops::MirGotoOp::get_concrete_op_info(),
@@ -570,9 +552,11 @@ pub mod ops {
             false_dest: Ptr<BasicBlock>,
             false_operands: Vec<Value>,
         ) -> Self {
-            let (operands, sizes) = dm_ops::MirCondBranchOp::compute_segment_sizes(
-                vec![vec![condition], true_operands, false_operands],
-            );
+            let (operands, sizes) = dm_ops::MirCondBranchOp::compute_segment_sizes(vec![
+                vec![condition],
+                true_operands,
+                false_operands,
+            ]);
             let op = Operation::new(
                 ctx,
                 dm_ops::MirCondBranchOp::get_concrete_op_info(),
@@ -620,8 +604,7 @@ pub mod ops {
                 vec![],
                 0,
             );
-            dm_ops::MirCallOp::new(op)
-                .set_attr_callee(ctx, StringAttr::new(callee.to_string()));
+            dm_ops::MirCallOp::new(op).set_attr_callee(ctx, StringAttr::new(callee.to_string()));
             CallOp { op }
         }
 
@@ -646,8 +629,7 @@ pub mod ops {
                     ty
                 }
             };
-            let result_ty = result_type
-                .unwrap_or_else(|| pllvm::types::VoidType::get(ctx).into());
+            let result_ty = result_type.unwrap_or_else(|| pllvm::types::VoidType::get(ctx).into());
             let result_ty = sanitize(ctx, result_ty);
             let arg_tys: Vec<TypeHandle> = args
                 .iter()
@@ -657,12 +639,8 @@ pub mod ops {
                 .map(|t| sanitize(ctx, t))
                 .collect();
             let func_ty = pllvm::types::FuncType::get(ctx, result_ty, arg_tys, false);
-            let call = pllvm::ops::CallOp::new(
-                ctx,
-                CallOpCallable::Indirect(callee),
-                func_ty,
-                args,
-            );
+            let call =
+                pllvm::ops::CallOp::new(ctx, CallOpCallable::Indirect(callee), func_ty, args);
             CallOp {
                 op: call.get_operation(),
             }
@@ -752,11 +730,7 @@ pub mod ops {
 
 /// Pick the dialect-mir cast kind for a `(input, result)` type pair, the
 /// way the old `cmir.cast` conversion classified casts structurally.
-fn cast_kind(
-    ctx: &Context,
-    input: TypeHandle,
-    result: TypeHandle,
-) -> Option<MirCastKindAttr> {
+fn cast_kind(ctx: &Context, input: TypeHandle, result: TypeHandle) -> Option<MirCastKindAttr> {
     #[derive(PartialEq)]
     enum Kind {
         Int,
@@ -772,9 +746,7 @@ fn cast_kind(
             || ty_ref.is::<crate::dialects::builtin::types::FP64Type>()
         {
             Kind::Float
-        } else if ty_ref.is::<dm_types::MirPtrType>()
-            || ty_ref.is::<pllvm::types::PointerType>()
-        {
+        } else if ty_ref.is::<dm_types::MirPtrType>() || ty_ref.is::<pllvm::types::PointerType>() {
             Kind::Pointer
         } else {
             Kind::Other

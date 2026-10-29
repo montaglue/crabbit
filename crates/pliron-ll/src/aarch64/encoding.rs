@@ -142,8 +142,7 @@ fn encode_fixed_inst(ctx: &Context, op: Ptr<Operation>, opcode: Aarch64Opcode) -
         ops::MovkOp::OPCODE => encode_wide_move(ctx, op, 0xf280_0000),
         ops::MovOp::OPCODE => Some(
             0xaa00_03e0
-                | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32)
-                    << 16)
+                | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32) << 16)
                 | xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()).unwrap()) as u32,
         ),
         ops::AddOp::OPCODE => encode_three_reg(ctx, op, 0x8b00_0000),
@@ -314,8 +313,7 @@ fn encode_fixed_inst(ctx: &Context, op: Ptr<Operation>, opcode: Aarch64Opcode) -
         ),
         ops::BlrOp::OPCODE => Some(
             0xd63f_0000
-                | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32)
-                    << 5),
+                | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32) << 5),
         ),
         ops::CsetOp::OPCODE => encode_cset(ctx, op),
         ops::RetOp::OPCODE => Some(0xd65f_03c0),
@@ -596,8 +594,8 @@ fn encode_mem_offset_with(
     data_number: fn(Register) -> u8,
 ) -> Option<u32> {
     let bytes = ops::imm(ctx, op)?;
-    let rn = fixed_rn
-        .unwrap_or_else(|| xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()));
+    let rn =
+        fixed_rn.unwrap_or_else(|| xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()));
     if bytes <= 4095 * scale && bytes % scale == 0 {
         return Some(
             base | (((bytes / scale) as u32) << 10)
@@ -620,8 +618,7 @@ fn encode_mem_offset_with(
 fn encode_cmp(ctx: &Context, op: Ptr<Operation>) -> Option<u32> {
     Some(
         0xeb00_001f
-            | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32)
-                << 16)
+            | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32) << 16)
             | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32) << 5),
     )
 }
@@ -638,8 +635,7 @@ fn encode_cset(ctx: &Context, op: Ptr<Operation>) -> Option<u32> {
 
 fn encode_three_reg(ctx: &Context, op: Ptr<Operation>, base: u32) -> Option<u32> {
     Some(
-        base | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32)
-            << 16)
+        base | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref()).unwrap()) as u32) << 16)
             | ((xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref()).unwrap()) as u32) << 5)
             | xreg(ops::reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref()).unwrap()) as u32,
     )
@@ -667,13 +663,25 @@ mod tests {
     fn encodes_variable_shift_register_fields() {
         let mut ctx = context();
 
-        let lsr = ops::binary(&mut ctx, ops::LsrOp::OPCODE, Register::gpr(9), Register::gpr(10), Register::gpr(12));
+        let lsr = ops::binary(
+            &mut ctx,
+            ops::LsrOp::OPCODE,
+            Register::gpr(9),
+            Register::gpr(10),
+            Register::gpr(12),
+        );
         assert_eq!(
             encode_fixed_inst(&ctx, lsr, ops::LsrOp::OPCODE),
             Some(0x9acc_2549)
         );
 
-        let shl = ops::binary(&mut ctx, ops::ShlOp::OPCODE, Register::gpr(9), Register::gpr(10), Register::gpr(12));
+        let shl = ops::binary(
+            &mut ctx,
+            ops::ShlOp::OPCODE,
+            Register::gpr(9),
+            Register::gpr(10),
+            Register::gpr(12),
+        );
         assert_eq!(
             encode_fixed_inst(&ctx, shl, ops::ShlOp::OPCODE),
             Some(0x9acc_2149)
@@ -720,7 +728,11 @@ mod tests {
         ];
         for (opcode, rd, rn, rm, expected) in three {
             let inst = ops::binary(&mut ctx, *opcode, *rd, *rn, *rm);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
 
         let two: &[(Aarch64Opcode, Register, Register, u32)] = &[
@@ -774,20 +786,36 @@ mod tests {
         ];
         for (opcode, rd, rn, expected) in two {
             let inst = ops::unary(&mut ctx, *opcode, *rd, *rn);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
 
         // fcmp d1, d2 ; fcmp s1, s2
         let fcmp_d = ops::fcmp(&mut ctx, Aarch64Opcode::FcmpD, d(1), d(2));
-        assert_eq!(encode_fixed_inst(&ctx, fcmp_d, Aarch64Opcode::FcmpD), Some(0x1e62_2020));
+        assert_eq!(
+            encode_fixed_inst(&ctx, fcmp_d, Aarch64Opcode::FcmpD),
+            Some(0x1e62_2020)
+        );
         let fcmp_s = ops::fcmp(&mut ctx, Aarch64Opcode::FcmpS, s(1), s(2));
-        assert_eq!(encode_fixed_inst(&ctx, fcmp_s, Aarch64Opcode::FcmpS), Some(0x1e22_2020));
+        assert_eq!(
+            encode_fixed_inst(&ctx, fcmp_s, Aarch64Opcode::FcmpS),
+            Some(0x1e22_2020)
+        );
 
         // fmov d0, d1 ; fmov s0, s1
         let fmov_d = ops::fmov_rr(&mut ctx, Aarch64Opcode::FmovD, d(0), d(1));
-        assert_eq!(encode_fixed_inst(&ctx, fmov_d, Aarch64Opcode::FmovD), Some(0x1e60_4020));
+        assert_eq!(
+            encode_fixed_inst(&ctx, fmov_d, Aarch64Opcode::FmovD),
+            Some(0x1e60_4020)
+        );
         let fmov_s = ops::fmov_rr(&mut ctx, Aarch64Opcode::FmovS, s(0), s(1));
-        assert_eq!(encode_fixed_inst(&ctx, fmov_s, Aarch64Opcode::FmovS), Some(0x1e20_4020));
+        assert_eq!(
+            encode_fixed_inst(&ctx, fmov_s, Aarch64Opcode::FmovS),
+            Some(0x1e20_4020)
+        );
 
         // fmov d0, #1.5 ; fmov s0, #-2.0
         let imm8_d = super::fmov_imm8_for_f64_bits(1.5f64.to_bits()).unwrap();
@@ -821,7 +849,11 @@ mod tests {
         ];
         for (opcode, rt, offset, expected) in cases_sp {
             let inst = ops::ldr_sp_offset_sized(&mut ctx, *opcode, *rt, *offset);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
 
         // ldr/str d0, [x1, #24] ; ldr/str s0, [x1, #12]
@@ -838,7 +870,11 @@ mod tests {
         ];
         for (opcode, rt, offset, expected) in cases_reg {
             let inst = ops::ldr_reg_offset_sized(&mut ctx, *opcode, *rt, x(1), *offset);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
     }
 
@@ -880,7 +916,11 @@ mod tests {
         ];
         for (opcode, expected) in three {
             let inst = ops::binary(&mut ctx, *opcode, q(0), q(1), q(2));
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
 
         let two: &[(Aarch64Opcode, Register, Register, u32)] = &[
@@ -899,7 +939,11 @@ mod tests {
         ];
         for (opcode, rd, rn, expected) in two {
             let inst = ops::unary(&mut ctx, *opcode, *rd, *rn);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
 
         // mov v0.16b, v1.16b (orr alias)
@@ -952,7 +996,11 @@ mod tests {
         ];
         for (opcode, offset, expected) in cases_sp {
             let inst = ops::ldr_sp_offset_sized(&mut ctx, *opcode, q(0), *offset);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
 
         // ldr/str q0, [x1, #32] ; ldur/stur q0, [x1, #3] (unscaled fallback)
@@ -964,7 +1012,11 @@ mod tests {
         ];
         for (opcode, offset, expected) in cases_reg {
             let inst = ops::ldr_reg_offset_sized(&mut ctx, *opcode, q(0), x(1), *offset);
-            assert_eq!(encode_fixed_inst(&ctx, inst, *opcode), Some(*expected), "{opcode:?}");
+            assert_eq!(
+                encode_fixed_inst(&ctx, inst, *opcode),
+                Some(*expected),
+                "{opcode:?}"
+            );
         }
     }
 
@@ -1074,7 +1126,11 @@ fn encode_pc_relative_address(rd: u32, delta: i64, what: &str) -> CrabbitResult<
     let hi12 = ((magnitude >> 12) & 0xfff) as u32;
     // ADD (immediate) is 0x9100_0000, SUB (immediate) 0xd100_0000; bit 22
     // shifts the immediate left by 12.
-    let base = if delta < 0 { 0xd100_0000u32 } else { 0x9100_0000u32 };
+    let base = if delta < 0 {
+        0xd100_0000u32
+    } else {
+        0x9100_0000u32
+    };
     let words = [
         0x1000_0000 | rd,
         base | (lo12 << 10) | (rd << 5) | rd,

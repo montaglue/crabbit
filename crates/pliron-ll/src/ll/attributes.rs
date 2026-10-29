@@ -7,8 +7,8 @@ use pliron::builtin::attr_interfaces::OutlinedAttr;
 use pliron::derive::{attr_interface_impl, pliron_attr};
 use pliron::{
     context::Context,
-    irfmt::parsers::{int_parser, spaced},
     input_err,
+    irfmt::parsers::{int_parser, spaced},
     parsable::{Parsable, ParseResult, StateStream, StreamLocation},
     printable::{self, Printable},
 };
@@ -193,23 +193,32 @@ impl Parsable for DataAttr {
         let word = || many1::<String, _, _>(satisfy(|c: char| c.is_ascii_alphanumeric()));
         let mut parser = (
             combine::parser::char::string("align=").with(int_parser::<u64>()),
-            spaced(token(',')).skip(combine::parser::char::string("mut=")).with(word()),
-            spaced(token(',')).skip(combine::parser::char::string("bytes=")).with(word()),
-            spaced(token(',')).skip(combine::parser::char::string("relocs=")).with(between(
-                spaced(token('[')),
-                spaced(token(']')),
-                sep_by::<Vec<_>, _, _, _>(
-                    spaced(combine::parser(parse_data_reloc)),
-                    spaced(token(',')),
-                ),
-            )),
+            spaced(token(','))
+                .skip(combine::parser::char::string("mut="))
+                .with(word()),
+            spaced(token(','))
+                .skip(combine::parser::char::string("bytes="))
+                .with(word()),
+            spaced(token(','))
+                .skip(combine::parser::char::string("relocs="))
+                .with(between(
+                    spaced(token('[')),
+                    spaced(token(']')),
+                    sep_by::<Vec<_>, _, _, _>(
+                        spaced(combine::parser(parse_data_reloc)),
+                        spaced(token(',')),
+                    ),
+                )),
         );
         let ((align, mutable, bytes, relocs), commit) =
             parser.parse_stream(state_stream).into_result()?;
         let mutable = match mutable.as_str() {
             "true" => true,
             "false" => false,
-            other => input_err!(loc.clone(), "invalid data mutability `{other}`: expected `true` or `false`")?,
+            other => input_err!(
+                loc.clone(),
+                "invalid data mutability `{other}`: expected `true` or `false`"
+            )?,
         };
         let Some(bytes) = BytesAttr::parse_str(&bytes) else {
             input_err!(

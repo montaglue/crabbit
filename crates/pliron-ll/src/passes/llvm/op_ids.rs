@@ -10,8 +10,8 @@
 
 use crate::{
     context::{Context, Ptr},
-    ir::operation::Operation,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
+    ir::operation::Operation,
 };
 
 use crate::passes::aarch64::blockmap::blockmap_enabled;

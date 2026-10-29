@@ -16,17 +16,13 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
     dialects::llvm::op_interfaces::IsDeclaration,
     ir::{operation::Operation, region::Region},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
 };
 
-use super::{
-    analysis::deletable_op_ids,
-    inline::collect_functions,
-    midend_gate::midend_disabled,
-};
+use super::{analysis::deletable_op_ids, inline::collect_functions, midend_gate::midend_disabled};
 use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 
 pub struct LLVMAdcePass;
@@ -87,9 +83,10 @@ fn adce_region(
         };
         for operand in operands {
             if let Some(def) = operand.defining_op()
-                && marked.insert(def) {
-                    worklist.push(def);
-                }
+                && marked.insert(def)
+            {
+                worklist.push(def);
+            }
             // Block-argument operands need no action: the branches that
             // feed them are terminators, i.e. already roots.
         }
@@ -111,8 +108,7 @@ fn adce_region(
             }
             let unused = {
                 let operation = op.deref(ctx);
-                (0..operation.get_num_results())
-                    .all(|i| !operation.get_result(i).is_used(ctx))
+                (0..operation.get_num_results()).all(|i| !operation.get_result(i).is_used(ctx))
             };
             if unused {
                 Operation::erase(op, ctx);
@@ -129,10 +125,8 @@ fn adce_region(
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::op::Op;
     use super::*;
-    use pliron::builtin::op_interfaces::OneResultInterface as _;
-    use pliron_llvm::op_interfaces::IntBinArithOpWithOverflowFlag as _;
+    use crate::ir::op::Op;
     use crate::{
         dialects::{
             builtin::types::{IntegerType, Signedness},
@@ -142,9 +136,11 @@ mod tests {
                 types::{FuncType, PointerType},
             },
         },
-        ir::{basic_block::BasicBlock, value::Value, r#type::TypeHandle},
+        ir::{basic_block::BasicBlock, r#type::TypeHandle, value::Value},
         printable::Printable,
     };
+    use pliron::builtin::op_interfaces::OneResultInterface as _;
+    use pliron_llvm::op_interfaces::IntBinArithOpWithOverflowFlag as _;
 
     fn run_adce(ctx: &mut Context, func: FuncOp) -> String {
         LLVMAdcePass
@@ -153,9 +149,15 @@ mod tests {
         format!("{}", func.get_operation().disp(ctx))
     }
 
-    fn scaffold(ctx: &mut Context) -> (FuncOp, Ptr<crate::ir::basic_block::BasicBlock>, Value, Value) {
-        let i64_ty: TypeHandle =
-            IntegerType::get(ctx, 64, Signedness::Signless).into();
+    fn scaffold(
+        ctx: &mut Context,
+    ) -> (
+        FuncOp,
+        Ptr<crate::ir::basic_block::BasicBlock>,
+        Value,
+        Value,
+    ) {
+        let i64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let ptr_ty: TypeHandle = PointerType::get(ctx, 0).into();
         let fn_ty = FuncType::get(ctx, i64_ty, vec![i64_ty, ptr_ty], false);
         let func = FuncOp::new(ctx, "f".try_into().unwrap(), fn_ty);
@@ -196,12 +198,12 @@ mod tests {
 
     #[test]
     fn removes_dead_fp_chain() {
+        use crate::dialects::builtin::types::FP32Type;
+        use crate::dialects::llvm::ops::{FAddOp, SIToFPOp};
         use pliron_llvm::attributes::FastmathFlagsAttr;
         use pliron_llvm::op_interfaces::{
             CastOpInterface as _, FloatBinArithOpWithFastMathFlags as _,
         };
-        use crate::dialects::builtin::types::FP32Type;
-        use crate::dialects::llvm::ops::{FAddOp, SIToFPOp};
         let mut ctx = Context::new();
         let (func, entry, a, _p) = scaffold(&mut ctx);
         let f32_ty: TypeHandle = FP32Type::get(&ctx).into();
@@ -232,8 +234,7 @@ mod tests {
     fn keeps_chain_feeding_a_store() {
         let mut ctx = Context::new();
         let (func, entry, a, p) = scaffold(&mut ctx);
-        let i64_ty: TypeHandle =
-            IntegerType::get(&mut ctx, 64, Signedness::Signless).into();
+        let i64_ty: TypeHandle = IntegerType::get(&mut ctx, 64, Signedness::Signless).into();
         // gep + add feed a store: everything stays (store is a root).
         let add = AddOp::new_with_overflow_flag(&mut ctx, a, a, Default::default());
         add.get_operation().insert_at_back(entry, &ctx);

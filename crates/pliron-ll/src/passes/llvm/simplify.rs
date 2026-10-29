@@ -3,10 +3,8 @@
 //! elimination and dead code elimination. All rewrites are CFG-neutral.
 
 use crate::dialects::builtin::ops::ConstantOp;
-use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
-use pliron_llvm::op_interfaces::{
-    CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
-};
+use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
+use pliron_llvm::op_interfaces::{CastOpInterface as _, IntBinArithOpWithOverflowFlag as _};
 use pliron_llvm::ops::GepIndex;
 use std::num::NonZero;
 
@@ -14,19 +12,20 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         builtin::{
             attributes::IntegerAttr,
-            op_interfaces::{OneResultInterface},
+            op_interfaces::OneResultInterface,
             types::{IntegerType, Signedness},
         },
         llvm::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
             ops::{
-                AShrOp, AddOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, GetElementPtrOp, ICmpOp, InsertValueOp,
-                LShrOp, LoadOp, MulOp, OrOp, SDivOp, SExtOp, SRemOp, ShlOp,
-                StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
+                AShrOp, AddOp, AllocaOp, AndOp, BitcastOp, ExtractValueOp, GetElementPtrOp, ICmpOp,
+                InsertValueOp, LShrOp, LoadOp, MulOp, OrOp, SDivOp, SExtOp, SRemOp, ShlOp, StoreOp,
+                SubOp, TruncOp, UDivOp, URemOp, UndefOp, XorOp, ZExtOp,
             },
             types::PointerType,
         },
@@ -35,11 +34,10 @@ use crate::{
         op::{Op, OpId},
         operation::Operation,
         region::Region,
-        r#type::{TypedHandle, Typed},
+        r#type::{Typed, TypedHandle},
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
     utils::apint::APInt,
 };
@@ -56,13 +54,20 @@ impl Pass for LLVMSimplifyPass {
         "llvm-simplify"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let pure_ops = super::analysis::deletable_op_ids();
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;
             }
-            let region = func.get_region(ctx).expect("llvm.func definition must have a body");
+            let region = func
+                .get_region(ctx)
+                .expect("llvm.func definition must have a body");
             for _ in 0..MAX_ITERATIONS {
                 let mut changed = fold_ops(ctx, region)?;
                 changed |= forward_stores_to_loads(ctx, region);
@@ -181,10 +186,7 @@ pub(crate) fn replace_op_with_value(ctx: &mut Context, op: Ptr<Operation>, value
     Operation::erase(op, ctx);
 }
 
-fn fold_ops(
-    ctx: &mut Context,
-    region: Ptr<Region>,
-) -> CrabbitResult<bool> {
+fn fold_ops(ctx: &mut Context, region: Ptr<Region>) -> CrabbitResult<bool> {
     let mut changed = false;
     for op in function_ops(ctx, region) {
         changed |= fold_op(ctx, op)?;
@@ -271,7 +273,10 @@ fn fold_gep_aggregate_base(ctx: &mut Context, op: Ptr<Operation>) -> bool {
         return false;
     }
     loop {
-        let Some(agg_op) = aggregate.defining_op().filter(|_| aggregate.find_index(ctx) == 0) else {
+        let Some(agg_op) = aggregate
+            .defining_op()
+            .filter(|_| aggregate.find_index(ctx) == 0)
+        else {
             return false;
         };
         if Operation::get_opid(agg_op, ctx) != InsertValueOp::get_opid_static() {
@@ -349,10 +354,8 @@ fn fold_int_binary(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
         }
         (op_ref.get_operand(0), op_ref.get_operand(1))
     };
-    let (Some(lhs), Some(rhs)) = (
-        as_const_operand(ctx, lhs_v),
-        as_const_operand(ctx, rhs_v),
-    ) else {
+    let (Some(lhs), Some(rhs)) = (as_const_operand(ctx, lhs_v), as_const_operand(ctx, rhs_v))
+    else {
         return simplify_partial_const(ctx, op, opid, lhs_v, rhs_v);
     };
     let width = lhs.width;
@@ -536,13 +539,14 @@ fn fold_int_cast(ctx: &mut Context, op: Ptr<Operation>, opid: &OpId) -> bool {
     // trunc(zext(x)) -> x when the types round-trip exactly.
     if *opid == TruncOp::get_opid_static()
         && let Some(input_op) = input.defining_op().filter(|_| input.find_index(ctx) == 0)
-            && Operation::get_opid(input_op, ctx) == ZExtOp::get_opid_static() {
-                let source = input_op.deref(ctx).get_operand(0);
-                if source.get_type(ctx) == result_ty {
-                    replace_op_with_value(ctx, op, source);
-                    return true;
-                }
-            }
+        && Operation::get_opid(input_op, ctx) == ZExtOp::get_opid_static()
+    {
+        let source = input_op.deref(ctx).get_operand(0);
+        if source.get_type(ctx) == result_ty {
+            replace_op_with_value(ctx, op, source);
+            return true;
+        }
+    }
 
     let Some(input) = as_const_operand(ctx, input) else {
         return false;
@@ -568,7 +572,10 @@ fn fold_extractvalue(ctx: &mut Context, op: Ptr<Operation>) -> bool {
     let mut aggregate = extract.get_operation().deref(ctx).get_operand(0);
 
     loop {
-        let Some(agg_op) = aggregate.defining_op().filter(|_| aggregate.find_index(ctx) == 0) else {
+        let Some(agg_op) = aggregate
+            .defining_op()
+            .filter(|_| aggregate.find_index(ctx) == 0)
+        else {
             return false;
         };
         if Operation::get_opid(agg_op, ctx) == UndefOp::get_opid_static() {
@@ -731,10 +738,9 @@ fn forward_stores_to_loads(ctx: &mut Context, region: Ptr<Region>) -> bool {
         if uses.is_empty() {
             continue;
         }
-        if uses
-            .iter()
-            .any(|slot_use| Operation::get_opid(slot_use.user_op(), ctx) == LoadOp::get_opid_static())
-        {
+        if uses.iter().any(|slot_use| {
+            Operation::get_opid(slot_use.user_op(), ctx) == LoadOp::get_opid_static()
+        }) {
             continue;
         }
         for slot_use in uses {
@@ -800,11 +806,7 @@ fn forward_single_entry_store(ctx: &mut Context, region: Ptr<Region>, alloca: Al
 // Dead code elimination
 // ============================================================================
 
-fn eliminate_dead_code(
-    ctx: &mut Context,
-    region: Ptr<Region>,
-    pure_ops: &FxHashSet<OpId>,
-) -> bool {
+fn eliminate_dead_code(ctx: &mut Context, region: Ptr<Region>, pure_ops: &FxHashSet<OpId>) -> bool {
     let mut changed = false;
     loop {
         let mut erased_any = false;
@@ -836,7 +838,11 @@ fn is_trivially_dead(ctx: &Context, op: Ptr<Operation>) -> bool {
     let num_results = op.deref(ctx).get_num_results();
     for res_idx in 0..num_results {
         let result = op.deref(ctx).get_result(res_idx);
-        if result.uses(ctx).iter().any(|result_use| result_use.user_op() != op) {
+        if result
+            .uses(ctx)
+            .iter()
+            .any(|result_use| result_use.user_op() != op)
+        {
             return false;
         }
     }
@@ -845,14 +851,6 @@ fn is_trivially_dead(ctx: &Context, op: Ptr<Operation>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::{
-        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
-    };
-    #[allow(unused_imports)]
-    use pliron_llvm::op_interfaces::{
-        BinArithOp as _, CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
-    };
     use super::*;
     use crate::{
         dialects::{
@@ -867,6 +865,14 @@ mod tests {
         ir::r#type::{TypeHandle, TypedHandle},
         printable::Printable,
     };
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{
+        BinArithOp as _, CastOpInterface as _, IntBinArithOpWithOverflowFlag as _,
+    };
 
     fn test_context() -> Context {
         let ctx = Context::new();
@@ -879,7 +885,13 @@ mod tests {
 
     fn int_const(ctx: &mut Context, width: u32, value: u64) -> ConstantOp {
         let ty = int_ty(ctx, width);
-        ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, APInt::from_u64(value, NonZero::new(width as usize).unwrap()))))
+        ConstantOp::new(
+            ctx,
+            Box::new(IntegerAttr::new(
+                ty,
+                APInt::from_u64(value, NonZero::new(width as usize).unwrap()),
+            )),
+        )
     }
 
     fn run_simplify(ctx: &mut Context, func: FuncOp) -> String {
@@ -1048,14 +1060,27 @@ mod tests {
                 let c8 = int_const(ctx, 64, 8);
                 c8.get_operation().insert_at_back(entry, ctx);
                 let c8_v = c8.get_result(ctx);
-                let (lhs, rhs) = if const_on_left { (c8_v, arg) } else { (arg, c8_v) };
+                let (lhs, rhs) = if const_on_left {
+                    (c8_v, arg)
+                } else {
+                    (arg, c8_v)
+                };
                 let mul = MulOp::new_with_overflow_flag(ctx, lhs, rhs, Default::default());
                 mul.get_operation().insert_at_back(entry, ctx);
                 mul.get_result(ctx)
             });
-            assert!(!text.contains("llvm.mul"), "const_on_left={const_on_left}: {text}");
-            assert!(text.contains("llvm.shl"), "const_on_left={const_on_left}: {text}");
-            assert!(text.contains("<3: i64>"), "const_on_left={const_on_left}: {text}");
+            assert!(
+                !text.contains("llvm.mul"),
+                "const_on_left={const_on_left}: {text}"
+            );
+            assert!(
+                text.contains("llvm.shl"),
+                "const_on_left={const_on_left}: {text}"
+            );
+            assert!(
+                text.contains("<3: i64>"),
+                "const_on_left={const_on_left}: {text}"
+            );
         }
     }
 

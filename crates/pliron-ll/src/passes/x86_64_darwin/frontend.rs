@@ -5,12 +5,8 @@ use pliron::derive::op_interface_impl;
 use crate::{
     context::{Context, Ptr},
     dialects::{
-        x86_64::{
-            attributes::{AbiLocation, FunctionAbi},
-            registers::{self, Register},
-        },
         builtin::{
-            op_interfaces::{AtMostOneRegionInterface},
+            op_interfaces::AtMostOneRegionInterface,
             ops::ModuleOp,
             type_interfaces::FunctionTypeInterface,
             types::{FP32Type, FP64Type, IntegerType, UnitType},
@@ -19,13 +15,15 @@ use crate::{
             attributes::LinkageAttr as LlvmLinkageAttr,
             ops::{
                 AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CallOp, CondBrOp,
-                ExtractValueOp, FuncOp, GetElementPtrOp, ICmpOp, InsertValueOp,
-                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp,
-                SRemOp,
-                ShlOp, StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, UnreachableOp, XorOp,
-                SExtOp, ZExtOp,
+                ExtractValueOp, FuncOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp, LShrOp,
+                LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp, SExtOp, SRemOp, ShlOp,
+                StoreOp, SubOp, TruncOp, UDivOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp,
             },
             types::{FuncType, PointerType, VoidType},
+        },
+        x86_64::{
+            attributes::{AbiLocation, FunctionAbi},
+            registers::{self, Register},
         },
     },
     input_error_noloc,
@@ -42,7 +40,7 @@ use crate::{
 use crate::ll::ops::CStrOp;
 
 use super::{error::X86_64DarwinErr, util::cast_operation};
-use crate::ll::{LinkageAttr};
+use crate::ll::LinkageAttr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AbiClass {
@@ -132,7 +130,12 @@ pub(super) fn validate_function_type(
 }
 
 pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> CrabbitResult<()> {
-    for block in func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
+    for block in func
+        .get_region(ctx)
+        .expect("llvm.func definition must have a body")
+        .deref(ctx)
+        .iter(ctx)
+    {
         let mut op = block.deref(ctx).get_head();
         while let Some(op_ptr) = op {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);

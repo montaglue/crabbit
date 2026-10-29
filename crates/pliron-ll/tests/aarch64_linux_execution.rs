@@ -23,8 +23,8 @@ use pliron_ll::{
         llvm::{
             attributes::{ICmpPredicateAttr, LinkageAttr},
             ops::{
-                AddOp, AddressOfOp, CallOp, CondBrOp, FuncOp, GlobalOp, ICmpOp, LoadOp,
-                ReturnOp, StoreOp,
+                AddOp, AddressOfOp, CallOp, CondBrOp, FuncOp, GlobalOp, ICmpOp, LoadOp, ReturnOp,
+                StoreOp,
             },
             types::{FuncType, PointerType},
         },
@@ -110,11 +110,7 @@ fn tls_global(
 }
 
 /// Take the address of `name` in `block`, yielding a pointer value.
-fn address_of(
-    ctx: &mut Context,
-    block: pliron_ll::context::Ptr<BasicBlock>,
-    name: &str,
-) -> Value {
+fn address_of(ctx: &mut Context, block: pliron_ll::context::Ptr<BasicBlock>, name: &str) -> Value {
     let addr = AddressOfOp::new(ctx, name.try_into().unwrap(), 0);
     addr.get_operation().insert_at_back(block, ctx);
     addr.get_result(ctx)
@@ -354,9 +350,16 @@ fn passes_global_addresses_as_values() {
     let same = ICmpOp::new(&mut ctx, ICmpPredicateAttr::EQ, a, b);
     same.get_operation().insert_at_back(entry, &ctx);
     let same_result = same.get_result(&ctx);
-    CondBrOp::new(&mut ctx, same_result, then_block, vec![], else_block, vec![])
-        .get_operation()
-        .insert_at_back(entry, &ctx);
+    CondBrOp::new(
+        &mut ctx,
+        same_result,
+        then_block,
+        vec![],
+        else_block,
+        vec![],
+    )
+    .get_operation()
+    .insert_at_back(entry, &ctx);
 
     let call_ty = FuncType::get(&mut ctx, i64_ty, vec![ptr_ty], false);
     let call = CallOp::new(
@@ -377,7 +380,10 @@ fn passes_global_addresses_as_values() {
         .insert_at_back(else_block, &ctx);
 
     let bytes = aarch64_linux::emit_elf_object_bytes(&mut ctx, module.get_operation()).unwrap();
-    assert_eq!(link_and_run("passes_global_addresses_as_values", &bytes), 55);
+    assert_eq!(
+        link_and_run("passes_global_addresses_as_values", &bytes),
+        55
+    );
 }
 
 #[test]
@@ -416,7 +422,10 @@ fn reads_and_writes_a_thread_local_global() {
         .insert_at_back(entry, &ctx);
 
     let bytes = aarch64_linux::emit_elf_object_bytes(&mut ctx, module.get_operation()).unwrap();
-    assert_eq!(link_and_run("reads_and_writes_a_thread_local_global", &bytes), 42);
+    assert_eq!(
+        link_and_run("reads_and_writes_a_thread_local_global", &bytes),
+        42
+    );
 }
 
 /// Define an external `name() -> i64` that loads the thread-local `global`,

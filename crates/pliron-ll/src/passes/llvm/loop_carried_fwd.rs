@@ -82,9 +82,7 @@ use crate::{
         llvm::{
             attributes::ICmpPredicateAttr,
             op_interfaces::IsDeclaration,
-            ops::{
-                AddOp, BrOp, CondBrOp, ICmpOp, LoadOp, MulOp, ShlOp, StoreOp, SubOp, UndefOp,
-            },
+            ops::{AddOp, BrOp, CondBrOp, ICmpOp, LoadOp, MulOp, ShlOp, StoreOp, SubOp, UndefOp},
         },
     },
     ir::{
@@ -100,7 +98,9 @@ use crate::{
 };
 
 use super::{
-    analysis::{NaturalLoop, OpEffect, dominator_tree, memory_benign_op_ids, natural_loops, op_effects},
+    analysis::{
+        NaturalLoop, OpEffect, dominator_tree, memory_benign_op_ids, natural_loops, op_effects,
+    },
     gvn::{AddrKey, IdxKey, addr_key},
     inline::collect_functions,
     midend_gate::midend_disabled,
@@ -476,8 +476,7 @@ fn match_loads(
         }
         let load_key = addr_key(ctx, load.get_operand_address(ctx));
         let mut shared = Vec::new();
-        let KeyCmp::Shifted(v_load, v_store) = cmp_keys(&load_key, store_key, &mut shared)
-        else {
+        let KeyCmp::Shifted(v_load, v_store) = cmp_keys(&load_key, store_key, &mut shared) else {
             continue;
         };
         // Everything the two addresses share must be loop-invariant, or
@@ -501,10 +500,7 @@ fn match_loads(
         let Some(d_root) = deriv_wrt_iv(ctx, root_l, iv, &natural_loop.body, width, 0) else {
             continue;
         };
-        let adv = mask_to_width(
-            scale_l.wrapping_mul(d_root).wrapping_mul(step),
-            width,
-        );
+        let adv = mask_to_width(scale_l.wrapping_mul(d_root).wrapping_mul(step), width);
         if adv == 0 {
             continue;
         }
@@ -607,7 +603,9 @@ fn affine_shift(ctx: &Context, value: Value, width: u32) -> (Value, u128, u128) 
             root = x;
         } else if opid == SubOp::get_opid_static() {
             // Only `x - C`; `C - x` flips the scale sign — bail on it.
-            let Some(c) = as_const_operand(ctx, b) else { break };
+            let Some(c) = as_const_operand(ctx, b) else {
+                break;
+            };
             if c.width != width {
                 break;
             }
@@ -627,7 +625,9 @@ fn affine_shift(ctx: &Context, value: Value, width: u32) -> (Value, u128, u128) 
             scale = scale.wrapping_mul(c.masked());
             root = x;
         } else if opid == ShlOp::get_opid_static() {
-            let Some(c) = as_const_operand(ctx, b) else { break };
+            let Some(c) = as_const_operand(ctx, b) else {
+                break;
+            };
             let shift = c.masked();
             if c.width != width || shift >= u128::from(width) {
                 break;
@@ -638,7 +638,11 @@ fn affine_shift(ctx: &Context, value: Value, width: u32) -> (Value, u128, u128) 
             break;
         }
     }
-    (root, mask_to_width(scale, width), mask_to_width(offset, width))
+    (
+        root,
+        mask_to_width(scale, width),
+        mask_to_width(offset, width),
+    )
 }
 
 /// Structural derivative of `value` w.r.t. one loop iteration's change of
@@ -864,7 +868,10 @@ fn stamp_clone(ctx: &mut Context, clone: Ptr<Operation>, original: Ptr<Operation
     let sources = opmap::effective_sources(ctx, original);
     {
         let mut clone_ref = clone.deref_mut(ctx);
-        clone_ref.attributes.0.remove(&opmap::ATTR_KEY_AARCH64_OP_ID);
+        clone_ref
+            .attributes
+            .0
+            .remove(&opmap::ATTR_KEY_AARCH64_OP_ID);
         clone_ref
             .attributes
             .0
@@ -1375,8 +1382,8 @@ mod tests {
         let cbr = CondBrOp::from_operation(header_term);
         let succ0 = cbr.get_operation().deref(&ctx).get_successor(0);
         let succ1 = cbr.get_operation().deref(&ctx).get_successor(1);
-        let new_term = CondBrOp::new(&mut ctx, flag_v, succ0, vec![], succ1, vec![])
-            .get_operation();
+        let new_term =
+            CondBrOp::new(&mut ctx, flag_v, succ0, vec![], succ1, vec![]).get_operation();
         new_term.insert_before(&ctx, header_term);
         Operation::erase(header_term, &mut ctx);
 
@@ -1536,8 +1543,8 @@ mod tests {
 
     #[test]
     fn stamps_attribution_and_keeps_op_ids_unique() {
-        use crate::dialects::builtin::ops::ModuleOp;
         use crate::dialects::builtin::op_interfaces::SingleBlockRegionInterface as _;
+        use crate::dialects::builtin::ops::ModuleOp;
         let mut ctx = Context::new();
         let module = ModuleOp::new(&mut ctx, "m".try_into().unwrap());
         let module_block = module.get_body(&ctx, 0);
@@ -1546,7 +1553,11 @@ mod tests {
         opmap::assign_op_ids(&mut ctx, module.get_operation()).unwrap();
 
         LLVMLoopCarriedFwdPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
         assert_eq!(header.deref(&ctx).get_num_arguments(), 2);
 
@@ -1608,8 +1619,8 @@ mod tests {
     /// (everything up to and including the second gvn).
     fn run_midend_prefix(ctx: &mut Context, root: Ptr<Operation>) {
         use super::super::{
-            div_strength_reduce, inline, op_ids, pin_type_punned_slots, simplify,
-            simplify_cfg, sroa, gvn as gvn_mod, licm as licm_mod,
+            div_strength_reduce, gvn as gvn_mod, inline, licm as licm_mod, op_ids,
+            pin_type_punned_slots, simplify, simplify_cfg, sroa,
         };
         use crate::conversion::pass::{Mem2RegPass, Passes};
         let mut passes = Passes::default();
@@ -1669,7 +1680,9 @@ mod tests {
             let mut in_store_block = 0;
             let mut elsewhere = 0;
             for func in collect_functions(ctx, root) {
-                let Some(region) = func.get_region(ctx) else { continue };
+                let Some(region) = func.get_region(ctx) else {
+                    continue;
+                };
                 for block in region.deref(ctx).iter(ctx) {
                     let text = block_ops_text(ctx, block);
                     let loads = text.matches("llvm.load").count();
@@ -1686,8 +1699,7 @@ mod tests {
         // mutated in place).
         let mut ctx_before = Context::new();
         let module_before = parse_module(&mut ctx_before, &before);
-        let (loop_loads_before, outside_before) =
-            loads_by_store_block(&ctx_before, module_before);
+        let (loop_loads_before, outside_before) = loads_by_store_block(&ctx_before, module_before);
         let (loop_loads_after, outside_after) = loads_by_store_block(&ctx, module);
         assert_eq!(
             loop_loads_after,

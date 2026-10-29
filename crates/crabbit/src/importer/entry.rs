@@ -38,10 +38,18 @@ pub fn import_crate<'tcx>(tcx: TyCtxt<'tcx>) -> ImportedCrate {
     let mut ctx = create_context();
     let module_name = "rust_crate".try_into().expect("static identifier literal");
     let module_op = builtin::ops::ModuleOp::new(&mut ctx, module_name);
-    let module_body = module_op.get_region(&ctx).deref(&ctx).get_head().expect("ModuleOp is built with one region holding one block");
+    let module_body = module_op
+        .get_region(&ctx)
+        .deref(&ctx)
+        .get_head()
+        .expect("ModuleOp is built with one region holding one block");
     let module = module_op.get_operation();
-    let kernel_module_op =
-        builtin::ops::ModuleOp::new(&mut ctx, "rust_kernels".try_into().expect("static identifier literal"));
+    let kernel_module_op = builtin::ops::ModuleOp::new(
+        &mut ctx,
+        "rust_kernels"
+            .try_into()
+            .expect("static identifier literal"),
+    );
     let kernel_module_body = kernel_module_op
         .get_region(&ctx)
         .deref(&ctx)
@@ -179,8 +187,7 @@ pub(super) fn kernel_symbol<'tcx>(
     legaliser: &mut Legaliser,
     def_id: rustc_hir::def_id::DefId,
 ) -> crate::identifier::Identifier {
-    let exported = kernel_export_symbol(tcx, def_id)
-        .unwrap_or_else(|| tcx.def_path_str(def_id));
+    let exported = kernel_export_symbol(tcx, def_id).unwrap_or_else(|| tcx.def_path_str(def_id));
     let entry = cuda_oxide_entry_name(&exported)
         .filter(|rest| !rest.is_empty())
         .unwrap_or(&exported);
@@ -194,7 +201,11 @@ pub(super) fn import_entry_wrapper(
 ) -> Result<(), String> {
     let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
     let fn_ty = FunctionType::get(ctx, vec![], vec![i32_ty.into()]);
-    let func = mir_dialect::ops::FuncOp::new(ctx, "main".try_into().expect("static identifier literal"), fn_ty);
+    let func = mir_dialect::ops::FuncOp::new(
+        ctx,
+        "main".try_into().expect("static identifier literal"),
+        fn_ty,
+    );
     let entry = func.get_entry_block(ctx);
 
     let call = mir_dialect::ops::CallOp::new_direct(ctx, rust_main, vec![], None);
@@ -202,7 +213,10 @@ pub(super) fn import_entry_wrapper(
 
     let zero = mir_dialect::ops::ConstantOp::new_integer(
         ctx,
-        IntegerAttr::new(i32_ty, APInt::from_u32(0, NonZero::new(32).expect("32 is nonzero"))),
+        IntegerAttr::new(
+            i32_ty,
+            APInt::from_u32(0, NonZero::new(32).expect("32 is nonzero")),
+        ),
     );
     zero.get_operation().insert_at_back(entry, ctx);
 
@@ -213,7 +227,11 @@ pub(super) fn import_entry_wrapper(
     Ok(())
 }
 
-pub(super) fn mono_ty<'tcx>(tcx: TyCtxt<'tcx>, state: &FunctionImportState<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
+pub(super) fn mono_ty<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    state: &FunctionImportState<'tcx>,
+    ty: Ty<'tcx>,
+) -> Ty<'tcx> {
     state.instance.map_or(ty, |instance| {
         instance.instantiate_mir_and_normalize_erasing_regions(
             tcx,
@@ -311,7 +329,11 @@ pub(super) fn import_function<'tcx>(
         }
         let block = BasicBlock::new(
             ctx,
-            Some(format!("bb{}", bb.index()).try_into().expect("digits are legal identifier characters")),
+            Some(
+                format!("bb{}", bb.index())
+                    .try_into()
+                    .expect("digits are legal identifier characters"),
+            ),
             vec![],
         );
         block.insert_at_back(region, ctx);

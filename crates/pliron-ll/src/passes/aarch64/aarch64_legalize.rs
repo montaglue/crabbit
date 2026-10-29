@@ -1,5 +1,6 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         aarch64::{
             ops::{
@@ -12,7 +13,6 @@ use crate::{
     input_error_noloc,
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
 };
 
@@ -25,7 +25,12 @@ impl Pass for Aarch64LegalizePass {
         "aarch64-legalize"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {
@@ -81,13 +86,30 @@ fn expected_operand_classes(
     use aarch64_ops::Aarch64Opcode as Opc;
     match opcode {
         // NEON vector data-processing: everything in the q view.
-        Opc::AddV4s | Opc::SubV4s | Opc::MulV4s | Opc::AddV2d | Opc::SubV2d
-        | Opc::FaddV4s | Opc::FsubV4s | Opc::FmulV4s | Opc::FdivV4s
-        | Opc::FaddV2d | Opc::FsubV2d | Opc::FmulV2d | Opc::FdivV2d
-        | Opc::MovV16b | Opc::FaddpV4s
-        | Opc::AndV16b | Opc::OrrV16b | Opc::EorV16b
-        | Opc::ShlV4sImm | Opc::UshrV4sImm | Opc::SshrV4sImm
-        | Opc::ShlV2dImm | Opc::UshrV2dImm | Opc::SshrV2dImm => (Simd, Simd, Simd),
+        Opc::AddV4s
+        | Opc::SubV4s
+        | Opc::MulV4s
+        | Opc::AddV2d
+        | Opc::SubV2d
+        | Opc::FaddV4s
+        | Opc::FsubV4s
+        | Opc::FmulV4s
+        | Opc::FdivV4s
+        | Opc::FaddV2d
+        | Opc::FsubV2d
+        | Opc::FmulV2d
+        | Opc::FdivV2d
+        | Opc::MovV16b
+        | Opc::FaddpV4s
+        | Opc::AndV16b
+        | Opc::OrrV16b
+        | Opc::EorV16b
+        | Opc::ShlV4sImm
+        | Opc::UshrV4sImm
+        | Opc::SshrV4sImm
+        | Opc::ShlV2dImm
+        | Opc::UshrV2dImm
+        | Opc::SshrV2dImm => (Simd, Simd, Simd),
         // Lane broadcasts: vector destination, scalar source.
         Opc::DupV4sGpr | Opc::DupV2dGpr => (Simd, Gpr, Gpr),
         Opc::DupV4sFpr | Opc::DupV2dFpr => (Simd, Fpr, Fpr),
@@ -98,27 +120,70 @@ fn expected_operand_classes(
             (Simd, Gpr, Gpr)
         }
         // FP data-processing: everything in the FP file.
-        Opc::FaddD | Opc::FaddS | Opc::FsubD | Opc::FsubS | Opc::FmulD | Opc::FmulS
-        | Opc::FdivD | Opc::FdivS | Opc::FnegD | Opc::FnegS | Opc::FcmpD | Opc::FcmpS
-        | Opc::FabsD | Opc::FabsS | Opc::FsqrtD | Opc::FsqrtS | Opc::FrintmD | Opc::FrintmS
-        | Opc::FrintpD | Opc::FrintpS | Opc::FrintzD | Opc::FrintzS | Opc::FrintaD
-        | Opc::FrintaS | Opc::FrintnD | Opc::FrintnS | Opc::FminnmD | Opc::FminnmS
-        | Opc::FmaxnmD | Opc::FmaxnmS | Opc::FminD | Opc::FminS | Opc::FmaxD | Opc::FmaxS
-        | Opc::FcvtDS | Opc::FcvtSD | Opc::FmovD | Opc::FmovS | Opc::FmovImmD
+        Opc::FaddD
+        | Opc::FaddS
+        | Opc::FsubD
+        | Opc::FsubS
+        | Opc::FmulD
+        | Opc::FmulS
+        | Opc::FdivD
+        | Opc::FdivS
+        | Opc::FnegD
+        | Opc::FnegS
+        | Opc::FcmpD
+        | Opc::FcmpS
+        | Opc::FabsD
+        | Opc::FabsS
+        | Opc::FsqrtD
+        | Opc::FsqrtS
+        | Opc::FrintmD
+        | Opc::FrintmS
+        | Opc::FrintpD
+        | Opc::FrintpS
+        | Opc::FrintzD
+        | Opc::FrintzS
+        | Opc::FrintaD
+        | Opc::FrintaS
+        | Opc::FrintnD
+        | Opc::FrintnS
+        | Opc::FminnmD
+        | Opc::FminnmS
+        | Opc::FmaxnmD
+        | Opc::FmaxnmS
+        | Opc::FminD
+        | Opc::FminS
+        | Opc::FmaxD
+        | Opc::FmaxS
+        | Opc::FcvtDS
+        | Opc::FcvtSD
+        | Opc::FmovD
+        | Opc::FmovS
+        | Opc::FmovImmD
         | Opc::FmovImmS => (Fpr, Fpr, Fpr),
         // FP data register, GPR base for loads/stores; no rm.
-        Opc::StrdSpOffset | Opc::LdrdSpOffset | Opc::StrsSpOffset | Opc::LdrsSpOffset
-        | Opc::StrdRegOffset | Opc::LdrdRegOffset | Opc::StrsRegOffset | Opc::LdrsRegOffset => {
+        Opc::StrdSpOffset
+        | Opc::LdrdSpOffset
+        | Opc::StrsSpOffset
+        | Opc::LdrsSpOffset
+        | Opc::StrdRegOffset
+        | Opc::LdrdRegOffset
+        | Opc::StrsRegOffset
+        | Opc::LdrsRegOffset => (Fpr, Gpr, Gpr),
+        // int -> FP conversions and GPR-to-FP moves: FP destination, GPR source.
+        Opc::ScvtfDX | Opc::ScvtfSX | Opc::UcvtfDX | Opc::UcvtfSX | Opc::FmovDX | Opc::FmovSW => {
             (Fpr, Gpr, Gpr)
         }
-        // int -> FP conversions and GPR-to-FP moves: FP destination, GPR source.
-        Opc::ScvtfDX | Opc::ScvtfSX | Opc::UcvtfDX | Opc::UcvtfSX | Opc::FmovDX
-        | Opc::FmovSW => (Fpr, Gpr, Gpr),
         // FP -> int conversions and FP-to-GPR moves: GPR destination, FP source.
-        Opc::FcvtzsXD | Opc::FcvtzsWD | Opc::FcvtzsXS | Opc::FcvtzsWS | Opc::FcvtzuXD
-        | Opc::FcvtzuWD | Opc::FcvtzuXS | Opc::FcvtzuWS | Opc::FmovXD | Opc::FmovWS => {
-            (Gpr, Fpr, Gpr)
-        }
+        Opc::FcvtzsXD
+        | Opc::FcvtzsWD
+        | Opc::FcvtzsXS
+        | Opc::FcvtzsWS
+        | Opc::FcvtzuXD
+        | Opc::FcvtzuWD
+        | Opc::FcvtzuXS
+        | Opc::FcvtzuWS
+        | Opc::FmovXD
+        | Opc::FmovWS => (Gpr, Fpr, Gpr),
         _ => (Gpr, Gpr, Gpr),
     }
 }
@@ -145,9 +210,9 @@ fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> CrabbitResult<()> {
             Register::Physical(register) => register.class(),
         };
         if !matches_expected(class, expected) {
-            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-                format!("{mnemonic} requires a {expected:?} operand for {key}, got `{register}`")
-            )));
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+                "{mnemonic} requires a {expected:?} operand for {key}, got `{register}`"
+            ))));
         }
     }
     Ok(())
@@ -158,13 +223,13 @@ mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
+        conversion::pass::{AnalysisManager, Pass},
         dialects::{
             aarch64::{self, ops as aarch64_ops},
             builtin::{self, op_interfaces::OneRegionInterface},
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::{Aarch64LegalizePass, verify_gpr_operands};
@@ -182,7 +247,8 @@ mod tests {
     ) -> builtin::ops::ModuleOp {
         let module = builtin::ops::ModuleOp::new(ctx, "test".try_into().unwrap());
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
-        let func = aarch64::ops::FuncOp::new(ctx, "main".try_into().unwrap(), LinkageAttr::External);
+        let func =
+            aarch64::ops::FuncOp::new(ctx, "main".try_into().unwrap(), LinkageAttr::External);
         func.get_operation().insert_at_back(body, ctx);
         inst.insert_at_back(func.entry_block(ctx), ctx);
         module
@@ -191,7 +257,11 @@ mod tests {
     #[test]
     fn rejects_simd_spelling_in_a_gpr_instruction() {
         let mut ctx = context();
-        let inst = aarch64_ops::mov(&mut ctx, Register::gpr(0), Register::Physical(PhysicalRegister::Simd128(0)));
+        let inst = aarch64_ops::mov(
+            &mut ctx,
+            Register::gpr(0),
+            Register::Physical(PhysicalRegister::Simd128(0)),
+        );
         assert!(verify_gpr_operands(&ctx, inst).is_err());
     }
 
@@ -242,7 +312,11 @@ mod tests {
         let module = module_with_inst(&mut ctx, inst);
 
         Aarch64LegalizePass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
     }
 
@@ -254,7 +328,11 @@ mod tests {
 
         assert!(
             Aarch64LegalizePass
-                .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+                .run(
+                    module.get_operation(),
+                    &mut ctx,
+                    &mut AnalysisManager::default()
+                )
                 .is_err()
         );
     }
@@ -266,7 +344,11 @@ mod tests {
         let module = module_with_inst(&mut ctx, inst);
 
         Aarch64LegalizePass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
     }
 }

@@ -12,12 +12,12 @@ use crate::{
     dialects::{
         builtin::ops::ConstantOp,
         llvm::ops::{
-            AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CondBrOp,
-            ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp, FPToUIOp,
-            FPTruncOp, FRemOp, FSubOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp,
-            LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp, SExtOp,
-            SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp, UIToFPOp,
-            URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp,
+            AShrOp, AddOp, AddressOfOp, AllocaOp, AndOp, BitcastOp, BrOp, CondBrOp, ExtractValueOp,
+            FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp, FRemOp,
+            FSubOp, GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp,
+            OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp,
+            ShlOp, StoreOp, SubOp, TruncOp, UDivOp, UIToFPOp, URemOp, UndefOp, UnreachableOp,
+            XorOp, ZExtOp,
         },
     },
     ir::{
@@ -155,11 +155,8 @@ impl RegionCfg {
     pub fn new(ctx: &Context, region: Ptr<Region>) -> Self {
         use crate::linked_list::ContainsLinkedList as _;
         let blocks: Vec<Ptr<BasicBlock>> = region.deref(ctx).iter(ctx).collect();
-        let index: rustc_hash::FxHashMap<Ptr<BasicBlock>, usize> = blocks
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (*b, i))
-            .collect();
+        let index: rustc_hash::FxHashMap<Ptr<BasicBlock>, usize> =
+            blocks.iter().enumerate().map(|(i, b)| (*b, i)).collect();
         let mut succs = vec![Vec::new(); blocks.len()];
         let mut preds = vec![Vec::new(); blocks.len()];
         for (i, block) in blocks.iter().enumerate() {
@@ -197,7 +194,11 @@ impl RegionCfg {
 /// for the entry itself and for unreachable nodes (also reported in
 /// `reachable`). Shared by the post-dominator computation, which runs it
 /// on the reversed CFG.
-fn iterative_idoms(n: usize, entry: usize, succs: &[Vec<usize>]) -> (Vec<Option<usize>>, Vec<bool>) {
+fn iterative_idoms(
+    n: usize,
+    entry: usize,
+    succs: &[Vec<usize>],
+) -> (Vec<Option<usize>>, Vec<bool>) {
     // Reverse postorder from entry.
     let mut order = Vec::with_capacity(n);
     let mut seen = vec![false; n];
@@ -294,10 +295,7 @@ impl PostDomTree {
         let (idom, seen) = iterative_idoms(n + 1, exit, &rev_succs);
         PostDomTree {
             cfg_len: n,
-            ipdom: idom[..n]
-                .iter()
-                .map(|d| d.filter(|&x| x != exit))
-                .collect(),
+            ipdom: idom[..n].iter().map(|d| d.filter(|&x| x != exit)).collect(),
             reaches_exit: seen[..n].to_vec(),
         }
     }
@@ -539,7 +537,6 @@ pub(crate) fn memory_benign_op_ids() -> FxHashSet<OpId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, OneResultInterface as _};
     use crate::{
         dialects::{
             builtin::types::{IntegerType, Signedness},
@@ -551,6 +548,7 @@ mod tests {
         },
         ir::{op::Op, r#type::TypeHandle},
     };
+    use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, OneResultInterface as _};
 
     /// Build a CFG from an adjacency list (node 0 = entry appended after
     /// the function's entry block? no — node 0 IS the entry block) where

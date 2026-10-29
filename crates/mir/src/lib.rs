@@ -11,6 +11,6 @@ pub use mir_lower;
 pub mod dialects {
     pub use dialect_mir;
     pub use pliron::builtin;
-    pub use pliron_llvm as llvm;
     pub use pliron_ll::{aarch64, macho, x86_64};
+    pub use pliron_llvm as llvm;
 }

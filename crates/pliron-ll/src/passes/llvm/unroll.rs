@@ -739,10 +739,7 @@ fn stamp_clone(ctx: &mut Context, clone: Ptr<Operation>, original: Ptr<Operation
             .attributes
             .0
             .remove(&opmap::ATTR_KEY_DERIVED_FROM_MANY);
-        clone_ref
-            .attributes
-            .0
-            .remove(&opmap::ATTR_KEY_INLINED_FROM);
+        clone_ref.attributes.0.remove(&opmap::ATTR_KEY_INLINED_FROM);
     }
     if !sources.is_empty() {
         opmap::set_derived_from_many(ctx, clone, sources);
@@ -1113,9 +1110,7 @@ fn apply_multi_block(ctx: &mut Context, plan: &UnrollPlan) {
 
         // Clone the body in RPO (a topological order of the acyclic
         // sub-CFG, so every SSA def is cloned before its uses).
-        for (idx, (&old_block, &new_block)) in
-            plan.body_rpo.iter().zip(&block_clones).enumerate()
-        {
+        for (idx, (&old_block, &new_block)) in plan.body_rpo.iter().zip(&block_clones).enumerate() {
             for &op in &body_ops[idx] {
                 let clone = cloning::clone_operation(op, ctx, &mut rewriter, &mut mapper);
                 clone.insert_at_back(new_block, ctx);

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use crate::r#type::TypeHandle;
 use super::isel_memory_abi::adapt_value_to_type;
+use crate::r#type::TypeHandle;
+use std::collections::HashMap;
 
 use crate::{
     context::{Context, Ptr},
@@ -64,13 +64,11 @@ pub(super) fn emit_block_arg_copies(
 ) -> CrabbitResult<()> {
     let dest_args: Vec<_> = dest.deref(ctx).arguments().collect();
     if dest_args.len() != args.len() {
-        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(
-            format!(
-                "branch operand count {} does not match target block argument count {}",
-                args.len(),
-                dest_args.len()
-            )
-        )));
+        return Err(input_error_noloc!(Aarch64Err::UnsupportedOp(format!(
+            "branch operand count {} does not match target block argument count {}",
+            args.len(),
+            dest_args.len()
+        ))));
     }
 
     // The copies are conceptually parallel: on a backedge, a source may be
@@ -109,9 +107,9 @@ pub(super) fn emit_block_arg_copies(
     }
 
     while !pending.is_empty() {
-        let free = pending.iter().position(|(dst, _)| {
-            !pending.iter().any(|(_, src)| *src == Some(*dst))
-        });
+        let free = pending
+            .iter()
+            .position(|(dst, _)| !pending.iter().any(|(_, src)| *src == Some(*dst)));
         if let Some(free) = free {
             let (dst, src) = pending.remove(free);
             match src {
@@ -128,13 +126,8 @@ pub(super) fn emit_block_arg_copies(
                     RegisterClass::Simd128 => {
                         let zero = fresh_vreg(next_vreg);
                         aarch64_ops::mov_imm(ctx, zero, 0).insert_at_back(insert_block, ctx);
-                        aarch64_ops::unary(
-                            ctx,
-                            aarch64_ops::DupV2dGprOp::OPCODE,
-                            dst,
-                            zero,
-                        )
-                        .insert_at_back(insert_block, ctx);
+                        aarch64_ops::unary(ctx, aarch64_ops::DupV2dGprOp::OPCODE, dst, zero)
+                            .insert_at_back(insert_block, ctx);
                     }
                     _ => {
                         aarch64_ops::mov_imm(ctx, dst, 0).insert_at_back(insert_block, ctx);
@@ -148,9 +141,7 @@ pub(super) fn emit_block_arg_copies(
             let scratch = match dst.class() {
                 RegisterClass::Fpr64 => fresh_fpr(next_vreg, FpKind::F64),
                 RegisterClass::Fpr32 => fresh_fpr(next_vreg, FpKind::F32),
-                RegisterClass::Simd128 => {
-                    super::llvm_to_aarch64_isel::fresh_simd(next_vreg)
-                }
+                RegisterClass::Simd128 => super::llvm_to_aarch64_isel::fresh_simd(next_vreg),
                 _ => fresh_vreg(next_vreg),
             };
             emit_move(ctx, insert_block, scratch, dst)?;

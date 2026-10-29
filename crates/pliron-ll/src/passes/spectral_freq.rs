@@ -338,10 +338,8 @@ mod tests {
     /// ⇒ f1 = 8, f2 = 64, f3 = 8, f4 = 1/8·f3 = 1.
     #[test]
     fn loop_aware_nested_loop_compounds() {
-        let freqs = spectral_frequencies_loop_aware(
-            &[vec![1], vec![2], vec![2, 3], vec![1, 4], vec![]],
-            0,
-        );
+        let freqs =
+            spectral_frequencies_loop_aware(&[vec![1], vec![2], vec![2, 3], vec![1, 4], vec![]], 0);
         assert_close(freqs[0], 1.0);
         assert_close(freqs[1], 8.0);
         assert_close(freqs[2], 64.0);
@@ -359,8 +357,7 @@ mod tests {
     /// nothing.
     #[test]
     fn loop_aware_rotated_loop_weights_the_header_branch() {
-        let freqs =
-            spectral_frequencies_loop_aware(&[vec![1], vec![2, 3], vec![1], vec![]], 0);
+        let freqs = spectral_frequencies_loop_aware(&[vec![1], vec![2, 3], vec![1], vec![]], 0);
         assert_close(freqs[0], 1.0);
         assert_close(freqs[1], 8.0);
         assert_close(freqs[2], 7.0);

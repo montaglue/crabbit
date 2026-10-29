@@ -2,17 +2,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
+        builtin::op_interfaces::OneRegionInterface,
         x86_64::{
             op_interfaces::RegisterOperandKind,
             ops::{self as x86_64_ops, FuncOp},
             registers::{self, Register, RegisterClass, VirtualRegister},
         },
-        builtin::op_interfaces::OneRegionInterface,
     },
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
 };
 
@@ -20,8 +20,12 @@ use super::{error::X86_64DarwinErr, frontend::module_op, util::cast_operation};
 
 /// Callee-saved registers handed out by the allocator; frame lowering
 /// saves and restores them in every function.
-const ALLOCATABLE_GPRS: [Register; 4] =
-    [registers::RBX, registers::R12, registers::R13, registers::R14];
+const ALLOCATABLE_GPRS: [Register; 4] = [
+    registers::RBX,
+    registers::R12,
+    registers::R13,
+    registers::R14,
+];
 /// Scratch registers for spill reloads/stores around one instruction.
 /// r10/r11 are caller-saved; r15 is callee-saved and saved by frame lowering.
 const SPILL_SCRATCH_GPRS: [Register; 3] = [registers::R10, registers::R11, registers::R15];
@@ -34,7 +38,12 @@ impl Pass for X86_64RegisterAllocatePass {
         "x86-64-register-allocate"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -209,15 +218,15 @@ fn block_successors(
                 match opcode {
                     x86_64_ops::JmpOp::OPCODE => {
                         has_unconditional_branch = true;
-                        if let Some(target) = x86_64_ops::target(ctx, *op)
-                            .and_then(|target| block_index.get(&target))
+                        if let Some(target) =
+                            x86_64_ops::target(ctx, *op).and_then(|target| block_index.get(&target))
                         {
                             successors.insert(*target);
                         }
                     }
                     x86_64_ops::JccOp::OPCODE | x86_64_ops::TestJnzOp::OPCODE => {
-                        if let Some(target) = x86_64_ops::target(ctx, *op)
-                            .and_then(|target| block_index.get(&target))
+                        if let Some(target) =
+                            x86_64_ops::target(ctx, *op).and_then(|target| block_index.get(&target))
                         {
                             successors.insert(*target);
                         }
@@ -365,8 +374,7 @@ fn rewrite_allocated_registers(
         let mut scratch_index = 0usize;
         let use_operands = virtual_use_operands(ctx, *op);
         let def_operands = virtual_def_operands(ctx, *op);
-        let mut spilled_use_scratch =
-            HashMap::<(&'static str, VirtualRegister), Register>::new();
+        let mut spilled_use_scratch = HashMap::<(&'static str, VirtualRegister), Register>::new();
 
         for (key, vreg) in use_operands {
             match assignments.get(&vreg) {
@@ -491,9 +499,9 @@ mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
         dialects::x86_64::{
-                self,
-                ops::{self as x86_64_ops, ATTR_KEY_X86_64_RD},
-            },
+            self,
+            ops::{self as x86_64_ops, ATTR_KEY_X86_64_RD},
+        },
         linked_list::ContainsLinkedList,
     };
 
@@ -515,9 +523,11 @@ mod tests {
         let func = func(&mut ctx);
         let entry = func.entry_block(&ctx);
         x86_64_ops::mov_imm(&mut ctx, Register::virtual_gpr(0), 1).insert_at_back(entry, &ctx);
-        x86_64_ops::mov(&mut ctx, registers::RAX, Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        x86_64_ops::mov(&mut ctx, registers::RAX, Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
         x86_64_ops::mov_imm(&mut ctx, Register::virtual_gpr(1), 2).insert_at_back(entry, &ctx);
-        x86_64_ops::mov(&mut ctx, registers::RCX, Register::virtual_gpr(1)).insert_at_back(entry, &ctx);
+        x86_64_ops::mov(&mut ctx, registers::RCX, Register::virtual_gpr(1))
+            .insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func).unwrap();
         let insts: Vec<_> = entry.deref(&ctx).iter(&ctx).collect();
@@ -538,7 +548,8 @@ mod tests {
         let entry = func.entry_block(&ctx);
         x86_64_ops::mov_imm(&mut ctx, Register::virtual_gpr(0), 1).insert_at_back(entry, &ctx);
         x86_64_ops::call(&mut ctx, "callee".try_into().unwrap()).insert_at_back(entry, &ctx);
-        x86_64_ops::mov(&mut ctx, registers::RAX, Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
+        x86_64_ops::mov(&mut ctx, registers::RAX, Register::virtual_gpr(0))
+            .insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func).unwrap();
         assert_eq!(func.stack_size(&ctx), 16);
@@ -576,8 +587,9 @@ mod tests {
             Register::virtual_gpr(0),
             Register::virtual_gpr(0),
         )
+        .insert_at_back(entry, &ctx);
+        x86_64_ops::mov(&mut ctx, registers::RAX, Register::virtual_gpr(0))
             .insert_at_back(entry, &ctx);
-        x86_64_ops::mov(&mut ctx, registers::RAX, Register::virtual_gpr(0)).insert_at_back(entry, &ctx);
 
         allocate_function(&mut ctx, func).unwrap();
 
@@ -616,8 +628,12 @@ mod tests {
                 .insert_at_back(entry, &ctx);
         }
         for index in 0..8u32 {
-            x86_64_ops::mov(&mut ctx, Register::gpr(index as u8), Register::virtual_gpr(index))
-                .insert_at_back(entry, &ctx);
+            x86_64_ops::mov(
+                &mut ctx,
+                Register::gpr(index as u8),
+                Register::virtual_gpr(index),
+            )
+            .insert_at_back(entry, &ctx);
         }
 
         allocate_function(&mut ctx, func).unwrap();

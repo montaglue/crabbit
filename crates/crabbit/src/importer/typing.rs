@@ -42,8 +42,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::dialects::builtin::{
-    attr_interfaces::TypedAttrInterface,
-    attributes::TypeAttr,
+    attr_interfaces::TypedAttrInterface, attributes::TypeAttr,
     type_interfaces::FunctionTypeInterface,
 };
 use crate::dialects::dialect_mir::{
@@ -228,7 +227,10 @@ fn normalize_call(ctx: &mut Context, signatures: &BTreeMap<String, Signature>, o
     let Some(call) = Operation::get_op::<dm_ops::MirCallOp>(op, ctx) else {
         return;
     };
-    let Some(callee) = call.get_attr_callee(ctx).map(|c| String::from((*c).clone())) else {
+    let Some(callee) = call
+        .get_attr_callee(ctx)
+        .map(|c| String::from((*c).clone()))
+    else {
         return;
     };
     if let Some((inputs, outputs)) = signatures.get(&callee) {
@@ -384,8 +386,12 @@ fn convert_before(
                 MirPointerKind::from_raw_mutability(is_mutable),
             )
             .into();
-            let to_raw =
-                ox::mir_cast(ctx, address, raw_ty, MirCastKindAttr::PointerWithExposedProvenance);
+            let to_raw = ox::mir_cast(
+                ctx,
+                address,
+                raw_ty,
+                MirCastKindAttr::PointerWithExposedProvenance,
+            );
             // The address of static storage (a global, a thread-local, a
             // function) turned into a raw pointer: the dialect's
             // `StaticAddress` authority covers the integer-to-raw case.
@@ -401,7 +407,12 @@ fn convert_before(
         }
         (Shape::MirPtr { .. }, Shape::LlvmPtr) => {
             let address_ty = address_ty(ctx);
-            let expose = ox::mir_cast(ctx, value, address_ty, MirCastKindAttr::PointerExposeAddress);
+            let expose = ox::mir_cast(
+                ctx,
+                value,
+                address_ty,
+                MirCastKindAttr::PointerExposeAddress,
+            );
             let address = emit_before(ctx, before, expose);
             let inttoptr = llvm::ops::IntToPtrOp::new(ctx, address, want).get_operation();
             Some(emit_before(ctx, before, inttoptr))
@@ -446,7 +457,9 @@ fn result_ty(ctx: &Context, op: Ptr<Operation>, index: usize) -> TypeHandle {
 }
 
 fn mir_pointee(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    ty.deref(ctx).downcast_ref::<MirPtrType>().map(|p| p.pointee)
+    ty.deref(ctx)
+        .downcast_ref::<MirPtrType>()
+        .map(|p| p.pointee)
 }
 
 fn is_mir_ptr_ty(ctx: &Context, ty: TypeHandle) -> bool {

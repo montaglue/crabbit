@@ -10,7 +10,7 @@ use crate::{
             registers::{Register, X8},
         },
         builtin::{
-            op_interfaces::{AtMostOneRegionInterface},
+            op_interfaces::AtMostOneRegionInterface,
             ops::ModuleOp,
             type_interfaces::FunctionTypeInterface,
             types::{FP32Type, FP64Type, IntegerType, UnitType},
@@ -22,8 +22,8 @@ use crate::{
                 ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp,
                 FPToUIOp, FPTruncOp, FRemOp, FSubOp, FuncOp, GetElementPtrOp, ICmpOp,
                 InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp,
-                ReturnOp, SDivOp, SIToFPOp, SRemOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp,
-                UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, SExtOp, ZExtOp,
+                ReturnOp, SDivOp, SExtOp, SIToFPOp, SRemOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp,
+                UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp,
             },
             types::{FuncType, PointerType, VoidType},
         },
@@ -42,15 +42,23 @@ use crate::{
 use crate::ll::ops::CStrOp;
 
 use super::{error::Aarch64Err, target::TargetOs, util::cast_operation};
-use crate::ll::{LinkageAttr};
+use crate::ll::LinkageAttr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AbiClass {
-    Int { size: u64, align: u64 },
+    Int {
+        size: u64,
+        align: u64,
+    },
     /// A scalar `f32` (size 4) or `f64` (size 8): passed in v0-v7 per
     /// AAPCS64 rule C.1.
-    Float { size: u64 },
-    Aggregate { size: u64, align: u64 },
+    Float {
+        size: u64,
+    },
+    Aggregate {
+        size: u64,
+        align: u64,
+    },
     Void,
 }
 
@@ -96,8 +104,7 @@ pub(super) trait Aarch64BinaryOpInterface {
 }
 
 pub(super) fn module_op(ctx: &Context, root: Ptr<Operation>) -> CrabbitResult<ModuleOp> {
-    cast_operation::<ModuleOp>(ctx, root)
-        .ok_or_else(|| input_error_noloc!(Aarch64Err::NotModule))
+    cast_operation::<ModuleOp>(ctx, root).ok_or_else(|| input_error_noloc!(Aarch64Err::NotModule))
 }
 
 /// Map an LLVM linkage to its machine-level linkage, rejecting the ones the
@@ -107,9 +114,7 @@ pub(super) fn validate_linkage(name: &str, linkage: LlvmLinkageAttr) -> CrabbitR
         LlvmLinkageAttr::ExternalLinkage => Ok(LinkageAttr::External),
         LlvmLinkageAttr::InternalLinkage => Ok(LinkageAttr::Internal),
         LlvmLinkageAttr::PrivateLinkage => Ok(LinkageAttr::Private),
-        LlvmLinkageAttr::WeakODRLinkage | LlvmLinkageAttr::WeakAnyLinkage => {
-            Ok(LinkageAttr::Weak)
-        }
+        LlvmLinkageAttr::WeakODRLinkage | LlvmLinkageAttr::WeakAnyLinkage => Ok(LinkageAttr::Weak),
         other => Err(input_error_noloc!(Aarch64Err::UnsupportedLinkage(
             name.to_string(),
             other
@@ -129,7 +134,12 @@ pub(super) fn validate_function_type(
 }
 
 pub(super) fn validate_body(ctx: &Context, func: &FuncOp) -> CrabbitResult<()> {
-    for block in func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
+    for block in func
+        .get_region(ctx)
+        .expect("llvm.func definition must have a body")
+        .deref(ctx)
+        .iter(ctx)
+    {
         let mut op = block.deref(ctx).get_head();
         while let Some(op_ptr) = op {
             let op_obj = Operation::get_op_dyn(op_ptr, ctx);
@@ -276,9 +286,10 @@ pub(super) fn abi_class(ctx: &Context, ty: TypeHandle) -> CrabbitResult<AbiClass
         let (size, align) = abi_type_layout(ctx, ty)?;
         return Ok(AbiClass::Aggregate { size, align });
     }
-    Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-        format!("{:?}", &*ty_ref)
-    )))
+    Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+        "{:?}",
+        &*ty_ref
+    ))))
 }
 
 pub(super) fn assign_abi(
@@ -342,9 +353,9 @@ pub(super) fn assign_abi(
                 }
             }
             AbiClass::Int { size, .. } => {
-                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-                    format!("integer argument of {size} bytes in `{name}`")
-                )));
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                    "integer argument of {size} bytes in `{name}`"
+                ))));
             }
             AbiClass::Void => {
                 locations.push(AbiLocation::Void);
@@ -353,9 +364,9 @@ pub(super) fn assign_abi(
                 locations.push(AbiLocation::Void);
             }
             AbiClass::Aggregate { .. } => {
-                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-                    format!("aggregate argument in `{name}`")
-                )));
+                return Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                    "aggregate argument in `{name}`"
+                ))));
             }
         }
     }
@@ -367,9 +378,9 @@ pub(super) fn assign_abi(
             AbiLocation::GprPair(Register::gpr(0), Register::gpr(1))
         }
         AbiClass::Int { size, .. } => {
-            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-                format!("integer result of {size} bytes in `{name}`")
-            )));
+            return Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+                "integer result of {size} bytes in `{name}`"
+            ))));
         }
         AbiClass::Aggregate { size: 0, .. } => AbiLocation::Void,
         AbiClass::Aggregate { size, .. } if size <= 8 => AbiLocation::Gpr(Register::gpr(0)),
@@ -426,9 +437,10 @@ fn abi_type_layout(ctx: &Context, ty: TypeHandle) -> CrabbitResult<(u64, u64)> {
         }
         return Ok((align_to(size, alignment), alignment));
     }
-    Err(input_error_noloc!(Aarch64Err::UnsupportedType(
-        format!("{:?}", &*ty_ref)
-    )))
+    Err(input_error_noloc!(Aarch64Err::UnsupportedType(format!(
+        "{:?}",
+        &*ty_ref
+    ))))
 }
 
 fn align_to(value: u64, align: u64) -> u64 {
@@ -452,7 +464,10 @@ mod tests {
     use crate::dialects::aarch64::attributes::AbiLocation;
 
     const I64: AbiClass = AbiClass::Int { size: 8, align: 8 };
-    const I128: AbiClass = AbiClass::Int { size: 16, align: 16 };
+    const I128: AbiClass = AbiClass::Int {
+        size: 16,
+        align: 16,
+    };
     const F64: AbiClass = AbiClass::Float { size: 8 };
     const F32: AbiClass = AbiClass::Float { size: 4 };
 

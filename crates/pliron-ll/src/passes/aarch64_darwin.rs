@@ -4,8 +4,8 @@
 
 use crate::{
     context::{Context, Ptr},
-    ir::operation::Operation,
     conversion::pass::Passes,
+    ir::operation::Operation,
     result::CrabbitResult,
 };
 

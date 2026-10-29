@@ -23,9 +23,9 @@ use pliron_ll::{
         llvm::{
             attributes::{FCmpPredicateAttr, FastmathFlagsAttr, LinkageAttr},
             ops::{
-                AShrOp, CondBrOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp,
-                FPToUIOp, FPTruncOp, FSubOp, FuncOp, LShrOp, ReturnOp, SIToFPOp, ShlOp, UIToFPOp,
-                CallOp,
+                AShrOp, CallOp, CondBrOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp,
+                FPToSIOp, FPToUIOp, FPTruncOp, FSubOp, FuncOp, LShrOp, ReturnOp, SIToFPOp, ShlOp,
+                UIToFPOp,
             },
             types::FuncType,
         },
@@ -529,7 +529,11 @@ int main(void) {
 }
 "#;
     assert_eq!(
-        link_with_c_harness_and_run("fp_spilling_under_pressure_and_across_calls", &bytes, HARNESS),
+        link_with_c_harness_and_run(
+            "fp_spilling_under_pressure_and_across_calls",
+            &bytes,
+            HARNESS
+        ),
         0
     );
 }
@@ -674,7 +678,11 @@ int main(void) {
 }
 "#;
     assert_eq!(
-        link_with_c_harness_and_run("dynamic_i128_shifts_match_native_semantics", &bytes, HARNESS),
+        link_with_c_harness_and_run(
+            "dynamic_i128_shifts_match_native_semantics",
+            &bytes,
+            HARNESS
+        ),
         0
     );
 }

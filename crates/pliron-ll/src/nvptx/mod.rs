@@ -149,17 +149,17 @@ use crate::{
             types::{FP32Type, FP64Type, IntegerType},
         },
         llvm::{
-            attributes::{FCmpPredicateAttr, ICmpPredicateAttr},
             attributes::{AtomicOrderingAttr, AtomicRmwKindAttr, LinkageAttr, SyncScopeAttr},
+            attributes::{FCmpPredicateAttr, ICmpPredicateAttr},
             ops::{
                 AShrOp, AddOp, AddrSpaceCastOp, AddressOfOp, AllocaOp, AndOp, AtomicCmpxchgOp,
                 AtomicRmwOp, BitcastOp, BrOp, CallOp, CondBrOp, ConstantOp as LlvmConstantOp,
-                FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp,
-                ExtractValueOp, FRemOp, FSubOp, FenceOp, FreezeOp, FuncOp as LlvmFuncOp,
+                ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp, FNegOp, FPExtOp, FPToSIOp,
+                FPToUIOp, FPTruncOp, FRemOp, FSubOp, FenceOp, FreezeOp, FuncOp as LlvmFuncOp,
                 GepIndex, GetElementPtrOp, GlobalOp, ICmpOp, InlineAsmOp, InsertValueOp,
-                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp,
-                SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp,
-                UDivOp, UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp, ZeroOp,
+                IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp, PoisonOp, PtrToIntOp, ReturnOp, SDivOp,
+                SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp, UDivOp,
+                UIToFPOp, URemOp, UndefOp, UnreachableOp, XorOp, ZExtOp, ZeroOp,
             },
             types::{ArrayType, PointerType, StructType, VoidType},
         },
@@ -168,8 +168,8 @@ use crate::{
     ir::{basic_block::BasicBlock, op::Op, operation::Operation, r#type::Typed, value::Value},
     linked_list::ContainsLinkedList,
     printable::Printable,
-    r#type::TypeHandle,
     result::CrabbitResult,
+    r#type::TypeHandle,
 };
 
 #[derive(Debug, Error)]
@@ -218,9 +218,9 @@ pub fn write_ptx_from_ir(
 /// the umbrella `CRABBIT_PROFILE_MAP`). The linemap never alters the
 /// emitted PTX; the gate only controls whether the sidecar JSON is built.
 pub fn linemap_enabled() -> bool {
-    ["CRABBIT_PTX_LINEMAP", "CRABBIT_PROFILE_MAP"].iter().any(|var| {
-        std::env::var(var).is_ok_and(|value| !value.is_empty() && value != "0")
-    })
+    ["CRABBIT_PTX_LINEMAP", "CRABBIT_PROFILE_MAP"]
+        .iter()
+        .any(|var| std::env::var(var).is_ok_and(|value| !value.is_empty() && value != "0"))
 }
 
 /// [write_ptx_from_ir], additionally returning the PTX linemap JSON (the
@@ -426,8 +426,9 @@ fn emit_global(
     // cuda-oxide's lowering records a global's alignment in its own
     // attribute (`cuda_oxide_global_alignment`); honour it alongside the
     // `ll.data` alignment so an `.align 16` dynamic window stays aligned.
-    let cuda_align_key: pliron::identifier::Identifier =
-        "cuda_oxide_global_alignment".try_into().expect("static identifier literal");
+    let cuda_align_key: pliron::identifier::Identifier = "cuda_oxide_global_alignment"
+        .try_into()
+        .expect("static identifier literal");
     let cuda_align = global
         .get_operation()
         .deref(ctx)
@@ -702,7 +703,11 @@ fn align_of_ty(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
 }
 
 fn align_to(value: u64, align: u64) -> u64 {
-    if align <= 1 { value } else { (value + align - 1) & !(align - 1) }
+    if align <= 1 {
+        value
+    } else {
+        (value + align - 1) & !(align - 1)
+    }
 }
 
 /// Whether `ty` is an aggregate (array or struct): a value of it lives as
@@ -761,11 +766,7 @@ fn agg_leaf_count(ctx: &Context, ty: TypeHandle) -> CrabbitResult<usize> {
 
 /// Resolve an insert/extract_value index path: the linearized leaf index
 /// where the addressed sub-value starts, and that sub-value's type.
-fn agg_path(
-    ctx: &Context,
-    ty: TypeHandle,
-    path: &[u32],
-) -> CrabbitResult<(usize, TypeHandle)> {
+fn agg_path(ctx: &Context, ty: TypeHandle, path: &[u32]) -> CrabbitResult<(usize, TypeHandle)> {
     let mut leaf_start = 0usize;
     let mut current = ty;
     for &index in path {
@@ -926,7 +927,9 @@ const DYN_SHARED_ALIGN: u64 = 16;
 /// result class) for `atom{.scope}{.space}.op.type d, [a], b`. The `_gen_`
 /// names take generic pointers; emission narrows the space when provenance
 /// proves the address global or shared.
-fn atomic_intrinsic(canonical: &str) -> Option<(&'static str, &'static str, &'static str, RegClass)> {
+fn atomic_intrinsic(
+    canonical: &str,
+) -> Option<(&'static str, &'static str, &'static str, RegClass)> {
     Some(match canonical {
         "nvvm_atomic_add_gen_i" => ("", "add", "u32", RegClass::B32),
         "nvvm_atomic_add_gen_i_cta" => (".cta", "add", "u32", RegClass::B32),
@@ -951,7 +954,9 @@ fn atomic_intrinsic(canonical: &str) -> Option<(&'static str, &'static str, &'st
 /// arity). All pure: register in, register out, no memory effects.
 fn math_intrinsic(canonical: &str) -> Option<(&'static str, RegClass, usize)> {
     Some(match canonical {
-        "nvvm_sqrt_rn_f" | "nvvm_sqrt_f" | "sqrt_f32" | "__nv_sqrtf" => ("sqrt.rn.f32", RegClass::F32, 1),
+        "nvvm_sqrt_rn_f" | "nvvm_sqrt_f" | "sqrt_f32" | "__nv_sqrtf" => {
+            ("sqrt.rn.f32", RegClass::F32, 1)
+        }
         "nvvm_sqrt_approx_f" => ("sqrt.approx.f32", RegClass::F32, 1),
         "nvvm_rsqrt_approx_f" => ("rsqrt.approx.f32", RegClass::F32, 1),
         "nvvm_ex2_approx_f" | "exp2_f32" => ("ex2.approx.f32", RegClass::F32, 1),
@@ -1044,13 +1049,14 @@ pub fn entry_names(ctx: &Context, module: Ptr<Operation>) -> Vec<String> {
 }
 
 fn is_internal(ctx: &Context, func: &LlvmFuncOp) -> bool {
-    func.get_attr_llvm_function_linkage(ctx).is_some_and(|linkage| {
-        matches!(
-            *linkage,
-            crate::dialects::llvm::attributes::LinkageAttr::InternalLinkage
-                | crate::dialects::llvm::attributes::LinkageAttr::PrivateLinkage
-        )
-    })
+    func.get_attr_llvm_function_linkage(ctx)
+        .is_some_and(|linkage| {
+            matches!(
+                *linkage,
+                crate::dialects::llvm::attributes::LinkageAttr::InternalLinkage
+                    | crate::dialects::llvm::attributes::LinkageAttr::PrivateLinkage
+            )
+        })
 }
 
 /// The `.param`-ABI signature of a device `.func`: parameter register
@@ -1303,8 +1309,8 @@ fn emit_function(
     let readonly = spaces::readonly_values(ctx, entry, &blocks, kind == FuncKind::Entry);
     // `.nc` asserts launch-lifetime invariance, which a device `.func`'s
     // local analysis cannot see past its callers (module docs).
-    let nc_enabled = kind == FuncKind::Entry
-        && !std::env::var("CRABBIT_NVPTX_NC").is_ok_and(|v| v == "0");
+    let nc_enabled =
+        kind == FuncKind::Entry && !std::env::var("CRABBIT_NVPTX_NC").is_ok_and(|v| v == "0");
     let mut emitter = FuncEmitter {
         ctx,
         globals,
@@ -1749,7 +1755,14 @@ impl<'c> FuncEmitter<'c> {
         }
         let class = classify(ctx, ty)?;
         let width = width_of(ctx, ty)?;
-        self.consts.insert(result, ConstVal { class, imm: 0, width });
+        self.consts.insert(
+            result,
+            ConstVal {
+                class,
+                imm: 0,
+                width,
+            },
+        );
         Ok(())
     }
 
@@ -1772,17 +1785,17 @@ impl<'c> FuncEmitter<'c> {
                 let op_obj = Operation::get_op_dyn(op_ptr, ctx);
                 if let Some(attr) = constant_value(ctx, &*op_obj) {
                     let constant_result = op_ptr.deref(ctx).get_result(0);
-                    if let Some(int) = (&*attr as &dyn pliron::attribute::Attribute).downcast_ref::<IntegerAttr>() {
-                        known_consts
-                            .insert(constant_result, int.value().to_u128() as u64);
+                    if let Some(int) =
+                        (&*attr as &dyn pliron::attribute::Attribute).downcast_ref::<IntegerAttr>()
+                    {
+                        known_consts.insert(constant_result, int.value().to_u128() as u64);
                     }
                 } else if let Some(alloca) = op_obj.downcast_ref::<AllocaOp>() {
                     let elem_ty = alloca.result_pointee_type(ctx);
                     let count_val = alloca.get_operation().deref(ctx).get_operand(0);
                     let Some(count) = known_consts.get(&count_val).copied() else {
                         return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                            "llvm.alloca with a non-constant size has no PTX lowering"
-                                .to_string()
+                            "llvm.alloca with a non-constant size has no PTX lowering".to_string()
                         )));
                     };
                     let align = align_of_ty(ctx, elem_ty)?;
@@ -1802,7 +1815,10 @@ impl<'c> FuncEmitter<'c> {
     /// The proven state space of `value`; values the analysis never saw are
     /// generic.
     fn space_of(&self, value: Value) -> PtrSpace {
-        self.spaces.get(&value).copied().unwrap_or(PtrSpace::Generic)
+        self.spaces
+            .get(&value)
+            .copied()
+            .unwrap_or(PtrSpace::Generic)
     }
 
     /// The state-space qualifier for a memory access through `addr`:
@@ -2008,13 +2024,9 @@ impl<'c> FuncEmitter<'c> {
             let indices = insert.indices(ctx);
             let agg_ty = aggregate.get_type(ctx);
             let (start, sub_ty) = agg_path(ctx, agg_ty, &indices)?;
-            let mut leaves = self
-                .aggs
-                .get(&aggregate)
-                .cloned()
-                .ok_or_else(|| {
-                    input_error_noloc!(NvptxErr::UndefinedValue(format!("{aggregate:?}")))
-                })?;
+            let mut leaves = self.aggs.get(&aggregate).cloned().ok_or_else(|| {
+                input_error_noloc!(NvptxErr::UndefinedValue(format!("{aggregate:?}")))
+            })?;
             if is_aggregate(ctx, sub_ty) {
                 // Splicing a sub-aggregate copies its leaves.
                 let sub = self.aggs.get(&inserted).cloned().ok_or_else(|| {
@@ -2107,8 +2119,7 @@ impl<'c> FuncEmitter<'c> {
                     let ty = param_decl_ty(class)?;
                     if reg.class != class {
                         return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                            "return value class does not match the function signature"
-                                .to_string()
+                            "return value class does not match the function signature".to_string()
                         )));
                     }
                     self.inst(format!("st.param.{ty} [{ret_name}], {reg};"));
@@ -2170,9 +2181,9 @@ impl<'c> FuncEmitter<'c> {
             let dst = self.fresh(RegClass::Pred);
             match (kind, rhs_imm) {
                 (BinaryIntKind::Xor, Some(1)) => self.inst(format!("not.pred {dst}, {a};")),
-                (BinaryIntKind::Xor, Some(0)) | (BinaryIntKind::And, Some(1)) | (BinaryIntKind::Or, Some(0)) => {
-                    self.inst(format!("mov.pred {dst}, {a};"))
-                }
+                (BinaryIntKind::Xor, Some(0))
+                | (BinaryIntKind::And, Some(1))
+                | (BinaryIntKind::Or, Some(0)) => self.inst(format!("mov.pred {dst}, {a};")),
                 (BinaryIntKind::And | BinaryIntKind::Or | BinaryIntKind::Xor, _) => {
                     let b = self.lookup(rhs)?;
                     let mnemonic = match kind {
@@ -2675,7 +2686,9 @@ impl<'c> FuncEmitter<'c> {
                 .entry((era, plan.base_key(), class))
                 .or_insert_with(|| (symbol, Members::new()));
             // A duplicate offset stays a scalar load (ptxas CSEs it).
-            members.entry(plan.offset).or_insert((order, op_ptr, result));
+            members
+                .entry(plan.offset)
+                .or_insert((order, op_ptr, result));
         }
 
         for ((_, (root, terms), class), (symbol, members)) in buckets {
@@ -2753,7 +2766,10 @@ impl<'c> FuncEmitter<'c> {
                         ld_ty,
                     },
                 );
-                let raise = self.align_raises.entry(symbol.clone()).or_insert(group_align);
+                let raise = self
+                    .align_raises
+                    .entry(symbol.clone())
+                    .or_insert(group_align);
                 *raise = (*raise).max(group_align);
             }
         }
@@ -3013,8 +3029,8 @@ impl<'c> FuncEmitter<'c> {
             let elem_size = align_to(size_of_ty(ctx, elem_ty)?, align_of_ty(ctx, elem_ty)?);
             match index {
                 GepIndex::Constant(value) => {
-                    constant_offset =
-                        constant_offset.wrapping_add((*value as i64 as u64).wrapping_mul(elem_size));
+                    constant_offset = constant_offset
+                        .wrapping_add((*value as i64 as u64).wrapping_mul(elem_size));
                 }
                 GepIndex::Value(value) if self.int_imm(*value).is_some() => {
                     // A constant index that arrived as a value: fold it
@@ -3062,8 +3078,7 @@ impl<'c> FuncEmitter<'c> {
         let result = gep.get_result(ctx);
         // A raw-shared base yields a raw-shared result; when the result was
         // demoted (some use escapes the analysis) it converts here.
-        if self.space_of(base_val) == PtrSpace::Shared
-            && self.space_of(result) != PtrSpace::Shared
+        if self.space_of(base_val) == PtrSpace::Shared && self.space_of(result) != PtrSpace::Shared
         {
             let next = self.fresh(RegClass::B64);
             self.inst(format!("cvta.shared.u64 {next}, {addr};"));
@@ -3106,9 +3121,9 @@ impl<'c> FuncEmitter<'c> {
                 )),
                 (16, 0) => self.inst(format!("and.b32 {dst}, {window}, 65535;")),
                 (16, 2) => self.inst(format!("shr.u32 {dst}, {window}, 16;")),
-                (width, lane) => unreachable!(
-                    "byte-combine planner admitted width {width} lane {lane}"
-                ),
+                (width, lane) => {
+                    unreachable!("byte-combine planner admitted width {width} lane {lane}")
+                }
             }
             self.values.insert(result, dst);
             return Ok(());
@@ -3124,7 +3139,11 @@ impl<'c> FuncEmitter<'c> {
         }
         if let Some(group) = self.vec_lead.get(&op_ptr).cloned() {
             let base = self.base_reg_for(&group.plan)?;
-            let regs: Vec<Reg> = group.parts.iter().map(|_| self.fresh(group.class)).collect();
+            let regs: Vec<Reg> = group
+                .parts
+                .iter()
+                .map(|_| self.fresh(group.class))
+                .collect();
             let lanes = regs
                 .iter()
                 .map(Reg::to_string)
@@ -3154,8 +3173,7 @@ impl<'c> FuncEmitter<'c> {
                 let width = width_of(ctx, leaf_ty)?;
                 if width == 1 {
                     return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                        "i1 aggregate field load is not supported in NVPTX emission"
-                            .to_string()
+                        "i1 aggregate field load is not supported in NVPTX emission".to_string()
                     )));
                 }
                 let dst = self.fresh(class);
@@ -3267,7 +3285,9 @@ impl<'c> FuncEmitter<'c> {
         }
         let operands: Vec<Value> = {
             let op = call.get_operation().deref(ctx);
-            (0..op.get_num_operands()).map(|i| op.get_operand(i)).collect()
+            (0..op.get_num_operands())
+                .map(|i| op.get_operand(i))
+                .collect()
         };
         // Direct calls carry only the arguments as operands.
         let args = operands;
@@ -3359,7 +3379,9 @@ impl<'c> FuncEmitter<'c> {
             let c = self.b32_operand(args[3])?;
             let mask = self.b32_operand(args[0])?;
             let dst = self.fresh(class);
-            self.inst(format!("shfl.sync.{mode}.b32 {dst}, {a}, {b}, {c}, {mask};"));
+            self.inst(format!(
+                "shfl.sync.{mode}.b32 {dst}, {a}, {b}, {c}, {mask};"
+            ));
             self.values.insert(result(), dst);
             return Ok(());
         }
@@ -3423,7 +3445,9 @@ impl<'c> FuncEmitter<'c> {
             let addr = self.lookup(args[0])?;
             let value = self.lookup(args[1])?;
             let dst = self.fresh(class);
-            self.inst(format!("atom{scope}{space}.{op}.{ty} {dst}, [{addr}], {value};"));
+            self.inst(format!(
+                "atom{scope}{space}.{op}.{ty} {dst}, [{addr}], {value};"
+            ));
             self.values.insert(result(), dst);
             return Ok(());
         }
@@ -3504,7 +3528,11 @@ impl<'c> FuncEmitter<'c> {
     /// LLVM's unnamed system scope is `.sys`.
     fn ptx_scope(&self, op: Ptr<Operation>) -> CrabbitResult<&'static str> {
         let key: pliron::identifier::Identifier = "llvm_syncscope".try_into().unwrap();
-        let scope = op.deref(self.ctx).attributes.get::<SyncScopeAttr>(&key).cloned();
+        let scope = op
+            .deref(self.ctx)
+            .attributes
+            .get::<SyncScopeAttr>(&key)
+            .cloned();
         Ok(match scope {
             None | Some(SyncScopeAttr::System) => ".sys",
             Some(SyncScopeAttr::NamedScope(name)) => match String::from(name).as_str() {
@@ -3540,7 +3568,9 @@ impl<'c> FuncEmitter<'c> {
             .get_attr_llvm_rmw_kind(ctx)
             .map(|k| (*k).clone())
             .ok_or_else(|| {
-                input_error_noloc!(NvptxErr::UnsupportedOp("atomicrmw without a kind".to_string()))
+                input_error_noloc!(NvptxErr::UnsupportedOp(
+                    "atomicrmw without a kind".to_string()
+                ))
             })?;
         let ordering = rmw.get_attr_llvm_rmw_ordering(ctx).map(|o| (*o).clone());
         if let Some(ordering) = &ordering
@@ -3651,7 +3681,9 @@ impl<'c> FuncEmitter<'c> {
     fn emit_fence(&mut self, fence: &FenceOp) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let op = fence.get_operation();
-        let ordering = fence.get_attr_llvm_fence_ordering(ctx).map(|o| (*o).clone());
+        let ordering = fence
+            .get_attr_llvm_fence_ordering(ctx)
+            .map(|o| (*o).clone());
         let sem = match ordering {
             Some(AtomicOrderingAttr::SeqCst) => "sc",
             Some(AtomicOrderingAttr::Acquire)
@@ -3688,7 +3720,9 @@ impl<'c> FuncEmitter<'c> {
             .unwrap_or_default();
         let operands: Vec<Value> = {
             let o = op.deref(ctx);
-            (0..o.get_num_operands()).map(|i| o.get_operand(i)).collect()
+            (0..o.get_num_operands())
+                .map(|i| o.get_operand(i))
+                .collect()
         };
         let result = op.deref(ctx).get_result(0);
         let result_ty = result.get_type(ctx);
@@ -3834,7 +3868,11 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_float_binary(&mut self, op_ptr: Ptr<Operation>, kind: BinaryFloatKind) -> CrabbitResult<()> {
+    fn emit_float_binary(
+        &mut self,
+        op_ptr: Ptr<Operation>,
+        kind: BinaryFloatKind,
+    ) -> CrabbitResult<()> {
         let ctx = self.ctx;
         // FP contraction: a fused mul emits nothing; its single fadd use
         // becomes the fma.rn.
@@ -3842,20 +3880,21 @@ impl<'c> FuncEmitter<'c> {
             return Ok(());
         }
         if kind == BinaryFloatKind::FAdd
-            && let Some(&(a, b, c)) = self.fma_operands.get(&op_ptr) {
-                let result = op_ptr.deref(ctx).get_result(0);
-                let class = classify(ctx, result.get_type(ctx))?;
-                if !class.is_float() {
-                    return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
-                        "float arithmetic on a non-float type".to_string()
-                    )));
-                }
-                let (a, b, c) = (self.lookup(a)?, self.lookup(b)?, self.lookup(c)?);
-                let dst = self.fresh(class);
-                self.inst(format!("fma.rn.{} {dst}, {a}, {b}, {c};", class.float_ty()));
-                self.values.insert(result, dst);
-                return Ok(());
+            && let Some(&(a, b, c)) = self.fma_operands.get(&op_ptr)
+        {
+            let result = op_ptr.deref(ctx).get_result(0);
+            let class = classify(ctx, result.get_type(ctx))?;
+            if !class.is_float() {
+                return Err(input_error_noloc!(NvptxErr::UnsupportedOp(
+                    "float arithmetic on a non-float type".to_string()
+                )));
             }
+            let (a, b, c) = (self.lookup(a)?, self.lookup(b)?, self.lookup(c)?);
+            let dst = self.fresh(class);
+            self.inst(format!("fma.rn.{} {dst}, {a}, {b}, {c};", class.float_ty()));
+            self.values.insert(result, dst);
+            return Ok(());
+        }
         let (lhs, rhs, result) = {
             let op_deref = op_ptr.deref(ctx);
             (
@@ -3999,7 +4038,12 @@ impl<'c> FuncEmitter<'c> {
         Ok(())
     }
 
-    fn emit_int_to_float(&mut self, src_val: Value, result: Value, signed: bool) -> CrabbitResult<()> {
+    fn emit_int_to_float(
+        &mut self,
+        src_val: Value,
+        result: Value,
+        signed: bool,
+    ) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src = self.lookup(src_val)?;
         let src_width = width_of(ctx, src_val.get_type(ctx))?;
@@ -4025,12 +4069,20 @@ impl<'c> FuncEmitter<'c> {
             (_, false) => "u32",
         };
         let dst = self.fresh(dst_class);
-        self.inst(format!("cvt.rn.{}.{src_ty} {dst}, {src};", dst_class.float_ty()));
+        self.inst(format!(
+            "cvt.rn.{}.{src_ty} {dst}, {src};",
+            dst_class.float_ty()
+        ));
         self.values.insert(result, dst);
         Ok(())
     }
 
-    fn emit_float_to_int(&mut self, src_val: Value, result: Value, signed: bool) -> CrabbitResult<()> {
+    fn emit_float_to_int(
+        &mut self,
+        src_val: Value,
+        result: Value,
+        signed: bool,
+    ) -> CrabbitResult<()> {
         let ctx = self.ctx;
         let src = self.lookup(src_val)?;
         let dst_width = width_of(ctx, result.get_type(ctx))?;
@@ -4047,7 +4099,10 @@ impl<'c> FuncEmitter<'c> {
             (_, false) => "u32",
         };
         let dst = self.fresh(dst_class);
-        self.inst(format!("cvt.rzi.{dst_ty}.{} {dst}, {src};", src.class.float_ty()));
+        self.inst(format!(
+            "cvt.rzi.{dst_ty}.{} {dst}, {src};",
+            src.class.float_ty()
+        ));
         // Narrow results keep the zero-extended invariant (Rust `as` casts
         // saturate, then truncate to the narrow width via `cvt` semantics;
         // PTX cvt already saturates to the destination type).
@@ -4076,11 +4131,7 @@ impl<'c> FuncEmitter<'c> {
     /// The label a conditional edge should branch to: the destination block
     /// itself, or a dedicated edge block carrying the block-argument copies
     /// so they do not execute on the other edge.
-    fn edge_target(
-        &mut self,
-        dest: Ptr<BasicBlock>,
-        args: &[Value],
-    ) -> CrabbitResult<String> {
+    fn edge_target(&mut self, dest: Ptr<BasicBlock>, args: &[Value]) -> CrabbitResult<String> {
         let dest_label = self.block_labels[&dest].clone();
         if args.is_empty() {
             return Ok(dest_label);

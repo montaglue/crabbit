@@ -45,8 +45,8 @@ use crate::{
     dialects::{
         builtin::attributes::IntegerAttr,
         llvm::ops::{
-            AddOp, AndOp, BitcastOp, CallOp, GepIndex, GetElementPtrOp, IntToPtrOp, LShrOp,
-            MulOp, PtrToIntOp, SelectOp, ShlOp, SubOp, TruncOp, ZExtOp,
+            AddOp, AndOp, BitcastOp, CallOp, GepIndex, GetElementPtrOp, IntToPtrOp, LShrOp, MulOp,
+            PtrToIntOp, SelectOp, ShlOp, SubOp, TruncOp, ZExtOp,
         },
         llvm::types::{ArrayType, StructType},
     },
@@ -55,8 +55,8 @@ use crate::{
 };
 
 use super::{
-    PtrSpace, align_of_ty, align_to, nvvm_intrinsic_name, sext_from, size_of_ty,
-    sreg_for_callee, struct_field_offset, width_of,
+    PtrSpace, align_of_ty, align_to, nvvm_intrinsic_name, sext_from, size_of_ty, sreg_for_callee,
+    struct_field_offset, width_of,
 };
 
 /// How a term's (≤32-bit) value widens to the 64-bit address register.
@@ -102,7 +102,11 @@ impl FoldedAddr {
             .iter()
             .map(|term| {
                 let scale = term.scale.unsigned_abs();
-                if scale == 0 { 16 } else { (1i64 << scale.trailing_zeros().min(4)).min(16) }
+                if scale == 0 {
+                    16
+                } else {
+                    (1i64 << scale.trailing_zeros().min(4)).min(16)
+                }
             })
             .min()
             .unwrap_or(16)
@@ -171,7 +175,9 @@ impl AddrFolder {
                 let Ok(width) = width_of(ctx, result.get_type(ctx)) else {
                     continue;
                 };
-                if let Some(int) = (&*attr as &dyn pliron::attribute::Attribute).downcast_ref::<IntegerAttr>() {
+                if let Some(int) =
+                    (&*attr as &dyn pliron::attribute::Attribute).downcast_ref::<IntegerAttr>()
+                {
                     let mask = if width >= 128 {
                         u128::MAX
                     } else {
@@ -203,11 +209,7 @@ impl AddrFolder {
     ) -> Option<FoldedAddr> {
         let base_val = gep.get_operand_src_ptr(ctx);
         let (root, mut terms, mut offset) = match plans.get(&base_val) {
-            Some(base_plan) => (
-                base_plan.root,
-                base_plan.terms.clone(),
-                base_plan.offset,
-            ),
+            Some(base_plan) => (base_plan.root, base_plan.terms.clone(), base_plan.offset),
             None => (unwrap_aliases(ctx, base_val, spaces), Vec::new(), 0i64),
         };
 
@@ -254,11 +256,11 @@ impl AddrFolder {
                 GepIndex::Value(value) => {
                     let width = width_of(ctx, value.get_type(ctx)).ok()?;
                     if let Some((imm, imm_width)) = self.const_of(*value) {
-                        offset = offset
-                            .wrapping_add(sext_from(imm, imm_width).wrapping_mul(elem_size));
+                        offset =
+                            offset.wrapping_add(sext_from(imm, imm_width).wrapping_mul(elem_size));
                     } else if width == 64 {
-                        offset = offset
-                            .wrapping_add(self.peel64(ctx, *value, elem_size, &mut terms));
+                        offset =
+                            offset.wrapping_add(self.peel64(ctx, *value, elem_size, &mut terms));
                     } else if width <= 32 {
                         // Narrow indices sign-extend (LLVM GEP semantics);
                         // no reassociation under a sign extension.
@@ -299,10 +301,7 @@ impl AddrFolder {
         // cvta path instead).
         let generic = PtrSpace::Generic;
         let root_space = spaces.get(&root).copied().unwrap_or(generic);
-        let result_space = spaces
-            .get(&gep.get_result(ctx))
-            .copied()
-            .unwrap_or(generic);
+        let result_space = spaces.get(&gep.get_result(ctx)).copied().unwrap_or(generic);
         let base_space = spaces.get(&base_val).copied().unwrap_or(generic);
         if (root_space == PtrSpace::Shared) != (result_space == PtrSpace::Shared)
             || (root_space == PtrSpace::Shared) != (base_space == PtrSpace::Shared)
@@ -332,13 +331,7 @@ impl AddrFolder {
     /// sums: those shapes are the unrolled tile indices this folding
     /// exists for, and their invariant halves are shared through the
     /// per-block base cache instead.
-    fn peel64(
-        &mut self,
-        ctx: &Context,
-        value: Value,
-        scale: i64,
-        terms: &mut Vec<Term>,
-    ) -> i64 {
+    fn peel64(&mut self, ctx: &Context, value: Value, scale: i64, terms: &mut Vec<Term>) -> i64 {
         let mut value = value;
         let mut scale = scale;
         let mut offset = 0i64;
@@ -349,7 +342,9 @@ impl AddrFolder {
             if let Some((imm, width)) = self.const_of(value) {
                 return offset.wrapping_add(sext_from(imm, width).wrapping_mul(scale));
             }
-            let Some(def) = value.defining_op() else { break };
+            let Some(def) = value.defining_op() else {
+                break;
+            };
             let op_obj = Operation::get_op_dyn(def, ctx);
             let operands = |i: usize| def.deref(ctx).get_operand(i);
             if op_obj.downcast_ref::<AddOp>().is_some() {
@@ -400,13 +395,8 @@ impl AddrFolder {
                     break;
                 }
                 if inner_width == 32 {
-                    return offset.wrapping_add(self.decompose_zext32(
-                        ctx,
-                        inner,
-                        scale,
-                        PEEL_DEPTH,
-                        terms,
-                    ));
+                    return offset
+                        .wrapping_add(self.decompose_zext32(ctx, inner, scale, PEEL_DEPTH, terms));
                 }
                 // Narrower sources are zero-extended in their register
                 // already; the term widens with a plain cvt.u64.u32.
@@ -466,8 +456,7 @@ impl AddrFolder {
         let operands = |i: usize| def.deref(ctx).get_operand(i);
         if op_obj.downcast_ref::<AddOp>().is_some() {
             let (a, b) = (operands(0), operands(1));
-            let (Some(max_a), Some(max_b)) =
-                (self.range_max(ctx, a), self.range_max(ctx, b))
+            let (Some(max_a), Some(max_b)) = (self.range_max(ctx, a), self.range_max(ctx, b))
             else {
                 return opaque(terms);
             };

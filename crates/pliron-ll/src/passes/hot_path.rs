@@ -27,9 +27,9 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     context::{Context, Ptr},
-    ll::op_interfaces::WeightedBranchOpInterface,
     ir::{basic_block::BasicBlock, op::op_cast, operation::Operation},
     linked_list::ContainsLinkedList,
+    ll::op_interfaces::WeightedBranchOpInterface,
     passes::dominance_frontier::immediate_dominators,
 };
 
@@ -503,17 +503,7 @@ fn extract_hot_path(probabilities: &[Vec<(usize, BranchProbability)>]) -> Vec<us
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::{
-        BranchOpInterface as _, CallOpInterface as _,
-    };
-    #[allow(unused_imports)]
-    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
-    #[allow(unused_imports)]
-    use pliron::op::Op as _;
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
     use crate::{
         dialects::{
             builtin::{self, types::Signedness},
@@ -525,6 +515,14 @@ mod tests {
         },
         ir::r#type::{TypeHandle, TypedHandle},
     };
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{BranchOpInterface as _, CallOpInterface as _};
+    #[allow(unused_imports)]
+    use pliron::op::Op as _;
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::BinArithOp as _;
 
     fn test_context() -> Context {
         let ctx = Context::new();
@@ -624,9 +622,21 @@ mod tests {
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let else_block = BasicBlock::new(&mut ctx, Some("else".try_into().unwrap()), vec![]);
         let join_block = BasicBlock::new(&mut ctx, Some("join".try_into().unwrap()), vec![]);
-        then_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
-        else_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
-        join_block.insert_at_back(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        then_block.insert_at_back(
+            func.get_region(&ctx)
+                .expect("llvm.func definition must have a body"),
+            &ctx,
+        );
+        else_block.insert_at_back(
+            func.get_region(&ctx)
+                .expect("llvm.func definition must have a body"),
+            &ctx,
+        );
+        join_block.insert_at_back(
+            func.get_region(&ctx)
+                .expect("llvm.func definition must have a body"),
+            &ctx,
+        );
 
         let cond_br = CondBrOp::new(&mut ctx, cond, then_block, vec![], else_block, vec![]);
         cond_br.set_successor_weights(&ctx, vec![1, 7]);
@@ -641,7 +651,11 @@ mod tests {
             .get_operation()
             .insert_at_back(join_block, &ctx);
 
-        let info = HotPathInfo::for_region(func.get_region(&ctx).expect("llvm.func definition must have a body"), &ctx);
+        let info = HotPathInfo::for_region(
+            func.get_region(&ctx)
+                .expect("llvm.func definition must have a body"),
+            &ctx,
+        );
 
         assert!(info.edge_probability(entry, else_block) == BranchProbability::from_ratio(7, 8));
         assert!(info.hot_path() == [entry, else_block, join_block]);

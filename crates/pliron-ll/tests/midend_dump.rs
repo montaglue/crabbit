@@ -58,9 +58,7 @@ fn dump_post_midend_ir() {
 
     use pliron::builtin::op_interfaces::SymbolOpInterface;
     use pliron::linked_list::ContainsLinkedList;
-    let module = pliron::op::Op::get_operation(
-        &*Operation::get_op_dyn(root, &ctx),
-    );
+    let module = pliron::op::Op::get_operation(&*Operation::get_op_dyn(root, &ctx));
     let body = module
         .deref(&ctx)
         .get_region(0)

@@ -17,10 +17,10 @@
 use crate::ll::BlockmapIdAttr;
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{aarch64::ops::FuncOp, builtin::op_interfaces::OneRegionInterface},
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::{frontend::module_op, util::cast_operation};
@@ -32,9 +32,7 @@ dict_key!(ATTR_KEY_AARCH64_BLOCKMAP_ID, "aarch64_blockmap_id");
 /// Whether block ids and op provenance are stamped (`CRABBIT_PROFILE_MAP`
 /// or its older name `CRABBIT_BLOCKMAP` set, non-empty, not `0`).
 pub fn blockmap_enabled() -> bool {
-    let set = |var: &str| {
-        std::env::var(var).is_ok_and(|value| !value.is_empty() && value != "0")
-    };
+    let set = |var: &str| std::env::var(var).is_ok_and(|value| !value.is_empty() && value != "0");
     set("CRABBIT_BLOCKMAP") || set("CRABBIT_PROFILE_MAP")
 }
 
@@ -63,10 +61,7 @@ impl Pass for Aarch64BlockmapIdPass {
 /// Stamp every block of every machine function in `root` with its index in
 /// the current (RA-time) region order. Public so tests can drive it
 /// without touching the environment.
-pub fn assign_blockmap_ids(
-    ctx: &mut Context,
-    root: Ptr<Operation>,
-) -> pliron::result::Result<()> {
+pub fn assign_blockmap_ids(ctx: &mut Context, root: Ptr<Operation>) -> pliron::result::Result<()> {
     let module = module_op(ctx, root)?;
     let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
     let ops: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -115,6 +110,7 @@ mod tests {
     };
     use crate::{
         conversion::pass::Passes,
+        dialects::builtin::ops::ConstantOp,
         dialects::{
             aarch64,
             builtin::{
@@ -129,7 +125,6 @@ mod tests {
             },
             macho,
         },
-        dialects::builtin::ops::ConstantOp,
         ll::op_interfaces::WeightedBranchOpInterface,
         utils::apint::APInt,
     };
@@ -173,7 +168,14 @@ mod tests {
         );
         cond.get_operation().insert_at_back(entry, &ctx);
         let cond_result = cond.get_result(&ctx);
-        let cond_br = CondBrOp::new(&mut ctx, cond_result, then_block, vec![], else_block, vec![]);
+        let cond_br = CondBrOp::new(
+            &mut ctx,
+            cond_result,
+            then_block,
+            vec![],
+            else_block,
+            vec![],
+        );
         // The true edge is cold, the false edge hot: placement moves the
         // else block next to the entry, ahead of the then block.
         cond_br.set_successor_weights(&ctx, vec![1, 2000]);

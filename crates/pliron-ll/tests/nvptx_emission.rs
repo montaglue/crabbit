@@ -46,11 +46,7 @@ fn ptr_ty(ctx: &mut Context) -> pliron_ll::r#type::TypeHandle {
     PointerType::get(ctx, 0).into()
 }
 
-fn i64_const(
-    ctx: &mut Context,
-    block: pliron_ll::context::Ptr<BasicBlock>,
-    value: u64,
-) -> Value {
+fn i64_const(ctx: &mut Context, block: pliron_ll::context::Ptr<BasicBlock>, value: u64) -> Value {
     let ty = IntegerType::get(ctx, 64, Signedness::Signless);
     let constant = ConstantOp::new(
         ctx,
@@ -254,7 +250,10 @@ use pliron_ll::dialects::builtin::types::{FP32Type, FP64Type};
 use pliron_ll::dialects::llvm::op_interfaces::{BinArithOp as _, CastOpInterface as _};
 use pliron_ll::dialects::llvm::{
     attributes::FCmpPredicateAttr,
-    ops::{AddressOfOp, FAddOp, FCmpOp, FDivOp, FMulOp, FPExtOp, GlobalOp, SIToFPOp, SelectOp, UIToFPOp, FPToSIOp},
+    ops::{
+        AddressOfOp, FAddOp, FCmpOp, FDivOp, FMulOp, FPExtOp, FPToSIOp, GlobalOp, SIToFPOp,
+        SelectOp, UIToFPOp,
+    },
     types::ArrayType,
 };
 
@@ -266,7 +265,10 @@ fn call_intrinsic(
     args: Vec<Value>,
 ) -> Option<Value> {
     let ret = result.unwrap_or_else(|| VoidType::get(ctx).into());
-    let arg_tys = args.iter().map(|a| pliron::r#type::Typed::get_type(a, ctx)).collect();
+    let arg_tys = args
+        .iter()
+        .map(|a| pliron::r#type::Typed::get_type(a, ctx))
+        .collect();
     let ty = FuncType::get(ctx, ret, arg_tys, false);
     let call = CallOp::new(
         ctx,
@@ -296,7 +298,12 @@ fn float_math_kernel() {
     pliron_ll::ll::set_global_data(
         &ctx,
         &tile,
-        pliron_ll::ll::DataAttr { bytes: vec![0; 1024], align: 4, mutable: true, relocs: vec![] },
+        pliron_ll::ll::DataAttr {
+            bytes: vec![0; 1024],
+            align: 4,
+            mutable: true,
+            relocs: vec![],
+        },
     );
     pliron_ll::ll::set_global_section(&mut ctx, &tile, ".shared");
     tile.get_operation().insert_at_back(body, &ctx);
@@ -311,7 +318,14 @@ fn float_math_kernel() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (a, b, c, out, count) = (args[0], args[1], args[2], args[3], args[4]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32_ty), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32_ty),
+        vec![],
+    )
+    .unwrap();
     let load = |ctx: &mut Context, base: Value, elem: pliron_ll::r#type::TypeHandle| -> Value {
         let gep = GetElementPtrOp::new(ctx, base, vec![GepIndex::Value(tid)], elem);
         gep.get_operation().insert_at_back(entry, ctx);
@@ -332,7 +346,14 @@ fn float_math_kernel() {
     let sum = FAddOp::new(&mut ctx, prod, c32);
     sum.get_operation().insert_at_back(entry, &ctx);
     let sum = sum.get_result(&ctx);
-    let root = call_intrinsic(&mut ctx, entry, "llvm_nvvm_sqrt_rn_f", Some(f32_ty), vec![sum]).unwrap();
+    let root = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_sqrt_rn_f",
+        Some(f32_ty),
+        vec![sum],
+    )
+    .unwrap();
 
     // select(sum >= 0 ? root : sum / 2)
     let zero = ConstantOp::new(
@@ -368,7 +389,9 @@ fn float_math_kernel() {
     let slot = GetElementPtrOp::new(&mut ctx, tile_ptr, vec![GepIndex::Value(tid)], f32_ty);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot = slot.get_result(&ctx);
-    StoreOp::new(&mut ctx, picked, slot).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, picked, slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     call_intrinsic(&mut ctx, entry, "llvm_nvvm_barrier0", None, vec![]);
     let back = LoadOp::new(&mut ctx, slot, f32_ty);
     back.get_operation().insert_at_back(entry, &ctx);
@@ -404,10 +427,18 @@ fn float_math_kernel() {
     let one32 = pliron_ll::dialects::llvm::ops::TruncOp::new(&mut ctx, one, i32_ty);
     one32.get_operation().insert_at_back(entry, &ctx);
     let one32 = one32.get_result(&ctx);
-    call_intrinsic(&mut ctx, entry, "llvm_nvvm_atomic_add_gen_i", Some(i32_ty), vec![count, one32]);
+    call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_atomic_add_gen_i",
+        Some(i32_ty),
+        vec![count, one32],
+    );
     let _ = i64_ty;
 
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -441,7 +472,10 @@ fn float_math_kernel() {
     ] {
         assert!(ptx.contains(needle), "missing `{needle}` in:\n{ptx}");
     }
-    assert!(!ptx.contains("cvta."), "no address escapes generic here:\n{ptx}");
+    assert!(
+        !ptx.contains("cvta."),
+        "no address escapes generic here:\n{ptx}"
+    );
     assert!(!ptx.contains("mul.rn.f32"), "the product must fuse:\n{ptx}");
     ptxas_verify("float_math_kernel", &ptx);
 }
@@ -462,7 +496,14 @@ fn fp_contraction_single_use_only() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (p, q) = (args[0], args[1]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32_ty), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32_ty),
+        vec![],
+    )
+    .unwrap();
     let load = |ctx: &mut Context, base: Value, off: u32| -> Value {
         let gep = GetElementPtrOp::new(ctx, base, vec![GepIndex::Constant(off)], f32_ty);
         gep.get_operation().insert_at_back(entry, ctx);
@@ -470,7 +511,11 @@ fn fp_contraction_single_use_only() {
         load.get_operation().insert_at_back(entry, ctx);
         load.get_result(ctx)
     };
-    let (a, b, c) = (load(&mut ctx, p, 0), load(&mut ctx, p, 1), load(&mut ctx, p, 2));
+    let (a, b, c) = (
+        load(&mut ctx, p, 0),
+        load(&mut ctx, p, 1),
+        load(&mut ctx, p, 2),
+    );
 
     // Single-use product: contracts.
     let prod = FMulOp::new(&mut ctx, a, b);
@@ -497,8 +542,12 @@ fn fp_contraction_single_use_only() {
     let dst = GetElementPtrOp::new(&mut ctx, q, vec![GepIndex::Value(tid)], f32_ty);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, sum, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -527,7 +576,12 @@ fn shared_provenance_and_escape() {
     pliron_ll::ll::set_global_data(
         &ctx,
         &tile,
-        pliron_ll::ll::DataAttr { bytes: vec![0; 256], align: 4, mutable: true, relocs: vec![] },
+        pliron_ll::ll::DataAttr {
+            bytes: vec![0; 256],
+            align: 4,
+            mutable: true,
+            relocs: vec![],
+        },
     );
     pliron_ll::ll::set_global_section(&mut ctx, &tile, ".shared");
     tile.get_operation().insert_at_back(body, &ctx);
@@ -539,7 +593,14 @@ fn shared_provenance_and_escape() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (p, n) = (args[0], args[1]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32_ty), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32_ty),
+        vec![],
+    )
+    .unwrap();
     let tile_addr = AddressOfOp::new(&mut ctx, "SCRATCH".try_into().unwrap(), 0);
     tile_addr.get_operation().insert_at_back(entry, &ctx);
     let t = tile_addr.get_result(&ctx);
@@ -548,7 +609,9 @@ fn shared_provenance_and_escape() {
     let slot = GetElementPtrOp::new(&mut ctx, t, vec![GepIndex::Value(tid)], i32_ty);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot = slot.get_result(&ctx);
-    StoreOp::new(&mut ctx, tid, slot).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, tid, slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     // Mixed provenance: select(shared, global param) joins at generic, so
     // the shared arm converts and the load stays generic.
@@ -565,14 +628,21 @@ fn shared_provenance_and_escape() {
     let dst = GetElementPtrOp::new(&mut ctx, p, vec![GepIndex::Value(tid)], i32_ty);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, v, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, v, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
     assert!(ptx.contains("st.shared.u32"), "{ptx}");
     assert!(ptx.contains("cvta.shared.u64"), "{ptx}");
-    assert!(ptx.contains("ld.u32"), "select result must load generically:\n{ptx}");
+    assert!(
+        ptx.contains("ld.u32"),
+        "select result must load generically:\n{ptx}"
+    );
     assert!(!ptx.contains("ld.shared.u32"), "{ptx}");
     assert!(ptx.contains("st.global.u32"), "{ptx}");
     ptxas_verify("shared_provenance_and_escape", &ptx);
@@ -594,7 +664,12 @@ fn shared_provenance_through_block_args() {
     pliron_ll::ll::set_global_data(
         &ctx,
         &tile,
-        pliron_ll::ll::DataAttr { bytes: vec![0; 256], align: 4, mutable: true, relocs: vec![] },
+        pliron_ll::ll::DataAttr {
+            bytes: vec![0; 256],
+            align: 4,
+            mutable: true,
+            relocs: vec![],
+        },
     );
     pliron_ll::ll::set_global_section(&mut ctx, &tile, ".shared");
     tile.get_operation().insert_at_back(body, &ctx);
@@ -619,8 +694,12 @@ fn shared_provenance_through_block_args() {
     let v = LoadOp::new(&mut ctx, x, i32_ty);
     v.get_operation().insert_at_back(tail, &ctx);
     let v = v.get_result(&ctx);
-    StoreOp::new(&mut ctx, v, out).get_operation().insert_at_back(tail, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(tail, &ctx);
+    StoreOp::new(&mut ctx, v, out)
+        .get_operation()
+        .insert_at_back(tail, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(tail, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -657,7 +736,10 @@ fn struct_gep_kernel() {
     let node = StructType::get_named(
         &mut ctx,
         "node".try_into().unwrap(),
-        Some((vec![i32t, f32t, i64t], pliron_llvm::types::StructLayout::Unpacked)),
+        Some((
+            vec![i32t, f32t, i64t],
+            pliron_llvm::types::StructLayout::Unpacked,
+        )),
     )
     .expect("fresh named struct")
     .into();
@@ -667,7 +749,14 @@ fn struct_gep_kernel() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (nodes, out) = (args[0], args[1]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     // &nodes[tid].2 — the i64 field at offset 8, elements striding at 16.
     let gep = GetElementPtrOp::new(
         &mut ctx,
@@ -684,8 +773,12 @@ fn struct_gep_kernel() {
     let dst = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], i64t);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, value, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, value, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("struct geps must lower");
@@ -717,7 +810,14 @@ fn alloca_local_kernel() {
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot_ptr = slot.get_result(&ctx);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let tid64 = pliron_ll::dialects::llvm::ops::ZExtOp::new_with_nneg(&mut ctx, tid, i64t, false);
     tid64.get_operation().insert_at_back(entry, &ctx);
     let tid64 = tid64.get_result(&ctx);
@@ -726,19 +826,28 @@ fn alloca_local_kernel() {
     let elt = GetElementPtrOp::new(&mut ctx, slot_ptr, vec![GepIndex::Constant(3)], i64t);
     elt.get_operation().insert_at_back(entry, &ctx);
     let elt = elt.get_result(&ctx);
-    StoreOp::new(&mut ctx, tid64, elt).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, tid64, elt)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     let back = LoadOp::new(&mut ctx, elt, i64t);
     back.get_operation().insert_at_back(entry, &ctx);
     let back = back.get_result(&ctx);
     let dst = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], i64t);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, back, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, back, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("allocas must lower");
-    assert!(ptx.contains(".local .align 8 .b8 __crabbit_local_loc_0[32];"), "{ptx}");
+    assert!(
+        ptx.contains(".local .align 8 .b8 __crabbit_local_loc_0[32];"),
+        "{ptx}"
+    );
     assert!(ptx.contains("cvta.local.u64"), "{ptx}");
     ptxas_verify("alloca_local_kernel", &ptx);
 }
@@ -777,13 +886,22 @@ fn device_function_call_kernel() {
     let sum = AddOp::new_with_overflow_flag(&mut ctx, prod, seven, Default::default());
     sum.get_operation().insert_at_back(helper_entry, &ctx);
     let sum = sum.get_result(&ctx);
-    ReturnOp::new(&mut ctx, Some(sum)).get_operation().insert_at_back(helper_entry, &ctx);
+    ReturnOp::new(&mut ctx, Some(sum))
+        .get_operation()
+        .insert_at_back(helper_entry, &ctx);
 
     // kernel: out[tid] = scale_add(out[tid], tid)
     let func = new_kernel(&mut ctx, body, "devcall", vec![ptr]);
     let entry = func.get_entry_block(&ctx).unwrap();
     let out = entry.deref(&ctx).arguments().next().unwrap();
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let slot = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], i32t);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot = slot.get_result(&ctx);
@@ -799,19 +917,29 @@ fn device_function_call_kernel() {
     );
     call.get_operation().insert_at_back(entry, &ctx);
     let scaled = call.get_operation().deref(&ctx).get_result(0);
-    StoreOp::new(&mut ctx, scaled, slot).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, scaled, slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("device calls must lower");
     // Forward declaration + definition + the call ABI.
     assert!(ptx.contains(".func (.param .b32 scale_add_ret) scale_add (.param .b32 scale_add_param_0, .param .b32 scale_add_param_1);"), "{ptx}");
-    assert!(ptx.contains("call.uni (c0_ret), scale_add, (c0_param_0, c0_param_1);"), "{ptx}");
+    assert!(
+        ptx.contains("call.uni (c0_ret), scale_add, (c0_param_0, c0_param_1);"),
+        "{ptx}"
+    );
     assert!(ptx.contains("st.param.b32"), "{ptx}");
     assert!(ptx.contains("ld.param.b32"), "{ptx}");
     // The helper body: immediate 7 folds into the add.
     assert!(ptx.contains("st.param.b32 [scale_add_ret]"), "{ptx}");
-    assert!(!ptx.contains(".visible .entry scale_add"), "device fns are not entries:\n{ptx}");
+    assert!(
+        !ptx.contains(".visible .entry scale_add"),
+        "device fns are not entries:\n{ptx}"
+    );
     ptxas_verify("device_function_call_kernel", &ptx);
 }
 
@@ -848,8 +976,12 @@ fn integer_immediates_fold() {
     let slot = GetElementPtrOp::new(&mut ctx, buf, vec![GepIndex::Constant(3)], i64t);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot = slot.get_result(&ctx);
-    StoreOp::new(&mut ctx, shifted, slot).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, shifted, slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -857,8 +989,14 @@ fn integer_immediates_fold() {
     assert!(ptx.contains("shl.b64 %rd3, %rd2, 2;"), "{ptx}");
     // buf[3]: the byte offset 24 folds into the memory operand itself.
     assert!(ptx.contains("st.global.u64 [%rd0+24]"), "{ptx}");
-    assert!(!ptx.contains("mov.u64 %rd"), "constants must not materialize:\n{ptx}");
-    assert!(!ptx.contains("cvt.u32.u64"), "constant shift amounts need no cvt:\n{ptx}");
+    assert!(
+        !ptx.contains("mov.u64 %rd"),
+        "constants must not materialize:\n{ptx}"
+    );
+    assert!(
+        !ptx.contains("cvt.u32.u64"),
+        "constant shift amounts need no cvt:\n{ptx}"
+    );
     ptxas_verify("integer_immediates_fold", &ptx);
 }
 
@@ -866,11 +1004,7 @@ fn integer_immediates_fold() {
 // Address folding ([reg+imm] memory operands) and vectorized shared loads
 // ---------------------------------------------------------------------------
 
-fn i32_const(
-    ctx: &mut Context,
-    block: pliron_ll::context::Ptr<BasicBlock>,
-    value: u32,
-) -> Value {
+fn i32_const(ctx: &mut Context, block: pliron_ll::context::Ptr<BasicBlock>, value: u32) -> Value {
     let ty = IntegerType::get(ctx, 32, Signedness::Signless);
     let constant = ConstantOp::new(
         ctx,
@@ -930,8 +1064,12 @@ fn memory_offsets_fold_and_reassociate() {
     dst.get_operation().insert_at_back(entry, &ctx);
     let sum = sum.get_result(&ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, sum, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -972,7 +1110,12 @@ fn shared_loads_vectorize_v4() {
     pliron_ll::ll::set_global_data(
         &ctx,
         &tile,
-        pliron_ll::ll::DataAttr { bytes: vec![0; 1024], align: 4, mutable: true, relocs: vec![] },
+        pliron_ll::ll::DataAttr {
+            bytes: vec![0; 1024],
+            align: 4,
+            mutable: true,
+            relocs: vec![],
+        },
     );
     pliron_ll::ll::set_global_section(&mut ctx, &tile, ".shared");
     tile.get_operation().insert_at_back(body, &ctx);
@@ -984,9 +1127,14 @@ fn shared_loads_vectorize_v4() {
     let entry = func.get_entry_block(&ctx).unwrap();
     let out = entry.deref(&ctx).arguments().next().unwrap();
 
-    let tid =
-        call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![])
-            .unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let tile_addr = AddressOfOp::new(&mut ctx, "TILEV".try_into().unwrap(), 0);
     tile_addr.get_operation().insert_at_back(entry, &ctx);
     let t = tile_addr.get_result(&ctx);
@@ -1026,8 +1174,12 @@ fn shared_loads_vectorize_v4() {
     let dst = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], i32t);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, sum, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -1057,8 +1209,7 @@ fn global_loads_fold_but_do_not_vectorize() {
 
     let mut loaded = Vec::new();
     for lane in 0..4i32 {
-        let gep =
-            GetElementPtrOp::new(&mut ctx, a, vec![GepIndex::Constant(lane as u32)], i32t);
+        let gep = GetElementPtrOp::new(&mut ctx, a, vec![GepIndex::Constant(lane as u32)], i32t);
         gep.get_operation().insert_at_back(entry, &ctx);
         let slot = gep.get_result(&ctx);
         let load = LoadOp::new(&mut ctx, slot, i32t);
@@ -1071,12 +1222,19 @@ fn global_loads_fold_but_do_not_vectorize() {
         add.get_operation().insert_at_back(entry, &ctx);
         sum = add.get_result(&ctx);
     }
-    StoreOp::new(&mut ctx, sum, out).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, out)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
-    assert!(!ptx.contains(".v4"), "global loads must stay scalar:\n{ptx}");
+    assert!(
+        !ptx.contains(".v4"),
+        "global loads must stay scalar:\n{ptx}"
+    );
     assert!(ptx.contains("ld.global.nc.u32 %r0, [%rd0];"), "{ptx}");
     assert!(ptx.contains("ld.global.nc.u32 %r1, [%rd0+4];"), "{ptx}");
     assert!(ptx.contains("ld.global.nc.u32 %r3, [%rd0+12];"), "{ptx}");
@@ -1113,8 +1271,12 @@ fn zext_peel_requires_range_proof() {
     let load = LoadOp::new(&mut ctx, slot, i64t);
     load.get_operation().insert_at_back(entry, &ctx);
     let v = load.get_result(&ctx);
-    StoreOp::new(&mut ctx, v, a).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, v, a)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -1136,7 +1298,9 @@ fn unsupported_intrinsic_is_named() {
     let func = new_kernel(&mut ctx, body, "bad", vec![]);
     let entry = func.get_entry_block(&ctx).unwrap();
     call_intrinsic(&mut ctx, entry, "llvm_nvvm_wmma_load", None, vec![]);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     let err = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect_err("must reject");
     assert!(err.to_string().contains("llvm_nvvm_wmma_load"), "{err}");
@@ -1177,17 +1341,18 @@ fn linemap_covers_every_line_and_never_changes_ptx() {
     // Stamp source ids the way the kernel pipeline's mid-end head does.
     unsafe { std::env::set_var("CRABBIT_PROFILE_MAP", "1") };
     pliron_ll::passes::llvm::op_ids::LlvmOpIdPass
-        .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+        .run(
+            module.get_operation(),
+            &mut ctx,
+            &mut AnalysisManager::default(),
+        )
         .expect("op-id stamping");
 
     let plain = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("plain emission");
-    let (ptx, linemap) = nvptx::write_ptx_with_forced_linemap(
-        &ctx,
-        module.get_operation(),
-        &PtxTarget::default(),
-    )
-    .expect("linemap emission");
+    let (ptx, linemap) =
+        nvptx::write_ptx_with_forced_linemap(&ctx, module.get_operation(), &PtxTarget::default())
+            .expect("linemap emission");
     unsafe { std::env::remove_var("CRABBIT_PROFILE_MAP") };
 
     assert_eq!(plain, ptx, "linemap recording must never change the PTX");
@@ -1198,7 +1363,10 @@ fn linemap_covers_every_line_and_never_changes_ptx() {
     let end = entry_map["end"].as_u64().unwrap() as usize;
     let lines = entry_map["lines"].as_object().unwrap();
     let total_lines = ptx.matches('\n').count();
-    assert!(start >= 1 && end <= total_lines && start < end, "{start}..{end} vs {total_lines}");
+    assert!(
+        start >= 1 && end <= total_lines && start < end,
+        "{start}..{end} vs {total_lines}"
+    );
     let mut op_lines = 0;
     for lineno in start..=end {
         let value = lines
@@ -1215,7 +1383,10 @@ fn linemap_covers_every_line_and_never_changes_ptx() {
             other => panic!("unexpected linemap value {other}"),
         }
     }
-    assert!(op_lines >= 4, "expected ld/add/st/ret lines with op ids, got {op_lines}");
+    assert!(
+        op_lines >= 4,
+        "expected ld/add/st/ret lines with op ids, got {op_lines}"
+    );
     assert!(entry_map["midend"].is_null());
 }
 
@@ -1242,7 +1413,14 @@ fn warp_shuffle_and_vote_kernel() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (x, out, flags) = (args[0], args[1], args[2]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let gep = GetElementPtrOp::new(&mut ctx, x, vec![GepIndex::Value(tid)], f32t);
     gep.get_operation().insert_at_back(entry, &ctx);
     let gep = gep.get_result(&ctx);
@@ -1258,14 +1436,38 @@ fn warp_shuffle_and_vote_kernel() {
     let five = i32_const(&mut ctx, entry, 5);
 
     // f32 down + up, i32 bfly + idx: every mode once.
-    let down = call_intrinsic(&mut ctx, entry, "llvm_nvvm_shfl_sync_down_f32", Some(f32t),
-        vec![mask, v, sixteen, clamp_down]).unwrap();
-    let up = call_intrinsic(&mut ctx, entry, "llvm_nvvm_shfl_sync_up_f32", Some(f32t),
-        vec![mask, down, one, zero_c]).unwrap();
-    let bfly = call_intrinsic(&mut ctx, entry, "llvm_nvvm_shfl_sync_bfly_i32", Some(i32t),
-        vec![mask, tid, one, clamp_down]).unwrap();
-    let idx = call_intrinsic(&mut ctx, entry, "llvm_nvvm_shfl_sync_idx_i32", Some(i32t),
-        vec![mask, bfly, five, clamp_down]).unwrap();
+    let down = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_shfl_sync_down_f32",
+        Some(f32t),
+        vec![mask, v, sixteen, clamp_down],
+    )
+    .unwrap();
+    let up = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_shfl_sync_up_f32",
+        Some(f32t),
+        vec![mask, down, one, zero_c],
+    )
+    .unwrap();
+    let bfly = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_shfl_sync_bfly_i32",
+        Some(i32t),
+        vec![mask, tid, one, clamp_down],
+    )
+    .unwrap();
+    let idx = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_shfl_sync_idx_i32",
+        Some(i32t),
+        vec![mask, bfly, five, clamp_down],
+    )
+    .unwrap();
 
     call_intrinsic(&mut ctx, entry, "llvm_nvvm_bar_warp_sync", None, vec![mask]);
 
@@ -1273,14 +1475,31 @@ fn warp_shuffle_and_vote_kernel() {
     let pred = ICmpOp::new(&mut ctx, ICmpPredicateAttr::ULT, tid, sixteen);
     pred.get_operation().insert_at_back(entry, &ctx);
     let pred = pred.get_result(&ctx);
-    let ballot = call_intrinsic(&mut ctx, entry, "llvm_nvvm_vote_ballot_sync", Some(i32t),
-        vec![mask, pred]).unwrap();
-    let i1t: pliron_ll::r#type::TypeHandle =
-        IntegerType::get(&ctx, 1, Signedness::Signless).into();
-    let all = call_intrinsic(&mut ctx, entry, "llvm_nvvm_vote_all_sync", Some(i1t),
-        vec![mask, pred]).unwrap();
-    let any = call_intrinsic(&mut ctx, entry, "llvm_nvvm_vote_any_sync", Some(i1t),
-        vec![mask, pred]).unwrap();
+    let ballot = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_vote_ballot_sync",
+        Some(i32t),
+        vec![mask, pred],
+    )
+    .unwrap();
+    let i1t: pliron_ll::r#type::TypeHandle = IntegerType::get(&ctx, 1, Signedness::Signless).into();
+    let all = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_vote_all_sync",
+        Some(i1t),
+        vec![mask, pred],
+    )
+    .unwrap();
+    let any = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_vote_any_sync",
+        Some(i1t),
+        vec![mask, pred],
+    )
+    .unwrap();
     let all32 = pliron_ll::dialects::llvm::ops::ZExtOp::new(&mut ctx, all, i32t);
     all32.get_operation().insert_at_back(entry, &ctx);
     let any32 = pliron_ll::dialects::llvm::ops::ZExtOp::new(&mut ctx, any, i32t);
@@ -1293,7 +1512,9 @@ fn warp_shuffle_and_vote_kernel() {
     let dst = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], f32t);
     dst.get_operation().insert_at_back(entry, &ctx);
     let (sum, dst) = (sum.get_result(&ctx), dst.get_result(&ctx));
-    StoreOp::new(&mut ctx, sum, dst).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     let mixed = AddOp::new_with_overflow_flag(&mut ctx, idx, ballot, Default::default());
     mixed.get_operation().insert_at_back(entry, &ctx);
     let mixed = mixed.get_result(&ctx);
@@ -1306,8 +1527,12 @@ fn warp_shuffle_and_vote_kernel() {
     let fdst = GetElementPtrOp::new(&mut ctx, flags, vec![GepIndex::Value(tid)], i32t);
     fdst.get_operation().insert_at_back(entry, &ctx);
     let fdst = fdst.get_result(&ctx);
-    StoreOp::new(&mut ctx, mixed3, fdst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, mixed3, fdst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -1348,8 +1573,22 @@ fn dynamic_shared_memory_kernel() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (x, out) = (args[0], args[1]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
-    let smem = call_intrinsic(&mut ctx, entry, "crabbit_dyn_shared_base", Some(ptr), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
+    let smem = call_intrinsic(
+        &mut ctx,
+        entry,
+        "crabbit_dyn_shared_base",
+        Some(ptr),
+        vec![],
+    )
+    .unwrap();
 
     let src = GetElementPtrOp::new(&mut ctx, x, vec![GepIndex::Value(tid)], f32t);
     src.get_operation().insert_at_back(entry, &ctx);
@@ -1361,7 +1600,9 @@ fn dynamic_shared_memory_kernel() {
     let slot = GetElementPtrOp::new(&mut ctx, smem, vec![GepIndex::Value(tid)], f32t);
     slot.get_operation().insert_at_back(entry, &ctx);
     let slot = slot.get_result(&ctx);
-    StoreOp::new(&mut ctx, v, slot).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, v, slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     call_intrinsic(&mut ctx, entry, "llvm_nvvm_barrier0", None, vec![]);
     let back = LoadOp::new(&mut ctx, slot, f32t);
     back.get_operation().insert_at_back(entry, &ctx);
@@ -1370,16 +1611,26 @@ fn dynamic_shared_memory_kernel() {
     let dst = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], f32t);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, back, dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, back, dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
-    assert!(ptx.contains(".extern .shared .align 16 .b8 __crabbit_dyn_shared[];"), "{ptx}");
+    assert!(
+        ptx.contains(".extern .shared .align 16 .b8 __crabbit_dyn_shared[];"),
+        "{ptx}"
+    );
     assert!(ptx.contains("mov.u64 %rd2, __crabbit_dyn_shared;"), "{ptx}");
     assert!(ptx.contains("st.shared.f32"), "{ptx}");
     assert!(ptx.contains("ld.shared.f32"), "{ptx}");
-    assert!(!ptx.contains("cvta."), "the window is fully shared-proven:\n{ptx}");
+    assert!(
+        !ptx.contains("cvta."),
+        "the window is fully shared-proven:\n{ptx}"
+    );
     ptxas_verify("dynamic_shared_memory_kernel", &ptx);
 }
 
@@ -1400,7 +1651,10 @@ fn struct_param_by_value_kernel() {
     let cfg = StructType::get_named(
         &ctx,
         "cfg".try_into().unwrap(),
-        Some((vec![i32t, f32t, i64t], pliron_llvm::types::StructLayout::Unpacked)),
+        Some((
+            vec![i32t, f32t, i64t],
+            pliron_llvm::types::StructLayout::Unpacked,
+        )),
     )
     .expect("fresh named struct")
     .into();
@@ -1410,7 +1664,14 @@ fn struct_param_by_value_kernel() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (w, iout, fout) = (args[0], args[1], args[2]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let a = pliron_ll::dialects::llvm::ops::ExtractValueOp::new(&mut ctx, w, vec![0]).unwrap();
     a.get_operation().insert_at_back(entry, &ctx);
     let b = pliron_ll::dialects::llvm::ops::ExtractValueOp::new(&mut ctx, w, vec![1]).unwrap();
@@ -1429,19 +1690,34 @@ fn struct_param_by_value_kernel() {
     let sum = AddOp::new_with_overflow_flag(&mut ctx, a64, c, Default::default());
     sum.get_operation().insert_at_back(entry, &ctx);
     let sum = sum.get_result(&ctx);
-    StoreOp::new(&mut ctx, sum, dst_a).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, dst_a)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     let dst_b = GetElementPtrOp::new(&mut ctx, fout, vec![GepIndex::Value(tid)], f32t);
     dst_b.get_operation().insert_at_back(entry, &ctx);
     let dst_b = dst_b.get_result(&ctx);
-    StoreOp::new(&mut ctx, b, dst_b).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, b, dst_b)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("aggregate kernel params must lower");
-    assert!(ptx.contains(".param .align 8 .b8 sparam_param_0[16]"), "{ptx}");
+    assert!(
+        ptx.contains(".param .align 8 .b8 sparam_param_0[16]"),
+        "{ptx}"
+    );
     assert!(ptx.contains("ld.param.u32 %r0, [sparam_param_0];"), "{ptx}");
-    assert!(ptx.contains("ld.param.f32 %f0, [sparam_param_0+4];"), "{ptx}");
-    assert!(ptx.contains("ld.param.u64 %rd0, [sparam_param_0+8];"), "{ptx}");
+    assert!(
+        ptx.contains("ld.param.f32 %f0, [sparam_param_0+4];"),
+        "{ptx}"
+    );
+    assert!(
+        ptx.contains("ld.param.u64 %rd0, [sparam_param_0+8];"),
+        "{ptx}"
+    );
     ptxas_verify("struct_param_by_value_kernel", &ptx);
 }
 
@@ -1469,7 +1745,12 @@ fn byte_table(
     pliron_ll::ll::set_global_data(
         ctx,
         &table,
-        pliron_ll::ll::DataAttr { bytes: vec![0; len], align: 1, mutable: false, relocs: vec![] },
+        pliron_ll::ll::DataAttr {
+            bytes: vec![0; len],
+            align: 1,
+            mutable: false,
+            relocs: vec![],
+        },
     );
     table.get_operation().insert_at_back(module_body, ctx);
 }
@@ -1490,7 +1771,14 @@ fn nc_on_readonly_param_not_on_written_param() {
     let args: Vec<_> = entry.deref(&ctx).arguments().collect();
     let (a, out) = (args[0], args[1]);
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let at = |ctx: &mut Context, base: Value| -> Value {
         let gep = GetElementPtrOp::new(ctx, base, vec![GepIndex::Value(tid)], i32t);
         gep.get_operation().insert_at_back(entry, ctx);
@@ -1502,19 +1790,28 @@ fn nc_on_readonly_param_not_on_written_param() {
     v.get_operation().insert_at_back(entry, &ctx);
     let v = v.get_result(&ctx);
     let out_slot = at(&mut ctx, out);
-    StoreOp::new(&mut ctx, v, out_slot).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, v, out_slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
     let back = LoadOp::new(&mut ctx, out_slot, i32t);
     back.get_operation().insert_at_back(entry, &ctx);
     let back = back.get_result(&ctx);
     let sum = AddOp::new_with_overflow_flag(&mut ctx, back, v, Default::default());
     sum.get_operation().insert_at_back(entry, &ctx);
     let sum = sum.get_result(&ctx);
-    StoreOp::new(&mut ctx, sum, out_slot).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, out_slot)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
-    assert!(ptx.contains("ld.global.nc.u32"), "a is never written:\n{ptx}");
+    assert!(
+        ptx.contains("ld.global.nc.u32"),
+        "a is never written:\n{ptx}"
+    );
     assert!(
         ptx.contains("ld.global.u32"),
         "out is stored through, its load must NOT take .nc:\n{ptx}"
@@ -1530,7 +1827,12 @@ fn nc_on_readonly_param_not_on_written_param() {
 fn nc_kill_switch() {
     let exe = std::env::current_exe().expect("test binary path");
     let output = Command::new(exe)
-        .args(["--exact", "nc_kill_switch_subprocess_helper", "--include-ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "nc_kill_switch_subprocess_helper",
+            "--include-ignored",
+            "--nocapture",
+        ])
         .env("CRABBIT_NVPTX_NC", "0")
         .output()
         .expect("run helper subprocess");
@@ -1564,12 +1866,19 @@ fn nc_kill_switch_subprocess_helper() {
     let v = LoadOp::new(&mut ctx, a, i32t);
     v.get_operation().insert_at_back(entry, &ctx);
     let v = v.get_result(&ctx);
-    StoreOp::new(&mut ctx, v, out).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, v, out)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
-    assert!(!ptx.contains(".nc"), "kill switch must suppress .nc:\n{ptx}");
+    assert!(
+        !ptx.contains(".nc"),
+        "kill switch must suppress .nc:\n{ptx}"
+    );
     assert!(ptx.contains("ld.global.u32"), "{ptx}");
 }
 
@@ -1595,7 +1904,14 @@ fn byte_loads_combine_into_word() {
     let entry = func.get_entry_block(&ctx).unwrap();
     let out = entry.deref(&ctx).arguments().next().unwrap();
 
-    let tid = call_intrinsic(&mut ctx, entry, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let tid64 = pliron_ll::dialects::llvm::ops::ZExtOp::new(&mut ctx, tid, i64t);
     tid64.get_operation().insert_at_back(entry, &ctx);
     let tid64 = tid64.get_result(&ctx);
@@ -1652,19 +1968,34 @@ fn byte_loads_combine_into_word() {
     let dst = GetElementPtrOp::new(&mut ctx, out, vec![GepIndex::Value(tid)], i32t);
     dst.get_operation().insert_at_back(entry, &ctx);
     let dst = dst.get_result(&ctx);
-    StoreOp::new(&mut ctx, sum.unwrap(), dst).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum.unwrap(), dst)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
     // The byte window and the half window each load once; alignment raise.
     assert!(ptx.contains(".global .align 4 .b8 LUT[1024]"), "{ptx}");
     assert_eq!(ptx.matches("ld.global.nc.u32").count(), 2, "{ptx}");
-    assert!(!ptx.contains("ld.global.nc.u8"), "bytes must combine:\n{ptx}");
-    assert!(!ptx.contains("ld.global.nc.u16"), "halves must combine:\n{ptx}");
+    assert!(
+        !ptx.contains("ld.global.nc.u8"),
+        "bytes must combine:\n{ptx}"
+    );
+    assert!(
+        !ptx.contains("ld.global.nc.u16"),
+        "halves must combine:\n{ptx}"
+    );
     for needle in [
-        "prmt.b32 %r", ", 0, 0x4440;", ", 0, 0x4441;", ", 0, 0x4442;", ", 0, 0x4443;",
-        ", 65535;", ", 16;",
+        "prmt.b32 %r",
+        ", 0, 0x4440;",
+        ", 0, 0x4441;",
+        ", 0, 0x4442;",
+        ", 0, 0x4443;",
+        ", 65535;",
+        ", 16;",
     ] {
         assert!(ptx.contains(needle), "missing `{needle}` in:\n{ptx}");
     }
@@ -1692,8 +2023,7 @@ fn byte_loads_bail_on_stride_and_on_write() {
      -> Value {
         let mut sum: Option<Value> = None;
         for j in 0..4u32 {
-            let slot =
-                GetElementPtrOp::new(ctx, base, vec![GepIndex::Constant(j * stride)], u8t);
+            let slot = GetElementPtrOp::new(ctx, base, vec![GepIndex::Constant(j * stride)], u8t);
             slot.get_operation().insert_at_back(entry, ctx);
             let load = LoadOp::new(ctx, slot.get_result(ctx), u8t);
             load.get_operation().insert_at_back(entry, ctx);
@@ -1704,8 +2034,7 @@ fn byte_loads_bail_on_stride_and_on_write() {
             sum = Some(match sum {
                 None => wide,
                 Some(acc) => {
-                    let add =
-                        AddOp::new_with_overflow_flag(ctx, acc, wide, Default::default());
+                    let add = AddOp::new_with_overflow_flag(ctx, acc, wide, Default::default());
                     add.get_operation().insert_at_back(entry, ctx);
                     add.get_result(ctx)
                 }
@@ -1722,8 +2051,12 @@ fn byte_loads_bail_on_stride_and_on_write() {
     tab.get_operation().insert_at_back(entry, &ctx);
     let tab = tab.get_result(&ctx);
     let sum = sum_4_loads(&mut ctx, entry, tab, 4);
-    StoreOp::new(&mut ctx, sum, out).get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    StoreOp::new(&mut ctx, sum, out)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     // Kernel 2: adjacent loads at 0..3, but the kernel also stores into the
     // table: no read-only proof, so no combining and no `.nc`.
@@ -1733,17 +2066,30 @@ fn byte_loads_bail_on_stride_and_on_write() {
     let tab2 = AddressOfOp::new(&mut ctx, "TAB".try_into().unwrap(), 0);
     tab2.get_operation().insert_at_back(entry2, &ctx);
     let tab2 = tab2.get_result(&ctx);
-    let tid = call_intrinsic(&mut ctx, entry2, "llvm_nvvm_read_ptx_sreg_tid_x", Some(i32t), vec![]).unwrap();
+    let tid = call_intrinsic(
+        &mut ctx,
+        entry2,
+        "llvm_nvvm_read_ptx_sreg_tid_x",
+        Some(i32t),
+        vec![],
+    )
+    .unwrap();
     let tid8 = pliron_ll::dialects::llvm::ops::TruncOp::new(&mut ctx, tid, u8t);
     tid8.get_operation().insert_at_back(entry2, &ctx);
     let tid8 = tid8.get_result(&ctx);
     let wslot = GetElementPtrOp::new(&mut ctx, tab2, vec![GepIndex::Constant(100)], u8t);
     wslot.get_operation().insert_at_back(entry2, &ctx);
     let wslot = wslot.get_result(&ctx);
-    StoreOp::new(&mut ctx, tid8, wslot).get_operation().insert_at_back(entry2, &ctx);
+    StoreOp::new(&mut ctx, tid8, wslot)
+        .get_operation()
+        .insert_at_back(entry2, &ctx);
     let sum2 = sum_4_loads(&mut ctx, entry2, tab2, 1);
-    StoreOp::new(&mut ctx, sum2, out2).get_operation().insert_at_back(entry2, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry2, &ctx);
+    StoreOp::new(&mut ctx, sum2, out2)
+        .get_operation()
+        .insert_at_back(entry2, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry2, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -1832,21 +2178,29 @@ fn byte_loads_combine_across_dominated_blocks_only() {
     let s3 = AddOp::new_with_overflow_flag(&mut ctx, s2, b1, Default::default());
     s3.get_operation().insert_at_back(arm_a, &ctx);
     let s3 = s3.get_result(&ctx);
-    BrOp::new(&mut ctx, join, vec![s3]).get_operation().insert_at_back(arm_a, &ctx);
+    BrOp::new(&mut ctx, join, vec![s3])
+        .get_operation()
+        .insert_at_back(arm_a, &ctx);
 
     let b2 = byte_at(&mut ctx, arm_b, lut, 6);
     let b3 = byte_at(&mut ctx, arm_b, lut, 7);
     let t = AddOp::new_with_overflow_flag(&mut ctx, b2, b3, Default::default());
     t.get_operation().insert_at_back(arm_b, &ctx);
     let t = t.get_result(&ctx);
-    BrOp::new(&mut ctx, join, vec![t]).get_operation().insert_at_back(arm_b, &ctx);
+    BrOp::new(&mut ctx, join, vec![t])
+        .get_operation()
+        .insert_at_back(arm_b, &ctx);
 
     let picked = join.deref(&ctx).arguments().next().unwrap();
     let total = AddOp::new_with_overflow_flag(&mut ctx, head, picked, Default::default());
     total.get_operation().insert_at_back(join, &ctx);
     let total = total.get_result(&ctx);
-    StoreOp::new(&mut ctx, total, out).get_operation().insert_at_back(join, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(join, &ctx);
+    StoreOp::new(&mut ctx, total, out)
+        .get_operation()
+        .insert_at_back(join, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(join, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
@@ -1888,7 +2242,12 @@ fn cuda_oxide_lowering_shapes() {
     pliron_ll::ll::set_global_data(
         &ctx,
         &window,
-        pliron_ll::ll::DataAttr { bytes: vec![], align: 16, mutable: true, relocs: vec![] },
+        pliron_ll::ll::DataAttr {
+            bytes: vec![],
+            align: 16,
+            mutable: true,
+            relocs: vec![],
+        },
     );
     pliron_ll::ll::set_global_section(&mut ctx, &window, ".shared");
     window.get_operation().insert_at_back(body, &ctx);
@@ -1930,7 +2289,14 @@ fn cuda_oxide_lowering_shapes() {
     fence.get_operation().insert_at_back(entry, &ctx);
 
     // Inline PTX: `add.s32 $0, $1, $2;` with register constraints.
-    let asm = InlineAsmOp::new(&mut ctx, i32t, vec![old, b], "add.s32 $0, $1, $2;", "=r,r,r", false);
+    let asm = InlineAsmOp::new(
+        &mut ctx,
+        i32t,
+        vec![old, b],
+        "add.s32 $0, $1, $2;",
+        "=r,r,r",
+        false,
+    );
     asm.get_operation().insert_at_back(entry, &ctx);
     let sum = asm.get_result(&ctx);
 
@@ -1948,7 +2314,13 @@ fn cuda_oxide_lowering_shapes() {
 
     // The block barrier under its current intrinsic name.
     let zero = i32_const(&mut ctx, entry, 0);
-    call_intrinsic(&mut ctx, entry, "llvm_nvvm_barrier_cta_sync_aligned_all", None, vec![zero]);
+    call_intrinsic(
+        &mut ctx,
+        entry,
+        "llvm_nvvm_barrier_cta_sync_aligned_all",
+        None,
+        vec![zero],
+    );
 
     // An i1 stored to memory (as a byte), loaded back and negated.
     let cmp = ICmpOp::new(&mut ctx, ICmpPredicateAttr::ULT, a, b);
@@ -1961,7 +2333,10 @@ fn cuda_oxide_lowering_shapes() {
     let i1_int = IntegerType::get(&mut ctx, 1, Signedness::Signless);
     let truth = ConstantOp::new(
         &mut ctx,
-        Box::new(IntegerAttr::new(i1_int, APInt::from_u64(1, NonZero::new(1).unwrap()))),
+        Box::new(IntegerAttr::new(
+            i1_int,
+            APInt::from_u64(1, NonZero::new(1).unwrap()),
+        )),
     );
     truth.get_operation().insert_at_back(entry, &ctx);
     let (loaded, truth_val) = (ld.get_result(&ctx), truth.get_result(&ctx));
@@ -1970,11 +2345,16 @@ fn cuda_oxide_lowering_shapes() {
     let negated = not.get_result(&ctx);
     let st = StoreOp::new(&mut ctx, negated, flags);
     st.get_operation().insert_at_back(entry, &ctx);
-    ReturnOp::new(&mut ctx, None).get_operation().insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
 
     let ptx = nvptx::write_ptx_from_ir(&ctx, module.get_operation(), &PtxTarget::default())
         .expect("ptx emission");
-    assert!(ptx.contains(".extern .shared .align 16 .b8 __dynamic_smem_k[];"), "{ptx}");
+    assert!(
+        ptx.contains(".extern .shared .align 16 .b8 __dynamic_smem_k[];"),
+        "{ptx}"
+    );
     assert!(ptx.contains("fence.acq_rel.gpu;"), "{ptx}");
     assert!(ptx.contains("atom.relaxed.gpu.global.add.u32"), "{ptx}");
     assert!(ptx.contains("add.s32 %r"), "{ptx}");

@@ -79,7 +79,10 @@ pub(super) fn shared_array_storage<'tcx>(
         .ok_or("SharedArray alignment is not a constant")?;
     let elem_size = layout_size_of_ty(tcx, elem)?;
     let elem_align = layout_align_of_ty(tcx, elem)?;
-    Ok(Some((elem_size * count, elem_align.max(requested_align).max(1))))
+    Ok(Some((
+        elem_size * count,
+        elem_align.max(requested_align).max(1),
+    )))
 }
 
 /// (crate, type name) of an ADT type.
@@ -113,13 +116,20 @@ fn device_item<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> Opt
     let parent = tcx.parent(def_id);
     let (module, self_type) = match tcx.def_kind(parent) {
         rustc_hir::def::DefKind::Impl { .. } => {
-            let self_ty = tcx.type_of(parent).instantiate_identity().skip_normalization();
+            let self_ty = tcx
+                .type_of(parent)
+                .instantiate_identity()
+                .skip_normalization();
             (None, adt_ident(tcx, self_ty).map(|(_, name)| name))
         }
         rustc_hir::def::DefKind::Mod => (Some(tcx.item_name(parent).to_string()), None),
         _ => (None, None),
     };
-    Some(DeviceItem { name, module, self_type })
+    Some(DeviceItem {
+        name,
+        module,
+        self_type,
+    })
 }
 
 /// Lower a call to cuda-device's API. Returns `true` when the call was
@@ -177,7 +187,14 @@ pub(super) fn lower_cuda_device_call<'tcx>(
             return Ok(true);
         }
         if name == "sync_threads" {
-            let op = Operation::new(ctx, nvvm::Barrier0Op::get_concrete_op_info(), vec![], vec![], vec![], 0);
+            let op = Operation::new(
+                ctx,
+                nvvm::Barrier0Op::get_concrete_op_info(),
+                vec![],
+                vec![],
+                vec![],
+                0,
+            );
             op.insert_at_back(insert_block, ctx);
             return Ok(true);
         }
@@ -185,7 +202,14 @@ pub(super) fn lower_cuda_device_call<'tcx>(
 
     if module == Some("warp") && name == "lane_id" {
         let result_ty = u32_ty(ctx);
-        let op = Operation::new(ctx, nvvm::ReadPtxSregLaneIdOp::get_concrete_op_info(), vec![result_ty], vec![], vec![], 0);
+        let op = Operation::new(
+            ctx,
+            nvvm::ReadPtxSregLaneIdOp::get_concrete_op_info(),
+            vec![result_ty],
+            vec![],
+            vec![],
+            0,
+        );
         op.insert_at_back(insert_block, ctx);
         let value = op.deref(ctx).get_result(0);
         store(ctx, value)?;
@@ -217,7 +241,14 @@ pub(super) fn lower_cuda_device_call<'tcx>(
         };
         if let Some((operation, precision)) = scalar {
             let x = operand(ctx, 0)?;
-            let op = nvvm::ScalarMathOp::build(ctx, x, Format::F32, operation, precision, Subnormal::Preserve);
+            let op = nvvm::ScalarMathOp::build(
+                ctx,
+                x,
+                Format::F32,
+                operation,
+                precision,
+                Subnormal::Preserve,
+            );
             op.insert_at_back(insert_block, ctx);
             let value = op.deref(ctx).get_result(0);
             store(ctx, value)?;
@@ -227,7 +258,13 @@ pub(super) fn lower_cuda_device_call<'tcx>(
             let a = operand(ctx, 0)?;
             let b = operand(ctx, 1)?;
             let c = operand(ctx, 2)?;
-            let value = device_placeholder_call(ctx, insert_block, dialect_mir_placeholder("fmaf32"), vec![a, b, c], Some(a.get_type(ctx)));
+            let value = device_placeholder_call(
+                ctx,
+                insert_block,
+                dialect_mir_placeholder("fmaf32"),
+                vec![a, b, c],
+                Some(a.get_type(ctx)),
+            );
             store(ctx, value.expect("fma has a result"))?;
             return Ok(true);
         }
@@ -285,7 +322,10 @@ pub(super) fn lower_cuda_device_call<'tcx>(
         use crate::dialects::nvvm::ops::{AtomicOrdering, AtomicScope};
         let ptr = operand(ctx, 0)?;
         let val = operand(ctx, 1)?;
-        let ordering = match args.get(2).and_then(|arg| constant_discriminant(tcx, state, body, &arg.node)) {
+        let ordering = match args
+            .get(2)
+            .and_then(|arg| constant_discriminant(tcx, state, body, &arg.node))
+        {
             Some(0) => AtomicOrdering::Relaxed,
             Some(1) => AtomicOrdering::Acquire,
             Some(2) => AtomicOrdering::Release,
@@ -294,8 +334,16 @@ pub(super) fn lower_cuda_device_call<'tcx>(
             None => return Err(format!("{path}: the ordering must be a constant")),
         };
         let result_ty = val.get_type(ctx);
-        let op = nvvm::NvvmAtomicRmwOp::build(ctx, ptr, val, result_ty, kind, ordering, AtomicScope::Device)
-            .get_operation();
+        let op = nvvm::NvvmAtomicRmwOp::build(
+            ctx,
+            ptr,
+            val,
+            result_ty,
+            kind,
+            ordering,
+            AtomicScope::Device,
+        )
+        .get_operation();
         op.insert_at_back(insert_block, ctx);
         let value = op.deref(ctx).get_result(0);
         store(ctx, value)?;
@@ -308,7 +356,9 @@ pub(super) fn lower_cuda_device_call<'tcx>(
         let receiver_ty = mono_ty(
             tcx,
             state,
-            args.first().map(|a| a.node.ty(body, tcx)).ok_or("SharedArray method without receiver")?,
+            args.first()
+                .map(|a| a.node.ty(body, tcx))
+                .ok_or("SharedArray method without receiver")?,
         );
         let elem_ty = shared_array_elem_ty(tcx, receiver_ty)
             .ok_or_else(|| format!("{path}: receiver is not a pointer to SharedArray"))?;
@@ -370,9 +420,12 @@ pub(super) fn is_device_module(ctx: &Context, module_body: Ptr<BasicBlock>) -> b
 /// (`dialect_mir::rust_intrinsics`): `mir-lower` lowers the call to the
 /// device instruction, and the dialect's verifier knows the schema.
 pub(super) fn dialect_mir_placeholder(suffix: &str) -> crate::identifier::Identifier {
-    format!("{}{suffix}", crate::dialects::dialect_mir::rust_intrinsics::PLACEHOLDER_PREFIX)
-        .try_into()
-        .expect("placeholder names are legal identifiers")
+    format!(
+        "{}{suffix}",
+        crate::dialects::dialect_mir::rust_intrinsics::PLACEHOLDER_PREFIX
+    )
+    .try_into()
+    .expect("placeholder names are legal identifiers")
 }
 
 /// The placeholder a core intrinsic maps to on the device, by rustc's
@@ -441,7 +494,8 @@ fn constant_discriminant<'tcx>(
     };
     let constant = mono_const(tcx, state, constant.const_);
     let ty = mono_ty(tcx, state, operand.ty(body, tcx));
-    let value = constant.try_eval_scalar_int(tcx, rustc_middle::ty::TypingEnv::fully_monomorphized())?;
+    let value =
+        constant.try_eval_scalar_int(tcx, rustc_middle::ty::TypingEnv::fully_monomorphized())?;
     let rustc_middle::ty::TyKind::Adt(adt, _) = ty.kind() else {
         return Some(value.to_bits_unchecked());
     };
@@ -472,7 +526,9 @@ fn destination_storage_ty<'tcx>(
 /// `T` of a pointer or reference to `SharedArray<T, N, ALIGN>`.
 fn shared_array_elem_ty<'tcx>(tcx: TyCtxt<'tcx>, receiver: Ty<'tcx>) -> Option<Ty<'tcx>> {
     let pointee = match runtime_ty(receiver).kind() {
-        rustc_middle::ty::TyKind::Ref(_, inner, _) | rustc_middle::ty::TyKind::RawPtr(inner, _) => *inner,
+        rustc_middle::ty::TyKind::Ref(_, inner, _) | rustc_middle::ty::TyKind::RawPtr(inner, _) => {
+            *inner
+        }
         _ => receiver,
     };
     match runtime_ty(pointee).kind() {
@@ -491,7 +547,14 @@ fn shared_array_elem_ty<'tcx>(tcx: TyCtxt<'tcx>, receiver: Ty<'tcx>) -> Option<T
 fn sreg_op(ctx: &mut Context, name: &str, result_ty: TypeHandle) -> Option<Ptr<Operation>> {
     macro_rules! sreg {
         ($op:ident) => {
-            Operation::new(ctx, nvvm::$op::get_concrete_op_info(), vec![result_ty], vec![], vec![], 0)
+            Operation::new(
+                ctx,
+                nvvm::$op::get_concrete_op_info(),
+                vec![result_ty],
+                vec![],
+                vec![],
+                0,
+            )
         };
     }
     Some(match name {
@@ -512,7 +575,11 @@ fn sreg_op(ctx: &mut Context, name: &str, result_ty: TypeHandle) -> Option<Ptr<O
 }
 
 /// A call to crabbit's `crabbit.dyn.shared.base` intrinsic (docs/KERNEL-ABI.md).
-fn dynamic_shared_base(ctx: &mut Context, module_body: Ptr<BasicBlock>, insert_block: Ptr<BasicBlock>) -> Value {
+fn dynamic_shared_base(
+    ctx: &mut Context,
+    module_body: Ptr<BasicBlock>,
+    insert_block: Ptr<BasicBlock>,
+) -> Value {
     let symbol: crate::identifier::Identifier = "crabbit_dyn_shared_base"
         .try_into()
         .expect("static identifier literal");

@@ -46,7 +46,9 @@ pub fn construct(name: &str, label: Option<&str>) -> Option<Box<dyn Pass>> {
         mir_census::PASS_NAME => Box::new(mir_census::MirCensusPass::new(label)),
         "lower-dialect-mir" => Box::new(lower_dialect_mir::LowerDialectMirPass),
         linkage::PASS_NAME => Box::new(linkage::ApplyModuleLinkagePass),
-        function_addresses::PASS_NAME => Box::new(function_addresses::MaterializeFunctionAddressesPass),
+        function_addresses::PASS_NAME => {
+            Box::new(function_addresses::MaterializeFunctionAddressesPass)
+        }
         erase_mir_types::PASS_NAME => Box::new(erase_mir_types::EraseMirTypesPass),
         _ => return None,
     })
@@ -60,7 +62,8 @@ mod tests {
     #[test]
     fn default_order_constructs_passes_by_their_names() {
         for name in DEFAULT_ORDER {
-            let pass = construct(name, Some("label")).unwrap_or_else(|| panic!("`{name}` does not construct"));
+            let pass = construct(name, Some("label"))
+                .unwrap_or_else(|| panic!("`{name}` does not construct"));
             assert_eq!(pass.name(), *name);
         }
     }

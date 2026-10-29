@@ -14,7 +14,12 @@ pub(super) fn declare_static_global<'tcx>(
     // whose storage the compiler provides: a `.shared` global of N elements
     // of T (docs/KERNEL-ABI.md), zero bytes, since shared memory cannot be
     // statically initialized.
-    let static_ty = normalize_ty(tcx, tcx.type_of(def_id).instantiate_identity().skip_normalization());
+    let static_ty = normalize_ty(
+        tcx,
+        tcx.type_of(def_id)
+            .instantiate_identity()
+            .skip_normalization(),
+    );
     if let Some((bytes, align)) = shared_array_storage(tcx, static_ty)? {
         let byte_ty: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
         let global_ty = llvm::types::ArrayType::get(ctx, byte_ty, bytes).into();
@@ -255,9 +260,9 @@ pub(super) fn data_global_for_alloc<'tcx>(
         rustc_mir::interpret::GlobalAlloc::VTable(ty, dyn_ty) => {
             let vtable_alloc_id = tcx.vtable_allocation((
                 ty,
-                dyn_ty.principal().map(|principal| {
-                    tcx.instantiate_bound_regions_with_erased(principal)
-                }),
+                dyn_ty
+                    .principal()
+                    .map(|principal| tcx.instantiate_bound_regions_with_erased(principal)),
             ));
             let rustc_mir::interpret::GlobalAlloc::Memory(alloc) =
                 tcx.global_alloc(vtable_alloc_id)
@@ -340,12 +345,25 @@ pub(super) fn llvm_decl_type(ctx: &mut Context, ty: TypeHandle) -> TypeHandle {
         });
         return match name {
             Some(name) => {
-                let name = format!("{name}__llvm").try_into().expect("suffixing an existing legal identifier keeps it legal");
-                llvm::types::StructType::get_named(ctx, name, fields.map(|fields| (fields, llvm::types::StructLayout::Unpacked)))
-                    .expect("the __llvm mirror name maps 1:1 to this field set")
-                    .into()
+                let name = format!("{name}__llvm")
+                    .try_into()
+                    .expect("suffixing an existing legal identifier keeps it legal");
+                llvm::types::StructType::get_named(
+                    ctx,
+                    name,
+                    fields.map(|fields| (fields, llvm::types::StructLayout::Unpacked)),
+                )
+                .expect("the __llvm mirror name maps 1:1 to this field set")
+                .into()
             }
-            None => llvm::types::StructType::get_unnamed(ctx, (fields.unwrap_or_default(), llvm::types::StructLayout::Unpacked)).into(),
+            None => llvm::types::StructType::get_unnamed(
+                ctx,
+                (
+                    fields.unwrap_or_default(),
+                    llvm::types::StructLayout::Unpacked,
+                ),
+            )
+            .into(),
         };
     }
     ty
@@ -381,7 +399,12 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
         ("realloc", realloc_ty),
         ("calloc", calloc_ty),
     ] {
-        let decl = new_llvm_func_decl(ctx, name.try_into().expect("static identifier literal"), ty, LinkageAttr::ExternalLinkage);
+        let decl = new_llvm_func_decl(
+            ctx,
+            name.try_into().expect("static identifier literal"),
+            ty,
+            LinkageAttr::ExternalLinkage,
+        );
         decl.get_operation().insert_at_back(module_body, ctx);
     }
 
@@ -424,7 +447,12 @@ pub(super) fn declare_default_allocator_shims<'tcx>(
 
     let no_alloc_symbol = allocator_symbol(tcx, "__rust_no_alloc_shim_is_unstable_v2");
     erase_llvm_declaration(ctx, module_body, &no_alloc_symbol);
-    let no_alloc = new_llvm_func_def(ctx, no_alloc_symbol, no_alloc_ty, LinkageAttr::ExternalLinkage);
+    let no_alloc = new_llvm_func_def(
+        ctx,
+        no_alloc_symbol,
+        no_alloc_ty,
+        LinkageAttr::ExternalLinkage,
+    );
     let ret = llvm::ops::ReturnOp::new(ctx, None);
     let no_alloc_entry = no_alloc
         .get_entry_block(ctx)
@@ -459,8 +487,7 @@ pub(super) fn define_allocator_call<F>(
     let one_value = one.deref(ctx).get_result(0);
     one.insert_at_back(entry, ctx);
     let call_args = select_args(&args, one_value);
-    let call_result_ty =
-        result_ty.unwrap_or_else(|| llvm::types::VoidType::get(ctx).into());
+    let call_result_ty = result_ty.unwrap_or_else(|| llvm::types::VoidType::get(ctx).into());
     let call_arg_types: Vec<TypeHandle> = call_args
         .iter()
         .map(|arg| {
@@ -503,7 +530,10 @@ fn erase_llvm_declaration(
     }
 }
 
-pub(super) fn allocator_symbol<'tcx>(tcx: TyCtxt<'tcx>, name: &str) -> crate::identifier::Identifier {
+pub(super) fn allocator_symbol<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    name: &str,
+) -> crate::identifier::Identifier {
     rustc_symbol_mangling::mangle_internal_symbol(tcx, name)
         .as_str()
         .try_into()

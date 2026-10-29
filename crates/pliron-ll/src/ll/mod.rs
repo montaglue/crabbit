@@ -8,8 +8,9 @@ pub mod op_interfaces;
 pub mod ops;
 
 pub use attributes::{
-    BlockmapIdAttr, BranchWeightsAttr, DerivedFromAttr, DerivedFromManyAttr, InlinedFromAttr, OpIdAttr, BytesAttr, DataAttr, DataReloc, LinkageAttr, TlsAttr,
-    VBinOpKindAttr, VReduceKindAttr, VectorizeEpilogueAttr,
+    BlockmapIdAttr, BranchWeightsAttr, BytesAttr, DataAttr, DataReloc, DerivedFromAttr,
+    DerivedFromManyAttr, InlinedFromAttr, LinkageAttr, OpIdAttr, TlsAttr, VBinOpKindAttr,
+    VReduceKindAttr, VectorizeEpilogueAttr,
 };
 
 use pliron::{
@@ -37,7 +38,9 @@ pub fn global_initializer_bytes(
     global: &pliron_llvm::ops::GlobalOp,
 ) -> Option<Vec<u8>> {
     let value = global.get_initializer_value(ctx)?;
-    value.downcast_ref::<BytesAttr>().map(|bytes| bytes.0.clone())
+    value
+        .downcast_ref::<BytesAttr>()
+        .map(|bytes| bytes.0.clone())
 }
 
 /// Attach a raw-byte initializer ([ll.bytes](BytesAttr)) to a global.

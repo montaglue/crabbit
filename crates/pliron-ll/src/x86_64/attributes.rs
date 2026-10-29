@@ -269,9 +269,7 @@ impl Printable for FunctionAbiAttr {
 
 /// Parses one [AbiLocation] using the same spellings [Printable] emits:
 /// `void`, `sret`, `stack:<offset>`, `<reg>`, or `<reg>:<reg>`.
-fn parse_abi_location<'a>(
-    state_stream: &mut StateStream<'a>,
-) -> ParseResult<'a, AbiLocation> {
+fn parse_abi_location<'a>(state_stream: &mut StateStream<'a>) -> ParseResult<'a, AbiLocation> {
     let loc = state_stream.loc();
     let mut word = many1::<String, _, _>(satisfy(|c: char| c.is_ascii_alphanumeric()));
     let (text, commit) = word.parse_stream(state_stream).into_result()?;
@@ -289,11 +287,12 @@ fn parse_abi_location<'a>(
             let Some(first) = Register::parse(first) else {
                 input_err!(loc, "invalid x86-64 ABI location `{text}`")?
             };
-            let (second, commit) = optional(token(':').with(many1::<String, _, _>(satisfy(
-                |c: char| c.is_ascii_alphanumeric(),
-            ))))
-            .parse_stream(state_stream)
-            .into_result()?;
+            let (second, commit) =
+                optional(token(':').with(many1::<String, _, _>(satisfy(|c: char| {
+                    c.is_ascii_alphanumeric()
+                }))))
+                .parse_stream(state_stream)
+                .into_result()?;
             let Some(second) = second else {
                 return Ok((AbiLocation::Gpr(first), commit));
             };
@@ -411,8 +410,7 @@ impl Parsable for FixupsAttr {
     }
 }
 
-pub fn register(_ctx: &mut Context) {
-}
+pub fn register(_ctx: &mut Context) {}
 
 #[cfg(test)]
 mod tests {

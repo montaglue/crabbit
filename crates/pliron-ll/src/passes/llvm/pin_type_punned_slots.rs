@@ -14,13 +14,13 @@ use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
     dialects::llvm::{
         ops::{AllocaOp, FuncOp, LoadOp, StoreOp},
         types::PointerType,
     },
     ir::{op::Op, operation::Operation, r#type::Typed},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
     result::CrabbitResult,
 };
 
@@ -87,9 +87,15 @@ fn pin_slot_if_punned(ctx: &mut Context, alloca: AllocaOp) -> CrabbitResult<bool
 
     let ptr_ty = PointerType::get(ctx, 0).into();
     let shield = pliron_llvm::ops::BitcastOp::new(ctx, slot, ptr_ty);
-    shield.get_operation().insert_after(ctx, alloca.get_operation());
+    shield
+        .get_operation()
+        .insert_after(ctx, alloca.get_operation());
     let shield_val = shield.get_result(ctx);
-    slot.replace_some_uses_with(ctx, |_, slot_use| punned.contains(&slot_use.user_op()), &shield_val);
+    slot.replace_some_uses_with(
+        ctx,
+        |_, slot_use| punned.contains(&slot_use.user_op()),
+        &shield_val,
+    );
     Ok(true)
 }
 
@@ -120,6 +126,7 @@ mod tests {
 
     use crate::{
         context::Context,
+        conversion::pass::{AnalysisManager, Pass},
         dialects::{
             builtin::{
                 self,
@@ -136,7 +143,6 @@ mod tests {
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{AnalysisManager, Pass},
         utils::apint::APInt,
     };
 
@@ -149,8 +155,13 @@ mod tests {
         let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
         let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let pair_ty =
-            StructType::get_unnamed(&ctx, (vec![i64_ty.into(), i64_ty.into()], crate::dialects::llvm::types::StructLayout::Unpacked));
+        let pair_ty = StructType::get_unnamed(
+            &ctx,
+            (
+                vec![i64_ty.into(), i64_ty.into()],
+                crate::dialects::llvm::types::StructLayout::Unpacked,
+            ),
+        );
         let func_ty = FuncType::get(&mut ctx, i64_ty.into(), vec![], false);
         let func = FuncOp::new(&mut ctx, "f".try_into().unwrap(), func_ty);
         func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
@@ -178,15 +189,32 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         LLVMPinTypePunnedSlotsPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
         Mem2RegPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         // The punned slot must survive promotion.
-        let printed = format!("{}", pliron::printable::Printable::disp(&module.get_operation(), &ctx));
-        assert!(printed.contains("llvm.alloca"), "slot was promoted:\n{printed}");
-        assert!(printed.contains("llvm.bitcast"), "shield missing:\n{printed}");
+        let printed = format!(
+            "{}",
+            pliron::printable::Printable::disp(&module.get_operation(), &ctx)
+        );
+        assert!(
+            printed.contains("llvm.alloca"),
+            "slot was promoted:\n{printed}"
+        );
+        assert!(
+            printed.contains("llvm.bitcast"),
+            "shield missing:\n{printed}"
+        );
     }
 }

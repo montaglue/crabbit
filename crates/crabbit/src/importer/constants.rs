@@ -215,8 +215,9 @@ pub(super) fn import_pointer_to_plain_data_constant<'tcx>(
     ty: TypeHandle,
 ) -> Result<Option<Value>, String> {
     let pointee = match runtime_ty(constant.ty()).kind() {
-        rustc_middle::ty::TyKind::Ref(_, inner, _)
-        | rustc_middle::ty::TyKind::RawPtr(inner, _) => runtime_ty(*inner),
+        rustc_middle::ty::TyKind::Ref(_, inner, _) | rustc_middle::ty::TyKind::RawPtr(inner, _) => {
+            runtime_ty(*inner)
+        }
         _ => return Ok(None),
     };
     let Ok(value) = constant.eval(tcx, typing_env, span) else {
@@ -326,8 +327,7 @@ pub(super) fn import_pointer_constant<'tcx>(
                     ty,
                 )));
             }
-            let symbol =
-                data_global_for_alloc(tcx, ctx, state.module_body, provenance.alloc_id())?;
+            let symbol = data_global_for_alloc(tcx, ctx, state.module_body, provenance.alloc_id())?;
             let ptr_ty = ptr_ty(ctx);
             let addr = mir_dialect::ops::AddressOfOp::new(ctx, symbol, ptr_ty);
             addr.get_operation().insert_at_back(insert_block, ctx);
@@ -522,7 +522,14 @@ pub(super) fn import_enum_constant<'tcx>(
         // back to the relocated-global path, which loads the enum blob out of
         // an `ll.data` global whose pointer slots the linker fills in.
         return import_pointer_constant(
-            tcx, ctx, state, insert_block, typing_env, span, constant, ty,
+            tcx,
+            ctx,
+            state,
+            insert_block,
+            typing_env,
+            span,
+            constant,
+            ty,
         )?
         .ok_or_else(|| format!("unsupported MIR enum constant: {:?}", constant));
     };
@@ -819,13 +826,17 @@ pub(super) fn integer_constant(
         .downcast_ref::<IntegerType>()
         .ok_or_else(|| "MIR integer constant has non-integer type".to_string())?;
     let width = int_ty.width();
-    let int_ty: TypedHandle<IntegerType> = TypedHandle::from_handle(ty, ctx).expect("integer_constant is only called with integer types");
+    let int_ty: TypedHandle<IntegerType> = TypedHandle::from_handle(ty, ctx)
+        .expect("integer_constant is only called with integer types");
     drop(ty_ref);
     Ok(mir_dialect::ops::ConstantOp::new_integer(
         ctx,
         IntegerAttr::new(
             int_ty,
-            APInt::from_u128(bits, NonZero::new(width as usize).expect("integer types have nonzero width")),
+            APInt::from_u128(
+                bits,
+                NonZero::new(width as usize).expect("integer types have nonzero width"),
+            ),
         ),
     ))
 }

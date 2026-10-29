@@ -72,7 +72,11 @@ pub(super) fn convert_ty<'tcx>(
                 .into_iter()
                 .map(|idx| convert_ty(tcx, ctx, source[idx]))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(llvm::types::StructType::get_unnamed(ctx, (fields, llvm::types::StructLayout::Unpacked)).into());
+            return Ok(llvm::types::StructType::get_unnamed(
+                ctx,
+                (fields, llvm::types::StructLayout::Unpacked),
+            )
+            .into());
         }
         TyKind::Array(elem, len) => {
             let elem = convert_ty(tcx, ctx, *elem)?;
@@ -124,9 +128,13 @@ pub(super) fn convert_ty<'tcx>(
                 .into_iter()
                 .map(|idx| convert_ty(tcx, ctx, source[idx]))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(llvm::types::StructType::get_named(ctx, name, Some((fields, llvm::types::StructLayout::Unpacked)))
-                .map_err(|error| error.to_string())?
-                .into());
+            return Ok(llvm::types::StructType::get_named(
+                ctx,
+                name,
+                Some((fields, llvm::types::StructLayout::Unpacked)),
+            )
+            .map_err(|error| error.to_string())?
+            .into());
         }
         TyKind::Adt(adt_def, args) if adt_def.is_union() => {
             let name = type_symbol(tcx, ty);
@@ -146,11 +154,13 @@ pub(super) fn convert_ty<'tcx>(
                 llvm::types::ArrayType::get(ctx, byte_ty, size).into()
             };
             let _ = args;
-            return Ok(
-                llvm::types::StructType::get_named(ctx, name, Some((vec![storage], llvm::types::StructLayout::Unpacked)))
-                    .map_err(|error| error.to_string())?
-                    .into(),
-            );
+            return Ok(llvm::types::StructType::get_named(
+                ctx,
+                name,
+                Some((vec![storage], llvm::types::StructLayout::Unpacked)),
+            )
+            .map_err(|error| error.to_string())?
+            .into());
         }
         TyKind::Adt(adt_def, _) if is_fmt_rt_argument_type(tcx, adt_def.did()) => {
             // `core::fmt::rt::ArgumentType` is read by prebuilt std code, so
@@ -189,9 +199,13 @@ pub(super) fn convert_ty<'tcx>(
                 .into_iter()
                 .map(|idx| convert_ty(tcx, ctx, source[idx]))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(llvm::types::StructType::get_named(ctx, name, Some((fields, llvm::types::StructLayout::Unpacked)))
-                .map_err(|error| error.to_string())?
-                .into());
+            return Ok(llvm::types::StructType::get_named(
+                ctx,
+                name,
+                Some((fields, llvm::types::StructLayout::Unpacked)),
+            )
+            .map_err(|error| error.to_string())?
+            .into());
         }
         other => return Err(format!("unsupported Rust type in MIR importer: {other:?}")),
     };
@@ -224,11 +238,13 @@ pub(super) fn enum_blob_ty<'tcx>(
     let align = enum_stack_align(tcx, ty)?;
     let elem: TypeHandle = IntegerType::get(ctx, (align * 8) as u32, Signedness::Unsigned).into();
     let blob: TypeHandle = llvm::types::ArrayType::get(ctx, elem, size / align).into();
-    Ok(
-        llvm::types::StructType::get_named(ctx, name, Some((vec![blob], llvm::types::StructLayout::Unpacked)))
-            .map_err(|error| error.to_string())?
-            .into(),
+    Ok(llvm::types::StructType::get_named(
+        ctx,
+        name,
+        Some((vec![blob], llvm::types::StructLayout::Unpacked)),
     )
+    .map_err(|error| error.to_string())?
+    .into())
 }
 
 /// The backend stack alignment (capped at the 8-byte maximum the AArch64
@@ -317,8 +333,7 @@ pub(super) fn read_enum_discriminant<'tcx>(
                     } else {
                         (1u128 << tag_bits) - 1
                     };
-                    let relative_max =
-                        niche_variants.last.as_u32() - niche_variants.start.as_u32();
+                    let relative_max = niche_variants.last.as_u32() - niche_variants.start.as_u32();
 
                     // relative_tag = tag - niche_start, wrapping in the tag width
                     // so the comparison below matches rustc's niche decoding.
@@ -361,9 +376,12 @@ pub(super) fn read_enum_discriminant<'tcx>(
                         niche_variants.start.as_u32() as u128 & discr_mask,
                     )?;
                     niche_base.get_operation().insert_at_back(insert_block, ctx);
-                    let tagged =
-                        mir_dialect::ops::AddOp::new(ctx, niche_base.get_result(ctx), relative_discr)
-                            .get_operation();
+                    let tagged = mir_dialect::ops::AddOp::new(
+                        ctx,
+                        niche_base.get_result(ctx),
+                        relative_discr,
+                    )
+                    .get_operation();
                     tagged.insert_at_back(insert_block, ctx);
                     let tagged = tagged.deref(ctx).get_result(0);
 
@@ -437,7 +455,10 @@ pub(super) fn type_symbol<'tcx>(_tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> crate::iden
     legaliser.legalise(&printed)
 }
 
-pub(super) fn is_fmt_rt_argument_type<'tcx>(tcx: TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> bool {
+pub(super) fn is_fmt_rt_argument_type<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: rustc_hir::def_id::DefId,
+) -> bool {
     tcx.def_path_str(def_id).contains("fmt::rt::ArgumentType")
 }
 

@@ -1,18 +1,16 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
+        builtin::op_interfaces::OneRegionInterface,
         x86_64::{
-            ops::{
-                self as x86_64_ops, ATTR_KEY_X86_64_RD, ATTR_KEY_X86_64_RM, ATTR_KEY_X86_64_RN,
-            },
+            ops::{self as x86_64_ops, ATTR_KEY_X86_64_RD, ATTR_KEY_X86_64_RM, ATTR_KEY_X86_64_RN},
             registers::{Register, RegisterClass},
         },
-        builtin::op_interfaces::OneRegionInterface,
     },
     input_error_noloc,
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
 };
 
@@ -25,7 +23,12 @@ impl Pass for X86_64LegalizePass {
         "x86-64-legalize"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         for func in body.deref(ctx).iter(ctx) {
@@ -61,9 +64,9 @@ fn verify_gpr_operands(ctx: &Context, op: Ptr<Operation>) -> CrabbitResult<()> {
             Register::Physical(register) => register.class(),
         };
         if class != RegisterClass::Gpr64 {
-            return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
-                format!("{mnemonic} requires a GPR operand, got `{register}`")
-            )));
+            return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(format!(
+                "{mnemonic} requires a GPR operand, got `{register}`"
+            ))));
         }
     }
     Ok(())
@@ -74,13 +77,13 @@ mod tests {
     use crate::ll::LinkageAttr;
     use crate::{
         context::Context,
+        conversion::pass::{AnalysisManager, Pass},
         dialects::{
-            x86_64::{self, ops as x86_64_ops},
             builtin::{self, op_interfaces::OneRegionInterface},
+            x86_64::{self, ops as x86_64_ops},
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{AnalysisManager, Pass},
     };
 
     use super::{X86_64LegalizePass, verify_gpr_operands};
@@ -119,7 +122,11 @@ mod tests {
         let module = module_with_inst(&mut ctx, inst);
 
         X86_64LegalizePass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
     }
 }

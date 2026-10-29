@@ -68,7 +68,13 @@ pub(super) fn lower_i128_to_float(
     .try_into()
     .expect("compiler-rt symbol names are legal identifiers");
     let int_ty = input.get_type(ctx);
-    declare_external_function(ctx, module_body, callee.clone(), vec![int_ty], Some(float_ty));
+    declare_external_function(
+        ctx,
+        module_body,
+        callee.clone(),
+        vec![int_ty],
+        Some(float_ty),
+    );
     let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, vec![input], Some(float_ty));
     call.get_operation().insert_at_back(insert_block, ctx);
     Ok(call.get_result(ctx))
@@ -137,17 +143,15 @@ pub(super) fn lower_float_to_i128_sat(
     // All-ones when the (ordered) float compare holds, zero otherwise —
     // every ordered predicate is false for NaN, which is what routes NaN to
     // the final zero mask below.
-    let mask_of = |ctx: &mut Context,
-                   insert_block: Ptr<BasicBlock>,
-                   cond: Value|
-     -> Result<Value, String> {
-        let wide = cast_value_to_type(ctx, insert_block, cond, dest_ty);
-        Ok(emit_op(
-            mir_dialect::ops::SubOp::new(ctx, zero, wide).get_operation(),
-            ctx,
-            insert_block,
-        ))
-    };
+    let mask_of =
+        |ctx: &mut Context, insert_block: Ptr<BasicBlock>, cond: Value| -> Result<Value, String> {
+            let wide = cast_value_to_type(ctx, insert_block, cond, dest_ty);
+            Ok(emit_op(
+                mir_dialect::ops::SubOp::new(ctx, zero, wide).get_operation(),
+                ctx,
+                insert_block,
+            ))
+        };
 
     let two_pow_127 = (1u128 << 127) as f64;
     let (upper_bound, high_sat_bits, mask_low_sat, mask_keep) = if signed {
@@ -527,9 +531,7 @@ pub(super) fn lower_signed_mul_overflow(
         return lower_signed_mul_overflow_128(ctx, insert_block, lhs, rhs);
     }
     if width > 64 {
-        return Err(format!(
-            "unsupported {width}-bit MIR mul-with-overflow"
-        ));
+        return Err(format!("unsupported {width}-bit MIR mul-with-overflow"));
     }
 
     // Multiply at double width (sext: the operands are Signed), then check
@@ -622,9 +624,14 @@ pub(super) fn pack_overflow_result(
     let overflow_ty = bool_storage_ty(ctx);
     let overflow_value = cast_value_to_type(ctx, insert_block, overflow_value, overflow_ty);
 
-    let result_ty =
-        llvm::types::StructType::get_unnamed(ctx, (vec![wrapped_value.get_type(ctx), overflow_ty], llvm::types::StructLayout::Unpacked))
-            .into();
+    let result_ty = llvm::types::StructType::get_unnamed(
+        ctx,
+        (
+            vec![wrapped_value.get_type(ctx), overflow_ty],
+            llvm::types::StructLayout::Unpacked,
+        ),
+    )
+    .into();
     let undef = mir_dialect::ops::UndefOp::new(ctx, result_ty);
     undef.get_operation().insert_at_back(insert_block, ctx);
     let with_value =
@@ -832,9 +839,7 @@ pub(super) fn lower_unsigned_mul_overflow(
         return Ok(pack_overflow_result(ctx, insert_block, wrapped, overflow));
     }
     if width > 64 {
-        return Err(format!(
-            "unsupported {width}-bit MIR mul-with-overflow"
-        ));
+        return Err(format!("unsupported {width}-bit MIR mul-with-overflow"));
     }
 
     let wide_ty: TypeHandle = IntegerType::get(ctx, width * 2, Signedness::Unsigned).into();
@@ -1120,7 +1125,10 @@ pub(super) fn call_symbol<'tcx>(
     Ok(legaliser.legalise(&tcx.def_path_str(def_id)))
 }
 
-pub(super) fn known_codegen_symbol<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Option<&'static str> {
+pub(super) fn known_codegen_symbol<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+) -> Option<&'static str> {
     let path = tcx.def_path_str(instance.def.def_id());
     if path.contains("compare_bytes") {
         return Some("memcmp");

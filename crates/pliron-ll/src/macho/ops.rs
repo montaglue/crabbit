@@ -3,8 +3,8 @@ use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use crate::{
     context::Context,
     dialects::builtin::{
-        attributes::{StringAttr},
-        op_interfaces::{SymbolOpInterface, NOpdsInterface, NResultsInterface},
+        attributes::StringAttr,
+        op_interfaces::{NOpdsInterface, NResultsInterface, SymbolOpInterface},
     },
     dict_key,
     identifier::Identifier,
@@ -211,7 +211,6 @@ fn decode_relocations(relocations: &str) -> Vec<Relocation> {
         .collect()
 }
 
-pub fn register(_ctx: &mut Context) {
-}
+pub fn register(_ctx: &mut Context) {}
 
-use crate::ll::{BytesAttr};
+use crate::ll::BytesAttr;

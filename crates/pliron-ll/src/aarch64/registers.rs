@@ -259,10 +259,7 @@ mod tests {
 
     #[test]
     fn virtual_fp_registers_round_trip_their_class() {
-        for (text, class) in [
-            ("vd3", RegisterClass::Fpr64),
-            ("vs4", RegisterClass::Fpr32),
-        ] {
+        for (text, class) in [("vd3", RegisterClass::Fpr64), ("vs4", RegisterClass::Fpr32)] {
             let parsed = Register::parse(text).unwrap();
             assert!(matches!(parsed, Register::Virtual { class: c, .. } if c == class));
             assert_eq!(parsed.to_string(), text);

@@ -41,7 +41,11 @@ fn build_backend(root: &Path, cargo: &str) -> PathBuf {
         .expect("failed to build crabbit backend dylib");
     assert!(status.success(), "crabbit backend build failed");
     let backend = backend_path(root);
-    assert!(backend.exists(), "expected backend dylib at {}", backend.display());
+    assert!(
+        backend.exists(),
+        "expected backend dylib at {}",
+        backend.display()
+    );
     backend
 }
 
@@ -57,8 +61,7 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
     let root = repo_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let backend = build_backend(&root, &cargo);
-    let fixture_dir = root
-        .join("crates/backend-tests/fixtures/kernel-vector-add");
+    let fixture_dir = root.join("crates/backend-tests/fixtures/kernel-vector-add");
     let target_dir = root.join("target/crabbit-backend-tests-kernel-vector-add");
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir).expect("clear kernel fixture target dir");
@@ -79,7 +82,10 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
         .env("CRABBIT_LL_OUT", &ll_out)
         .status()
         .expect("failed to run cargo for the kernel fixture");
-    assert!(status.success(), "kernel fixture did not compile with the crabbit dylib");
+    assert!(
+        status.success(),
+        "kernel fixture did not compile with the crabbit dylib"
+    );
 
     // The CRABBIT_PTX_OUT copy and the sidecar next to the object.
     assert!(ptx_out.exists(), "CRABBIT_PTX_OUT was not written");
@@ -109,8 +115,14 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
     // memory in textual LLVM IR.
     let ll = fs::read_to_string(&ll_out).expect("CRABBIT_LL_OUT was not written");
     assert!(ll.contains("define ptx_kernel void @vector_add("), "{ll}");
-    assert!(ll.contains("declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()"), "{ll}");
-    assert!(ll.contains("addrspace(3) global [1024 x i8] zeroinitializer, align 4"), "{ll}");
+    assert!(
+        ll.contains("declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()"),
+        "{ll}"
+    );
+    assert!(
+        ll.contains("addrspace(3) global [1024 x i8] zeroinitializer, align 4"),
+        "{ll}"
+    );
     assert!(ll.contains("call void @llvm.nvvm.barrier0()"), "{ll}");
 
     let Some(ptxas) = find_tool(&["ptxas", "/usr/local/cuda/bin/ptxas"]) else {
@@ -131,9 +143,13 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
 
     // GPU execution through the driver API.
     let cuda_include = Path::new("/usr/local/cuda/include");
-    let libcuda_present = ["/usr/lib/aarch64-linux-gnu/libcuda.so.1", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.1"]
-        .iter()
-        .any(|p| Path::new(p).exists());
+    let libcuda_present = [
+        "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        "/usr/lib64/libcuda.so.1",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists());
     if !cuda_include.join("cuda.h").exists() || !libcuda_present {
         eprintln!("no CUDA driver/headers; skipping GPU execution");
         return;
@@ -153,7 +169,10 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
         "harness build failed:\n{}",
         String::from_utf8_lossy(&gcc.stderr)
     );
-    let run = Command::new(&harness).arg(&ptx_out).output().expect("run harness");
+    let run = Command::new(&harness)
+        .arg(&ptx_out)
+        .output()
+        .expect("run harness");
     let stderr = String::from_utf8_lossy(&run.stderr);
     if stderr.contains("cuInit(0) failed") || stderr.contains("cuDeviceGet") {
         eprintln!("no usable GPU: {stderr}; skipping GPU execution");
@@ -165,11 +184,16 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
         String::from_utf8_lossy(&run.stdout)
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(stdout.contains("vector_add ok") && stdout.contains("block_sum_f32 ok"), "{stdout}");
+    assert!(
+        stdout.contains("vector_add ok") && stdout.contains("block_sum_f32 ok"),
+        "{stdout}"
+    );
 
     // Same kernels through LLVM's NVPTX backend, when an llc is around
     // (LLVM 18 knows sm_90 at most; the PTX it emits still runs on sm_121).
-    let llc_home = std::env::var("HOME").map(|h| format!("{h}/.local/opt/llvm18/bin/llc")).unwrap_or_default();
+    let llc_home = std::env::var("HOME")
+        .map(|h| format!("{h}/.local/opt/llvm18/bin/llc"))
+        .unwrap_or_default();
     let Some(llc) = find_tool(&["llc", llc_home.as_str()]) else {
         eprintln!("llc not found; skipping the rust-llvm arm");
         return;
@@ -181,8 +205,15 @@ fn kernel_fixture_compiles_to_ptx_and_runs_on_gpu() {
         .arg(&ll_out)
         .output()
         .expect("run llc");
-    assert!(out.status.success(), "llc rejected the exported IR:\n{}\n{ll}", String::from_utf8_lossy(&out.stderr));
-    let run = Command::new(&harness).arg(&llvm_ptx).output().expect("run harness (llvm arm)");
+    assert!(
+        out.status.success(),
+        "llc rejected the exported IR:\n{}\n{ll}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = Command::new(&harness)
+        .arg(&llvm_ptx)
+        .output()
+        .expect("run harness (llvm arm)");
     assert!(
         run.status.success(),
         "LLVM-compiled kernels produced wrong results on the GPU:\n{}",
@@ -223,7 +254,10 @@ fn kernel_coverage_structs_allocas_device_calls() {
         .env("CRABBIT_PTX_OUT", &ptx_out)
         .status()
         .expect("failed to run cargo for the kernel-coverage fixture");
-    assert!(status.success(), "kernel-coverage fixture did not compile with the crabbit dylib");
+    assert!(
+        status.success(),
+        "kernel-coverage fixture did not compile with the crabbit dylib"
+    );
 
     assert!(ptx_out.exists(), "CRABBIT_PTX_OUT was not written");
     let ptx = fs::read_to_string(&ptx_out).unwrap();
@@ -231,7 +265,10 @@ fn kernel_coverage_structs_allocas_device_calls() {
     assert!(ptx.contains(".visible .entry local_table("), "{ptx}");
     assert!(ptx.contains(".visible .entry tri_rec("), "{ptx}");
     // The alloca residue is a .local array addressed via cvta.local.
-    assert!(ptx.contains(".local .align 4 .b8 __crabbit_local_"), "{ptx}");
+    assert!(
+        ptx.contains(".local .align 4 .b8 __crabbit_local_"),
+        "{ptx}"
+    );
     assert!(ptx.contains("cvta.local.u64"), "{ptx}");
     // The recursive helper survives as a real .func with a param-ABI call.
     assert!(ptx.contains(".func ("), "{ptx}");
@@ -247,13 +284,25 @@ fn kernel_coverage_structs_allocas_device_calls() {
     assert!(ptx.contains("vote.sync.all.pred"), "{ptx}");
     assert!(ptx.contains("vote.sync.any.pred"), "{ptx}");
     // Dynamic shared memory: one extern window, shared-qualified accesses.
-    assert!(ptx.contains(".extern .shared .align 16 .b8 __crabbit_dyn_shared[];"), "{ptx}");
+    assert!(
+        ptx.contains(".extern .shared .align 16 .b8 __crabbit_dyn_shared[];"),
+        "{ptx}"
+    );
     assert!(ptx.contains("st.shared.f32"), "{ptx}");
     assert!(ptx.contains("ld.shared.f32"), "{ptx}");
     // By-value struct kernel param: one .param with ld.param field loads.
-    assert!(ptx.contains(".param .align 4 .b8 affine_apply_param_0[12]"), "{ptx}");
-    assert!(ptx.contains("ld.param.f32 %f0, [affine_apply_param_0];"), "{ptx}");
-    assert!(ptx.contains("ld.param.u32 %r0, [affine_apply_param_0+8];"), "{ptx}");
+    assert!(
+        ptx.contains(".param .align 4 .b8 affine_apply_param_0[12]"),
+        "{ptx}"
+    );
+    assert!(
+        ptx.contains("ld.param.f32 %f0, [affine_apply_param_0];"),
+        "{ptx}"
+    );
+    assert!(
+        ptx.contains("ld.param.u32 %r0, [affine_apply_param_0+8];"),
+        "{ptx}"
+    );
 
     let Some(ptxas) = find_tool(&["ptxas", "/usr/local/cuda/bin/ptxas"]) else {
         eprintln!("ptxas not found; skipping assembly + GPU execution");
@@ -272,9 +321,13 @@ fn kernel_coverage_structs_allocas_device_calls() {
     );
 
     let cuda_include = Path::new("/usr/local/cuda/include");
-    let libcuda_present = ["/usr/lib/aarch64-linux-gnu/libcuda.so.1", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.1"]
-        .iter()
-        .any(|p| Path::new(p).exists());
+    let libcuda_present = [
+        "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        "/usr/lib64/libcuda.so.1",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists());
     if !cuda_include.join("cuda.h").exists() || !libcuda_present {
         eprintln!("no CUDA driver/headers; skipping GPU execution");
         return;
@@ -294,7 +347,10 @@ fn kernel_coverage_structs_allocas_device_calls() {
         "harness build failed:\n{}",
         String::from_utf8_lossy(&gcc.stderr)
     );
-    let run = Command::new(&harness).arg(&ptx_out).output().expect("run harness");
+    let run = Command::new(&harness)
+        .arg(&ptx_out)
+        .output()
+        .expect("run harness");
     let stderr = String::from_utf8_lossy(&run.stderr);
     if stderr.contains("cuInit(0) failed") || stderr.contains("cuDeviceGet") {
         eprintln!("no usable GPU: {stderr}; skipping GPU execution");
@@ -354,7 +410,10 @@ fn host_program_launches_its_kernels_through_cuda_oxide_api() {
         .env("CRABBIT_PTX_OUT", &ptx_out)
         .status()
         .expect("failed to run cargo for the kernel-launch fixture");
-    assert!(status.success(), "kernel-launch fixture did not compile with the crabbit dylib");
+    assert!(
+        status.success(),
+        "kernel-launch fixture did not compile with the crabbit dylib"
+    );
 
     // Slices cross the launch boundary as (ptr, len), the way cuda-oxide's
     // launchers push them: `add(a: &[f32], b: &[f32], sum: DisjointSlice<f32>)`
@@ -369,16 +428,24 @@ fn host_program_launches_its_kernels_through_cuda_oxide_api() {
         && output.status.success()
     {
         let sections = String::from_utf8_lossy(&output.stdout);
-        assert!(sections.contains(".oxart"), "no embedded device artifact:\n{sections}");
+        assert!(
+            sections.contains(".oxart"),
+            "no embedded device artifact:\n{sections}"
+        );
     }
 
-    let run = Command::new(&executable).output().expect("run the kernel-launch fixture");
+    let run = Command::new(&executable)
+        .output()
+        .expect("run the kernel-launch fixture");
     let stdout = String::from_utf8_lossy(&run.stdout);
     let stderr = String::from_utf8_lossy(&run.stderr);
     if stderr.contains("create a CUDA context") {
         eprintln!("no usable GPU: {stderr}; skipping GPU execution");
         return;
     }
-    assert!(run.status.success(), "kernel-launch fixture failed:\n{stdout}\n{stderr}");
+    assert!(
+        run.status.success(),
+        "kernel-launch fixture failed:\n{stdout}\n{stderr}"
+    );
     assert!(stdout.contains("add then scale correct"), "{stdout}");
 }

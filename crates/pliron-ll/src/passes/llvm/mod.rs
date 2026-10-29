@@ -128,7 +128,8 @@ mod tests {
         let host = PipelineTarget::host(crate::triple::Triple::parse("aarch64-unknown-linux-gnu"));
         for target in [host, PipelineTarget::nvptx_kernel()] {
             for name in DEFAULT_ORDER {
-                let pass = construct(name, &target).unwrap_or_else(|| panic!("`{name}` does not construct"));
+                let pass = construct(name, &target)
+                    .unwrap_or_else(|| panic!("`{name}` does not construct"));
                 assert_eq!(pass.name(), *name);
             }
         }

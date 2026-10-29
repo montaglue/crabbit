@@ -1,5 +1,6 @@
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, unchanged},
     dialects::{
         builtin::op_interfaces::SymbolOpInterface,
         llvm::{
@@ -10,7 +11,6 @@ use crate::{
     input_error_noloc,
     ir::operation::Operation,
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{AnalysisManager, Pass, PassResult, unchanged},
     passes::x86_64_darwin::util::module_body,
 };
 
@@ -39,12 +39,23 @@ impl Pass for VerifyLlvmForX86_64DarwinPass {
         while let Some(op_ptr) = op {
             if let Some(global) = cast_operation::<GlobalOp>(ctx, op_ptr) {
                 let name = global.get_symbol_name(ctx).to_string();
-                validate_linkage(&name, global.get_attr_llvm_global_linkage(ctx).expect("llvm function without linkage").clone())?;
+                validate_linkage(
+                    &name,
+                    global
+                        .get_attr_llvm_global_linkage(ctx)
+                        .expect("llvm function without linkage")
+                        .clone(),
+                )?;
                 op = op_ptr.deref(ctx).get_next();
                 continue;
             } else if let Some(func) = cast_operation::<FuncOp>(ctx, op_ptr) {
                 let name = func.get_symbol_name(ctx).to_string();
-                validate_linkage(&name, func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone())?;
+                validate_linkage(
+                    &name,
+                    func.get_attr_llvm_function_linkage(ctx)
+                        .expect("llvm function without linkage")
+                        .clone(),
+                )?;
                 validate_function_type(ctx, &name, func.get_type(ctx).into())?;
                 if !func.is_declaration(ctx) {
                     validate_body(ctx, &func)?;
@@ -62,27 +73,27 @@ impl Pass for VerifyLlvmForX86_64DarwinPass {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::{
-        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
-    };
-    #[allow(unused_imports)]
-    use pliron_llvm::op_interfaces::{BinArithOp as _, CastOpInterface as _};
     use crate::{
         context::Context,
+        conversion::pass::{AnalysisManager, Pass},
         dialects::{
-            x86_64,
             builtin::{self, op_interfaces::OneRegionInterface},
             llvm::{
                 attributes::LinkageAttr,
                 ops::{FuncOp, GlobalOp},
                 types::FuncType,
             },
+            x86_64,
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
-        conversion::pass::{AnalysisManager, Pass},
     };
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _, CastOpInterface as _};
 
     use super::VerifyLlvmForX86_64DarwinPass;
 
@@ -108,7 +119,11 @@ mod tests {
         func.get_operation().insert_at_back(body, &ctx);
 
         VerifyLlvmForX86_64DarwinPass
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
     }
 

@@ -14,12 +14,11 @@
 //! verify_pass.run(module_op, &mut ctx)?;
 //! ```
 
-
 use crate::{
     common_traits::Verify,
     context::{Context, Ptr},
-    ir::operation::Operation,
     conversion::pass::{AnalysisManager, Pass, PassResult, changed},
+    ir::operation::Operation,
 };
 
 /// Pass that verifies the IR is well-formed.
@@ -49,7 +48,12 @@ impl Pass for VerifyPass {
         "verify"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         // Verify the root operation and all nested operations recursively
         root.deref(ctx).verify(ctx)?;
         Ok(changed())
@@ -58,13 +62,11 @@ impl Pass for VerifyPass {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::{
-        CallOpInterface as _,
-    };
-    #[allow(unused_imports)]
-    use pliron_llvm::op_interfaces::{BinArithOp as _};
     use super::*;
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::CallOpInterface as _;
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::BinArithOp as _;
 
     #[test]
     fn test_pass_name() {

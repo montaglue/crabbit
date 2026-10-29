@@ -85,7 +85,8 @@ pub(super) fn import_statement<'tcx>(
             let elem_size = layout_size_of_ty(tcx, pointee_ty(src_ty)?)?;
             let byte_count = scale_index(ctx, insert_block, count, elem_size)?;
 
-            let memcpy: crate::identifier::Identifier = "memcpy".try_into().expect("static identifier literal");
+            let memcpy: crate::identifier::Identifier =
+                "memcpy".try_into().expect("static identifier literal");
             let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
@@ -177,7 +178,11 @@ pub(super) fn import_terminator<'tcx>(
                 } else {
                     let block = BasicBlock::new(
                         ctx,
-                        Some(format!("switch{}", idx + 1).try_into().expect("digits are legal identifier characters")),
+                        Some(
+                            format!("switch{}", idx + 1)
+                                .try_into()
+                                .expect("digits are legal identifier characters"),
+                        ),
                         vec![],
                     );
                     let region = insert_block
@@ -247,7 +252,8 @@ pub(super) fn import_terminator<'tcx>(
                 return Ok(());
             }
 
-            if lower_cuda_device_call(tcx, ctx, state, insert_block, body, func, args, destination)? {
+            if lower_cuda_device_call(tcx, ctx, state, insert_block, body, func, args, destination)?
+            {
                 let Some(target) = target else {
                     mir_dialect::ops::UnreachableOp::new(ctx)
                         .get_operation()
@@ -286,12 +292,11 @@ pub(super) fn import_terminator<'tcx>(
             // drop/size/align header, as in rustc_codegen_ssa's
             // `VirtualIndex`), and the receiver's data half becomes the first
             // argument.
-            let virtual_slot = call_instance(tcx, state, body, func).and_then(|instance| {
-                match instance.def {
+            let virtual_slot =
+                call_instance(tcx, state, body, func).and_then(|instance| match instance.def {
                     InstanceKind::Virtual(_, index) => Some(index as u64),
                     _ => None,
-                }
-            });
+                });
 
             // An indirect call: the callee is a function-pointer value rather
             // than a (constant or zero-sized function-item) `FnDef`.
@@ -334,8 +339,7 @@ pub(super) fn import_terminator<'tcx>(
                     continue;
                 }
                 if idx == 0 && virtual_slot.is_some() {
-                    let receiver =
-                        import_operand(tcx, ctx, state, insert_block, body, &arg.node)?;
+                    let receiver = import_operand(tcx, ctx, state, insert_block, body, &arg.node)?;
                     let (data, vtable) = split_dyn_receiver(ctx, insert_block, receiver)?;
                     vtable_ptr = Some(vtable);
                     lower_abi_call_arg(ctx, insert_block, data, &mut call_args)?;
@@ -353,8 +357,12 @@ pub(super) fn import_terminator<'tcx>(
                     for (elem_idx, elem_ty) in elem_tys.iter().enumerate() {
                         let index = converted_field_index(tcx, tuple_ty, elem_idx)?;
                         let elem_conv = convert_ty(tcx, ctx, elem_ty)?;
-                        let element =
-                            mir_dialect::ops::ExtractValueOp::new(ctx, value, vec![index], elem_conv);
+                        let element = mir_dialect::ops::ExtractValueOp::new(
+                            ctx,
+                            value,
+                            vec![index],
+                            elem_conv,
+                        );
                         element.get_operation().insert_at_back(insert_block, ctx);
                         lower_abi_call_arg(
                             ctx,
@@ -493,7 +501,8 @@ pub(super) fn import_terminator<'tcx>(
                 {
                     // x1 holds the second scalar; move it to its offset.
                     let int_ty: TypeHandle =
-                        IntegerType::get(ctx, (second_size * 8) as u32, Signedness::Signless).into();
+                        IntegerType::get(ctx, (second_size * 8) as u32, Signedness::Signless)
+                            .into();
                     let from = ptr_offset_const(ctx, insert_block, blob_slot.get_result(ctx), 8)?;
                     let second = mir_dialect::ops::LoadOp::new(ctx, from, int_ty);
                     second.get_operation().insert_at_back(insert_block, ctx);

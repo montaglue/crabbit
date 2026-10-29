@@ -228,7 +228,11 @@ fn encode_into(
         ops::AdrLiteralOp::OPCODE => {
             let rd = rd()?;
             let label = ops::literal_label(ctx, op).unwrap();
-            let target = resolve(refs.map(|refs| refs.literal_offsets), &label, "literal label")?;
+            let target = resolve(
+                refs.map(|refs| refs.literal_offsets),
+                &label,
+                "literal label",
+            )?;
             emit_lea_rip(out, rd, target, pc, mnemonic)?;
         }
         ops::AdrFunctionOp::OPCODE => {
@@ -464,11 +468,7 @@ fn rel32(target: u64, pc: u64, inst_len: u64, mnemonic: &'static str) -> Crabbit
         .map_err(|_| crate::input_error_noloc!("x86-64 `{mnemonic}` branch target out of range"))
 }
 
-fn resolve(
-    offsets: Option<&HashMap<String, u64>>,
-    key: &str,
-    what: &str,
-) -> CrabbitResult<u64> {
+fn resolve(offsets: Option<&HashMap<String, u64>>, key: &str, what: &str) -> CrabbitResult<u64> {
     match offsets {
         None => Ok(0),
         Some(offsets) => offsets
@@ -505,11 +505,11 @@ mod tests {
     use crate::{
         context::Context,
         dialects::x86_64::{
-                self,
-                attributes::ConditionCode,
-                ops,
-                registers::{R11, R12, R13, RAX, RBX},
-            },
+            self,
+            attributes::ConditionCode,
+            ops,
+            registers::{R11, R12, R13, RAX, RBX},
+        },
         ir::basic_block::BasicBlock,
     };
 
@@ -547,10 +547,7 @@ mod tests {
 
         // mov rax, 42 -> movabs
         let inst = ops::mov_imm(&mut ctx, RAX, 42);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x48, 0xb8, 42, 0, 0, 0, 0, 0, 0, 0]
-        );
+        assert_eq!(encode(&ctx, inst), [0x48, 0xb8, 42, 0, 0, 0, 0, 0, 0, 0]);
 
         // mov rbx, r12 -> 4c 89 e3
         let inst = ops::mov(&mut ctx, RBX, R12);
@@ -562,17 +559,11 @@ mod tests {
 
         // sub r12, rbx, r12 (rd == rm) -> sub r12, rbx; neg r12
         let inst = ops::binary(&mut ctx, ops::SubOp::OPCODE, R12, RBX, R12);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x49, 0x29, 0xdc, 0x49, 0xf7, 0xdc]
-        );
+        assert_eq!(encode(&ctx, inst), [0x49, 0x29, 0xdc, 0x49, 0xf7, 0xdc]);
 
         // add r13, rbx, r12 (all distinct) -> mov r13, rbx; add r13, r12
         let inst = ops::binary(&mut ctx, ops::AddOp::OPCODE, R13, RBX, R12);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x49, 0x89, 0xdd, 0x4d, 0x01, 0xe5]
-        );
+        assert_eq!(encode(&ctx, inst), [0x49, 0x89, 0xdd, 0x4d, 0x01, 0xe5]);
     }
 
     #[test]
@@ -581,21 +572,14 @@ mod tests {
 
         // mov [rsp+16], rbx -> 48 89 5c 24 10 with disp32: 48 89 9c 24 10 00 00 00
         let inst = ops::str_sp_offset(&mut ctx, RBX, 16);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x48, 0x89, 0x9c, 0x24, 0x10, 0, 0, 0]
-        );
+        assert_eq!(encode(&ctx, inst), [0x48, 0x89, 0x9c, 0x24, 0x10, 0, 0, 0]);
 
         // mov rbx, [rsp+16]
         let inst = ops::ldr_sp_offset(&mut ctx, RBX, 16);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x48, 0x8b, 0x9c, 0x24, 0x10, 0, 0, 0]
-        );
+        assert_eq!(encode(&ctx, inst), [0x48, 0x8b, 0x9c, 0x24, 0x10, 0, 0, 0]);
 
         // movzx rbx, byte [r12+1]: base r12 needs SIB.
-        let inst =
-            ops::ldr_reg_offset_sized(&mut ctx, ops::LdrbRegOffsetOp::OPCODE, RBX, R12, 1);
+        let inst = ops::ldr_reg_offset_sized(&mut ctx, ops::LdrbRegOffsetOp::OPCODE, RBX, R12, 1);
         assert_eq!(
             encode(&ctx, inst),
             [0x49, 0x0f, 0xb6, 0x9c, 0x24, 0x01, 0, 0, 0]
@@ -603,10 +587,7 @@ mod tests {
 
         // lea rbx, [rsp+8]
         let inst = ops::add_sp_offset(&mut ctx, RBX, 8);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x48, 0x8d, 0x9c, 0x24, 0x08, 0, 0, 0]
-        );
+        assert_eq!(encode(&ctx, inst), [0x48, 0x8d, 0x9c, 0x24, 0x08, 0, 0, 0]);
 
         // push rbx / pop r12
         let inst = ops::push(&mut ctx, RBX);
@@ -636,10 +617,7 @@ mod tests {
 
         // je target -> 0f 84 rel32(-6)
         let inst = ops::jcc(&mut ctx, ConditionCode::E, target);
-        assert_eq!(
-            encode(&ctx, inst),
-            [0x0f, 0x84, 0xfa, 0xff, 0xff, 0xff]
-        );
+        assert_eq!(encode(&ctx, inst), [0x0f, 0x84, 0xfa, 0xff, 0xff, 0xff]);
 
         // test rbx, rbx; jnz target
         let inst = ops::test_jnz(&mut ctx, RBX, target);

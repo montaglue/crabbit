@@ -1,7 +1,7 @@
 use awint::bw;
 use combine::{Parser, attempt, many, many1, optional, satisfy, token};
-use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 use pliron::derive::op_interface_impl;
+use pliron::derive::{def_op, derive_op_interface_impl, verify_succ};
 
 use crate::ll::BranchWeightsAttr;
 use crate::ll::op_interfaces::ATTR_KEY_BRANCH_WEIGHTS;
@@ -12,8 +12,8 @@ use crate::{
     dialects::builtin::{
         attributes::{IntegerAttr, StringAttr},
         op_interfaces::{
-            IsolatedFromAboveInterface, OneRegionInterface,
-            SymbolOpInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
+            IsolatedFromAboveInterface, NOpdsInterface, NRegionsInterface, NResultsInterface,
+            OneRegionInterface, SymbolOpInterface,
         },
         types::{IntegerType, Signedness},
     },
@@ -203,22 +203,24 @@ impl Parsable for FuncOp {
 
         parser
             .parse_stream(state_stream)
-            .map(|(linkage, name, stack_size, saved_regs, _region)| -> OpObj {
-                let ctx = &mut *state_stream.state.ctx;
-                let func = FuncOp { op };
-                func.set_symbol_name(ctx, name);
-                func.get_operation()
-                    .deref_mut(ctx)
-                    .attributes
-                    .set(ATTR_KEY_AARCH64_LINKAGE.clone(), linkage);
-                if let Some(bytes) = stack_size {
-                    func.set_stack_size(ctx, bytes);
-                }
-                if let Some(mask) = saved_regs {
-                    func.set_saved_regs(ctx, mask);
-                }
-                OpObj::new(func)
-            })
+            .map(
+                |(linkage, name, stack_size, saved_regs, _region)| -> OpObj {
+                    let ctx = &mut *state_stream.state.ctx;
+                    let func = FuncOp { op };
+                    func.set_symbol_name(ctx, name);
+                    func.get_operation()
+                        .deref_mut(ctx)
+                        .attributes
+                        .set(ATTR_KEY_AARCH64_LINKAGE.clone(), linkage);
+                    if let Some(bytes) = stack_size {
+                        func.set_stack_size(ctx, bytes);
+                    }
+                    if let Some(mask) = saved_regs {
+                        func.set_saved_regs(ctx, mask);
+                    }
+                    OpObj::new(func)
+                },
+            )
             .into()
     }
 }
@@ -400,11 +402,7 @@ pub fn adr_literal(
 
 /// Materialize the address of a function defined in this module (pc-relative
 /// `adr` resolved against the function's offset in the text section).
-pub fn adr_function(
-    ctx: &mut Context,
-    rd: Register,
-    symbol: Identifier,
-) -> Ptr<Operation> {
+pub fn adr_function(ctx: &mut Context, rd: Register, symbol: Identifier) -> Ptr<Operation> {
     let op = AdrFunctionOp::new(ctx).op;
     set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), rd);
     set_callee(ctx, op, symbol.to_string());
@@ -854,8 +852,8 @@ enum ParsedInstructionField {
 
 fn instruction_field_value_parser<'a>()
 -> impl Parser<StateStream<'a>, Output = ParsedInstructionField> {
-    let list = delimited_list_parser('[', ']', ',', int_parser::<u32>())
-        .map(ParsedInstructionField::List);
+    let list =
+        delimited_list_parser('[', ']', ',', int_parser::<u32>()).map(ParsedInstructionField::List);
     let block = attempt(block_opd_parser()).map(ParsedInstructionField::Block);
     let text = many1::<String, _, _>(satisfy(|c: char| {
         c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '+' | '-' | '^')
@@ -902,9 +900,24 @@ fn apply_instruction_field(
         })
     };
     match (key.as_ref() as &str, value) {
-        ("rd", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), register_value(&text)?),
-        ("rn", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), register_value(&text)?),
-        ("rm", Text(text)) => set_reg(ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), register_value(&text)?),
+        ("rd", Text(text)) => set_reg(
+            ctx,
+            op,
+            ATTR_KEY_AARCH64_RD.as_ref(),
+            register_value(&text)?,
+        ),
+        ("rn", Text(text)) => set_reg(
+            ctx,
+            op,
+            ATTR_KEY_AARCH64_RN.as_ref(),
+            register_value(&text)?,
+        ),
+        ("rm", Text(text)) => set_reg(
+            ctx,
+            op,
+            ATTR_KEY_AARCH64_RM.as_ref(),
+            register_value(&text)?,
+        ),
         ("imm", Text(text)) => set_imm(ctx, op, int_value(&text)?),
         ("cond", Text(text)) => {
             let cond = ConditionCode::parse(&text).ok_or_else(|| {
@@ -1081,7 +1094,7 @@ macro_rules! define_aarch64_instructions {
         }
 
         fn register_instructions(_ctx: &mut Context) {
-            
+
         }
 
         $(define_aarch64_instruction!($name, $id, $variant, $mnemonic, [$($reg_key => $reg_kind),*]);)+
@@ -1297,10 +1310,8 @@ mod tests {
     }
 
     fn parse_op_text(ctx: &mut Context, text: &str) -> Ptr<Operation> {
-        let state_stream = state_stream_from_iterator(
-            text.chars(),
-            State::new(ctx, location::Source::InMemory),
-        );
+        let state_stream =
+            state_stream_from_iterator(text.chars(), State::new(ctx, location::Source::InMemory));
         <Operation as Parsable>::parser(OperationParserConfig {
             look_for_outlined_attrs: false,
         })
@@ -1327,7 +1338,13 @@ mod tests {
     fn factory_emits_a_concrete_instruction_operation() {
         let mut ctx = context();
 
-        let inst = binary(&mut ctx, AddOp::OPCODE, Register::virtual_gpr(0), Register::virtual_gpr(1), Register::virtual_gpr(2));
+        let inst = binary(
+            &mut ctx,
+            AddOp::OPCODE,
+            Register::virtual_gpr(0),
+            Register::virtual_gpr(1),
+            Register::virtual_gpr(2),
+        );
         assert!(Operation::get_opid(inst, &ctx) == AddOp::get_opid_static());
         assert_ne!(Operation::get_opid(inst, &ctx).to_string(), "aarch64.inst");
     }
@@ -1336,24 +1353,21 @@ mod tests {
     fn prints_register_operands_and_scalar_attributes() {
         let mut ctx = context();
 
-        let inst = binary(&mut ctx, AddOp::OPCODE, Register::gpr(0), Register::gpr(1), Register::virtual_gpr(7));
-        assert_eq!(
-            plain(&ctx, inst),
-            "aarch64.add rd=x0, rn=x1, rm=vr7"
+        let inst = binary(
+            &mut ctx,
+            AddOp::OPCODE,
+            Register::gpr(0),
+            Register::gpr(1),
+            Register::virtual_gpr(7),
         );
+        assert_eq!(plain(&ctx, inst), "aarch64.add rd=x0, rn=x1, rm=vr7");
 
         let inst = movz(&mut ctx, Register::gpr(0), 42, 16);
-        assert_eq!(
-            plain(&ctx, inst),
-            "aarch64.movz rd=x0, imm=42, shift=16"
-        );
+        assert_eq!(plain(&ctx, inst), "aarch64.movz rd=x0, imm=42, shift=16");
 
         // movk reads and writes rd; the field is printed once.
         let inst = movk(&mut ctx, Register::gpr(3), 7, 32);
-        assert_eq!(
-            plain(&ctx, inst),
-            "aarch64.movk rd=x3, imm=7, shift=32"
-        );
+        assert_eq!(plain(&ctx, inst), "aarch64.movk rd=x3, imm=7, shift=32");
 
         let then_block = BasicBlock::new(&mut ctx, Some("then".try_into().unwrap()), vec![]);
         let then_label = then_block.deref(&ctx).unique_name(&ctx);
@@ -1396,8 +1410,18 @@ mod tests {
             // successors, not attributes; they only resolve inside a region
             // and round-trip in `branch_targets_round_trip_inside_a_func`.
             set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RD.as_ref(), Register::gpr(0));
-            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RN.as_ref(), super::super::registers::SP);
-            set_reg(&mut ctx, op, ATTR_KEY_AARCH64_RM.as_ref(), Register::virtual_gpr(7));
+            set_reg(
+                &mut ctx,
+                op,
+                ATTR_KEY_AARCH64_RN.as_ref(),
+                super::super::registers::SP,
+            );
+            set_reg(
+                &mut ctx,
+                op,
+                ATTR_KEY_AARCH64_RM.as_ref(),
+                Register::virtual_gpr(7),
+            );
             set_imm(&mut ctx, op, 42);
             set_cond(&mut ctx, op, ConditionCode::Ls);
             set_shift(&mut ctx, op, 16);

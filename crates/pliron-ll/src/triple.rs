@@ -62,9 +62,10 @@ impl Triple {
     /// keywords don't match (so `x86_64-linux-gnu` still finds its OS).
     pub fn parse(triple: &str) -> Triple {
         let mut components = triple.split('-');
-        let arch = components.next().map(parse_arch).unwrap_or_else(|| {
-            Arch::Unknown(String::new())
-        });
+        let arch = components
+            .next()
+            .map(parse_arch)
+            .unwrap_or_else(|| Arch::Unknown(String::new()));
 
         let mut vendor = None;
         let mut os = None;

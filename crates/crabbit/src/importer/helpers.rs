@@ -1,6 +1,9 @@
 use super::*;
 
-pub(super) fn local_slot<'tcx>(state: &FunctionImportState<'tcx>, local: Local) -> Result<Value, String> {
+pub(super) fn local_slot<'tcx>(
+    state: &FunctionImportState<'tcx>,
+    local: Local,
+) -> Result<Value, String> {
     local_slot_opt(state, local)?.ok_or_else(|| format!("missing slot for MIR local {local:?}"))
 }
 
@@ -62,36 +65,54 @@ pub(super) fn ptr_ty(ctx: &mut Context) -> TypeHandle {
 pub(super) fn str_ref_ty(ctx: &mut Context) -> TypeHandle {
     let ptr = ptr_ty(ctx);
     let usize: TypeHandle = usize_ty(ctx).into();
-    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, usize], llvm::types::StructLayout::Unpacked)).into()
+    llvm::types::StructType::get_unnamed(
+        ctx,
+        (vec![ptr, usize], llvm::types::StructLayout::Unpacked),
+    )
+    .into()
 }
 
 pub(super) fn slice_ref_ty(ctx: &mut Context, _elem: TypeHandle) -> TypeHandle {
     let ptr = ptr_ty(ctx);
     let usize: TypeHandle = usize_ty(ctx).into();
-    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, usize], llvm::types::StructLayout::Unpacked)).into()
+    llvm::types::StructType::get_unnamed(
+        ctx,
+        (vec![ptr, usize], llvm::types::StructLayout::Unpacked),
+    )
+    .into()
 }
 
 pub(super) fn trait_object_ref_ty(ctx: &mut Context) -> TypeHandle {
     let ptr = ptr_ty(ctx);
-    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, ptr], llvm::types::StructLayout::Unpacked)).into()
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, ptr], llvm::types::StructLayout::Unpacked))
+        .into()
 }
 
 pub(super) fn fmt_arguments_ty(ctx: &mut Context) -> TypeHandle {
     let ptr = ptr_ty(ctx);
-    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, ptr], llvm::types::StructLayout::Unpacked)).into()
+    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, ptr], llvm::types::StructLayout::Unpacked))
+        .into()
 }
 
 pub(super) fn device_slice_ty(ctx: &mut Context, elem: TypeHandle, mutable: bool) -> TypeHandle {
     let _ = (elem, mutable);
     let ptr: TypeHandle = ptr_ty(ctx);
     let usize: TypeHandle = usize_ty(ctx).into();
-    llvm::types::StructType::get_unnamed(ctx, (vec![ptr, usize], llvm::types::StructLayout::Unpacked)).into()
+    llvm::types::StructType::get_unnamed(
+        ctx,
+        (vec![ptr, usize], llvm::types::StructLayout::Unpacked),
+    )
+    .into()
 }
 
 /// Memory-order permutation of a struct-like type's fields per the real
 /// rustc layout: element `i` is the source index of the field at memory
 /// position `i`. Identity when no layout is available.
-pub(super) fn struct_memory_order<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, field_count: usize) -> Vec<usize> {
+pub(super) fn struct_memory_order<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+    field_count: usize,
+) -> Vec<usize> {
     let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
     let Ok(layout) = tcx.layout_of(typing_env.as_query_input(ty)) else {
         return (0..field_count).collect();
@@ -133,7 +154,10 @@ pub(super) fn field_memory_position<'tcx>(
 
 /// The struct-like source fields of a type, if it is field-reordered by the
 /// converted representation (structs, tuples, closures — not enums).
-pub(super) fn struct_like_source_fields<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Vec<Ty<'tcx>>> {
+pub(super) fn struct_like_source_fields<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+) -> Option<Vec<Ty<'tcx>>> {
     match runtime_ty(ty).kind() {
         rustc_middle::ty::TyKind::Tuple(fields) => Some(fields.iter().collect()),
         rustc_middle::ty::TyKind::Closure(_, args) => {

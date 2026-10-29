@@ -27,10 +27,8 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     context::{Context, Ptr},
-    dialects::llvm::{
-        op_interfaces::IsDeclaration,
-        ops::AddressOfOp,
-    },
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
+    dialects::llvm::{op_interfaces::IsDeclaration, ops::AddressOfOp},
     ir::{
         basic_block::BasicBlock,
         op::{Op, OpId},
@@ -38,19 +36,18 @@ use crate::{
         region::Region,
     },
     linked_list::{ContainsLinkedList, LinkedList as _},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
 };
 
 use super::{
     analysis::{
-        OpEffect, PostDomTree, RegionCfg, dominator_tree, natural_loops,
-        nearest_common_dominator, op_ids_in,
+        OpEffect, PostDomTree, RegionCfg, dominator_tree, natural_loops, nearest_common_dominator,
+        op_ids_in,
     },
     inline::collect_functions,
     midend_gate::midend_disabled,
 };
-use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 use crate::ll::ops::CStrOp;
+use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 
 const MAX_ITERATIONS: usize = 4;
 
@@ -198,14 +195,14 @@ fn sink_in_region(
         let Some(target) = nearest_common_dominator(ctx, &dom, &use_blocks) else {
             continue;
         };
-        if target == def_block || !dom.contains(&def_block) || !dom.dominates(&def_block, &target)
-        {
+        if target == def_block || !dom.contains(&def_block) || !dom.dominates(&def_block, &target) {
             continue;
         }
         if let Some((cfg, pdt)) = &no_new_control_dep
-            && !pdt.postdominates(cfg.idx(target), cfg.idx(def_block)) {
-                continue;
-            }
+            && !pdt.postdominates(cfg.idx(target), cfg.idx(def_block))
+        {
+            continue;
+        }
         // Never into a loop the def is not already in.
         let target_loops = loops_of(target);
         let def_loops = loops_of(def_block);
@@ -222,8 +219,6 @@ fn sink_in_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pliron::builtin::op_interfaces::OneResultInterface as _;
-    use pliron_llvm::op_interfaces::IntBinArithOpWithOverflowFlag as _;
     use crate::{
         dialects::{
             builtin::types::{IntegerType, Signedness},
@@ -233,9 +228,11 @@ mod tests {
                 types::FuncType,
             },
         },
-        ir::{value::Value, r#type::TypeHandle},
+        ir::{r#type::TypeHandle, value::Value},
         printable::Printable,
     };
+    use pliron::builtin::op_interfaces::OneResultInterface as _;
+    use pliron_llvm::op_interfaces::IntBinArithOpWithOverflowFlag as _;
 
     fn run_sink(ctx: &mut Context, func: FuncOp) {
         LLVMSinkPass::default()
@@ -244,8 +241,7 @@ mod tests {
     }
 
     fn scaffold(ctx: &mut Context) -> (FuncOp, Ptr<BasicBlock>, Value, Value) {
-        let i64_ty: TypeHandle =
-            IntegerType::get(ctx, 64, Signedness::Signless).into();
+        let i64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let i1: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let fn_ty = FuncType::get(ctx, i64_ty, vec![i64_ty], false);
         let func = FuncOp::new(ctx, "f".try_into().unwrap(), fn_ty);

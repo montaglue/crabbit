@@ -327,7 +327,9 @@ fn verifier_failure(ctx: &Context, op: Ptr<Operation>) -> Option<String> {
         // A region-holding op (`mir.func`): its own rules only; the walk
         // verifies its body op by op.
         let op_obj = Operation::get_op_dyn(op, ctx);
-        op_obj.verify_interfaces(ctx).and_then(|()| op_obj.verify(ctx))
+        op_obj
+            .verify_interfaces(ctx)
+            .and_then(|()| op_obj.verify(ctx))
     };
     if let Err(error) = own {
         return Some(verifier_reason(&error.err.to_string()));
@@ -344,12 +346,18 @@ fn verifier_failure(ctx: &Context, op: Ptr<Operation>) -> Option<String> {
 /// (`got: …`, `from X to Y`, `LHS: …`) cut off, so one rule is one
 /// histogram key.
 fn verifier_reason(message: &str) -> String {
-    let line = message.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
-    let cut = [", got", " got:", " from ", ". LHS", ": LHS", ", found", " found "]
-        .iter()
-        .filter_map(|marker| line.find(marker))
-        .min()
-        .unwrap_or(line.len());
+    let line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let cut = [
+        ", got", " got:", " from ", ". LHS", ": LHS", ", found", " found ",
+    ]
+    .iter()
+    .filter_map(|marker| line.find(marker))
+    .min()
+    .unwrap_or(line.len());
     // Backtick-quoted symbols (`attached MirCallOp \`sym\` has no …`) are
     // instance data, not part of the rule.
     let mut out = String::new();
@@ -934,12 +942,11 @@ mod tests {
         let insert = b.op::<MirInsertFieldOp>(vec![tuple_ty], vec![undef_v, a], vec![], entry);
         MirInsertFieldOp::new(insert).set_attr_insert_index(&b.ctx, FieldIndexAttr(0));
         // llvm.undef + llvm.insert_value (the importer's spelling)
-        let struct_ty: TypeHandle =
-            pliron_llvm::types::StructType::get_unnamed(
-                &b.ctx,
-                (vec![i32], pliron_llvm::types::StructLayout::Unpacked),
-            )
-            .into();
+        let struct_ty: TypeHandle = pliron_llvm::types::StructType::get_unnamed(
+            &b.ctx,
+            (vec![i32], pliron_llvm::types::StructLayout::Unpacked),
+        )
+        .into();
         let lundef = pliron_llvm::ops::UndefOp::new(&mut b.ctx, struct_ty);
         lundef.get_operation().insert_at_back(entry, &b.ctx);
         let lundef_v = lundef.get_operation().deref(&b.ctx).get_result(0);
@@ -1006,7 +1013,10 @@ mod tests {
         assert_eq!(demo.op_kinds["mir.call"], 3);
         assert_eq!(demo.op_kinds["mir.lt"], 2, "assert cond + header cond");
         assert_eq!(demo.op_kinds["mir.cond_br"], 1);
-        assert_eq!(demo.op_kinds["mir.goto"], 2, "assert's goto + body → header");
+        assert_eq!(
+            demo.op_kinds["mir.goto"], 2,
+            "assert's goto + body → header"
+        );
         assert_eq!(demo.op_kinds["mir.return"], 1);
         assert_eq!(demo.ops, demo.op_kinds.values().sum::<usize>());
         assert_eq!(demo.calls["core::fmt::Arguments::new_v1"], 2);

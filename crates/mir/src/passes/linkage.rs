@@ -35,7 +35,9 @@ pub const PASS_NAME: &str = "apply-module-linkage";
 
 /// [LINKAGE_ATTR_KEY] as an [Identifier].
 pub fn linkage_attr_key() -> Identifier {
-    LINKAGE_ATTR_KEY.try_into().expect("static identifier literal")
+    LINKAGE_ATTR_KEY
+        .try_into()
+        .expect("static identifier literal")
 }
 
 /// Record that the function `symbol` of `module` lowers with `linkage`.
@@ -62,7 +64,11 @@ pub fn record_linkage(
 }
 
 /// The linkage recorded for `symbol` on `module`, if any.
-pub fn recorded_linkage(ctx: &Context, module: Ptr<Operation>, symbol: &Identifier) -> Option<LinkageAttr> {
+pub fn recorded_linkage(
+    ctx: &Context,
+    module: Ptr<Operation>,
+    symbol: &Identifier,
+) -> Option<LinkageAttr> {
     module
         .deref(ctx)
         .attributes
@@ -107,7 +113,11 @@ impl Pass for ApplyModuleLinkagePass {
             }
         }
         if functions.is_empty() {
-            return Ok(if recorded.is_some() { changed() } else { unchanged() });
+            return Ok(if recorded.is_some() {
+                changed()
+            } else {
+                unchanged()
+            });
         }
         for (func, symbol) in functions {
             let linkage = recorded
@@ -132,9 +142,15 @@ mod tests {
         let sym: Identifier = "f".try_into().unwrap();
         assert_eq!(recorded_linkage(&ctx, module, &sym), None);
         record_linkage(&mut ctx, module, &sym, LinkageAttr::InternalLinkage);
-        assert_eq!(recorded_linkage(&ctx, module, &sym), Some(LinkageAttr::InternalLinkage));
+        assert_eq!(
+            recorded_linkage(&ctx, module, &sym),
+            Some(LinkageAttr::InternalLinkage)
+        );
         record_linkage(&mut ctx, module, &sym, LinkageAttr::WeakODRLinkage);
-        assert_eq!(recorded_linkage(&ctx, module, &sym), Some(LinkageAttr::WeakODRLinkage));
+        assert_eq!(
+            recorded_linkage(&ctx, module, &sym),
+            Some(LinkageAttr::WeakODRLinkage)
+        );
     }
 
     #[test]
@@ -152,15 +168,39 @@ mod tests {
         let kept = FuncOp::new(&mut ctx, "kept".try_into().unwrap(), llvm_fn_ty);
         kept.set_attr_llvm_function_linkage(&mut ctx, LinkageAttr::PrivateLinkage);
         kept.get_operation().insert_at_back(body, &ctx);
-        record_linkage(&mut ctx, module, &"internal".try_into().unwrap(), LinkageAttr::InternalLinkage);
+        record_linkage(
+            &mut ctx,
+            module,
+            &"internal".try_into().unwrap(),
+            LinkageAttr::InternalLinkage,
+        );
 
         ApplyModuleLinkagePass
             .run(module, &mut ctx, &mut AnalysisManager::default())
             .unwrap();
 
-        assert_eq!(internal.get_attr_llvm_function_linkage(&ctx).map(|l| l.clone()), Some(LinkageAttr::InternalLinkage));
-        assert_eq!(external.get_attr_llvm_function_linkage(&ctx).map(|l| l.clone()), Some(LinkageAttr::ExternalLinkage));
-        assert_eq!(kept.get_attr_llvm_function_linkage(&ctx).map(|l| l.clone()), Some(LinkageAttr::PrivateLinkage));
-        assert!(module.deref(&ctx).attributes.get::<DictAttr>(&linkage_attr_key()).is_none());
+        assert_eq!(
+            internal
+                .get_attr_llvm_function_linkage(&ctx)
+                .map(|l| l.clone()),
+            Some(LinkageAttr::InternalLinkage)
+        );
+        assert_eq!(
+            external
+                .get_attr_llvm_function_linkage(&ctx)
+                .map(|l| l.clone()),
+            Some(LinkageAttr::ExternalLinkage)
+        );
+        assert_eq!(
+            kept.get_attr_llvm_function_linkage(&ctx).map(|l| l.clone()),
+            Some(LinkageAttr::PrivateLinkage)
+        );
+        assert!(
+            module
+                .deref(&ctx)
+                .attributes
+                .get::<DictAttr>(&linkage_attr_key())
+                .is_none()
+        );
     }
 }

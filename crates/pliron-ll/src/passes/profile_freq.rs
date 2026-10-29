@@ -73,7 +73,9 @@ fn normalize(runs: &[f64]) -> Vec<f64> {
 /// unset/empty. An unreadable file loads as an empty profile (with a
 /// warning), so every lookup falls back to uniform.
 pub fn profile() -> Option<Profile> {
-    let path = std::env::var(PROFILE_ENV).ok().filter(|value| !value.is_empty())?;
+    let path = std::env::var(PROFILE_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())?;
     let mut cached = cache().lock().unwrap_or_else(|poison| poison.into_inner());
     if let Some((cached_path, profile)) = cached.as_ref()
         && *cached_path == path

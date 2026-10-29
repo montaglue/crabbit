@@ -89,9 +89,7 @@ pub(super) fn write_elf_object(parts: &ObjectParts) -> Vec<u8> {
     let tls_fixup_targets: std::collections::HashSet<&str> = parts
         .fixups
         .iter()
-        .filter(|fixup| {
-            matches!(fixup.kind, FixupKind::TprelHi12 | FixupKind::TprelLo12Nc)
-        })
+        .filter(|fixup| matches!(fixup.kind, FixupKind::TprelHi12 | FixupKind::TprelLo12Nc))
         .map(|fixup| fixup.symbol.as_str())
         .collect();
 
@@ -143,8 +141,7 @@ pub(super) fn write_elf_object(parts: &ObjectParts) -> Vec<u8> {
         elf_symbols
             .iter()
             .position(|symbol| symbol.name == name)
-            .expect("collect_object_parts registers a symbol for every relocation")
-            as u64
+            .expect("collect_object_parts registers a symbol for every relocation") as u64
             + 1 // + the null symbol
     };
 
@@ -300,15 +297,15 @@ pub(super) fn write_elf_object(parts: &ObjectParts) -> Vec<u8> {
     pad_to(&mut out, shoff);
 
     let section = |out: &mut Vec<u8>,
-                       name: u32,
-                       sh_type: u32,
-                       flags: u64,
-                       offset: u64,
-                       size: u64,
-                       link: u32,
-                       info: u32,
-                       addralign: u64,
-                       entsize: u64| {
+                   name: u32,
+                   sh_type: u32,
+                   flags: u64,
+                   offset: u64,
+                   size: u64,
+                   link: u32,
+                   info: u32,
+                   addralign: u64,
+                   entsize: u64| {
         out.extend_from_slice(&name.to_le_bytes());
         out.extend_from_slice(&sh_type.to_le_bytes());
         out.extend_from_slice(&flags.to_le_bytes());
@@ -571,7 +568,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["", ".text", ".rela.text", ".symtab", ".strtab", ".note.GNU-stack", ".shstrtab"]
+            [
+                "",
+                ".text",
+                ".rela.text",
+                ".symtab",
+                ".strtab",
+                ".note.GNU-stack",
+                ".shstrtab"
+            ]
         );
         assert_eq!(header_u16(&bytes, 62), 6); // e_shstrndx
     }

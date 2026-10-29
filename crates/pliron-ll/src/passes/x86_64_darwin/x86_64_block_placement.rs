@@ -21,11 +21,11 @@ use std::collections::HashMap;
 
 use crate::{
     context::{Context, Ptr},
-    dialects::x86_64::ops::{self as x86_64_ops, JccOp, JmpOp, Ud2Op, TestJnzOp, FuncOp, RetOp},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::builtin::op_interfaces::OneRegionInterface,
+    dialects::x86_64::ops::{self as x86_64_ops, FuncOp, JccOp, JmpOp, RetOp, TestJnzOp, Ud2Op},
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     passes::hot_path::{CfgEdge, HotPathInfo},
 };
 
@@ -38,7 +38,12 @@ impl Pass for X86_64BlockPlacementPass {
         "x86-64-block-placement"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let module = module_op(ctx, root)?;
         let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
         let ops: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -288,8 +293,8 @@ fn simplify_branches_for_layout(ctx: &mut Context, layout: &[Ptr<BasicBlock>]) {
 
 #[cfg(test)]
 mod tests {
-    use crate::ll::LinkageAttr;
     use super::*;
+    use crate::ll::LinkageAttr;
     use crate::{
         common_traits::Named,
         dialects::x86_64::{self, attributes::ConditionCode},

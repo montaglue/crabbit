@@ -11,11 +11,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     arg_err,
+    builtin::given_names::{get_operation_result_name, set_operation_result_name},
     common_traits::Named,
     context::{Context, Ptr},
-    builtin::given_names::{get_operation_result_name, set_operation_result_name},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
-        builtin::op_interfaces::{SymbolOpInterface},
+        builtin::op_interfaces::SymbolOpInterface,
         llvm::{
             attributes::LinkageAttr,
             op_interfaces::IsDeclaration,
@@ -24,20 +25,11 @@ use crate::{
     },
     identifier::Identifier,
     ir::{
-        basic_block::BasicBlock,
-        location::Location,
-        op::Op,
-        operation::Operation,
-        r#type::Typed,
+        basic_block::BasicBlock, location::Location, op::Op, operation::Operation, r#type::Typed,
         value::Value,
     },
-    irbuild::{
-        cloning,
-        listener::DummyListener,
-        rewriter::IRRewriter,
-    },
+    irbuild::{cloning, listener::DummyListener, rewriter::IRRewriter},
     linked_list::{ContainsLinkedList, LinkedList},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
 };
 
@@ -70,12 +62,14 @@ impl Pass for LLVMInlinePass {
         "llvm-inline"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         let funcs = collect_functions(ctx, root);
-        let symbols: Vec<Identifier> = funcs
-            .iter()
-            .map(|func| func.get_symbol_name(ctx))
-            .collect();
+        let symbols: Vec<Identifier> = funcs.iter().map(|func| func.get_symbol_name(ctx)).collect();
         let mut by_symbol: FxHashMap<Identifier, FuncOp> = funcs
             .iter()
             .zip(&symbols)
@@ -207,7 +201,13 @@ impl LLVMInlinePass {
                     continue;
                 };
                 if callee.is_declaration(ctx)
-                    || !matches!(callee.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone(), LinkageAttr::InternalLinkage)
+                    || !matches!(
+                        callee
+                            .get_attr_llvm_function_linkage(ctx)
+                            .expect("llvm function without linkage")
+                            .clone(),
+                        LinkageAttr::InternalLinkage
+                    )
                 {
                     continue;
                 }
@@ -215,7 +215,12 @@ impl LLVMInlinePass {
                     continue;
                 };
                 let single_site = counts.call_sites.get(&callee_symbol) == Some(&1)
-                    && counts.address_taken.get(&callee_symbol).copied().unwrap_or(0) == 0;
+                    && counts
+                        .address_taken
+                        .get(&callee_symbol)
+                        .copied()
+                        .unwrap_or(0)
+                        == 0;
                 if single_site {
                     return Some((call, *callee, size, true));
                 }
@@ -319,7 +324,12 @@ fn collect_symbol_reference_counts(
 /// something the inliner cannot clone (nested regions).
 fn clonable_body_size(ctx: &Context, callee: FuncOp) -> Option<usize> {
     let mut size = 0usize;
-    for block in callee.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
+    for block in callee
+        .get_region(ctx)
+        .expect("llvm.func definition must have a body")
+        .deref(ctx)
+        .iter(ctx)
+    {
         for op in block.deref(ctx).iter(ctx) {
             let op_ref = op.deref(ctx);
             if op_ref.num_regions() != 0 {
@@ -344,7 +354,12 @@ fn inline_call(
     };
     let caller_symbol = caller.get_symbol_name(ctx);
 
-    let callee_blocks: Vec<_> = callee.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx).collect();
+    let callee_blocks: Vec<_> = callee
+        .get_region(ctx)
+        .expect("llvm.func definition must have a body")
+        .deref(ctx)
+        .iter(ctx)
+        .collect();
     let reachable = reachable_blocks(ctx, callee_blocks[0]);
     let rpo = reverse_post_order(ctx, callee_blocks[0]);
 
@@ -377,10 +392,7 @@ fn inline_call(
     let result_types: Vec<_> = call_op
         .deref(ctx)
         .result_types()
-        .filter(|ty| {
-            !ty.deref(ctx)
-                .is::<pliron_llvm::types::VoidType>()
-        })
+        .filter(|ty| !ty.deref(ctx).is::<pliron_llvm::types::VoidType>())
         .collect();
     let tail_name = Identifier::try_from(format!("inl{tag}_ret"))
         .map_err(|_| crate::input_error_noloc!("llvm-inline: invalid block name"))?;
@@ -576,7 +588,12 @@ fn remove_dead_internal_functions(ctx: &mut Context, root: Ptr<Operation>) {
         let mut changed = false;
         for func in funcs {
             if func.is_declaration(ctx)
-                || !matches!(func.get_attr_llvm_function_linkage(ctx).expect("llvm function without linkage").clone(), LinkageAttr::InternalLinkage)
+                || !matches!(
+                    func.get_attr_llvm_function_linkage(ctx)
+                        .expect("llvm function without linkage")
+                        .clone(),
+                    LinkageAttr::InternalLinkage
+                )
             {
                 continue;
             }
@@ -625,16 +642,8 @@ fn collect_referenced_symbols(
 
 #[cfg(test)]
 mod tests {
-    use crate::dialects::builtin::ops::ConstantOp;
-    #[allow(unused_imports)]
-    use pliron::builtin::op_interfaces::{
-        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
-    };
-    #[allow(unused_imports)]
-    use pliron_llvm::op_interfaces::{
-        BinArithOp as _, IntBinArithOpWithOverflowFlag as _,
-    };
     use super::*;
+    use crate::dialects::builtin::ops::ConstantOp;
     use crate::{
         dialects::{
             builtin::{
@@ -654,6 +663,12 @@ mod tests {
         printable::Printable,
         utils::apint::APInt,
     };
+    #[allow(unused_imports)]
+    use pliron::builtin::op_interfaces::{
+        AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
+    };
+    #[allow(unused_imports)]
+    use pliron_llvm::op_interfaces::{BinArithOp as _, IntBinArithOpWithOverflowFlag as _};
     use std::num::NonZero;
 
     fn test_context() -> Context {
@@ -681,7 +696,13 @@ mod tests {
         let callee_entry = callee.get_entry_block(&ctx).unwrap();
         let callee_arg = callee_entry.deref(&ctx).get_argument(0);
         let int_ty = builtin::types::IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(int_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
+        let one = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                int_ty,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
         one.get_operation().insert_at_back(callee_entry, &ctx);
         let one_val = one.get_result(&ctx);
         let add = AddOp::new_with_overflow_flag(&mut ctx, callee_arg, one_val, Default::default());
@@ -711,7 +732,11 @@ mod tests {
             .insert_at_back(caller_entry, &ctx);
 
         LLVMInlinePass::default()
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -817,12 +842,19 @@ mod tests {
         make_caller(&mut ctx, module_block, "big", fn_ty, 1);
 
         tiny_budget_pass()
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
         assert!(!text.contains("llvm.call"), "{text}");
-        assert!(!text.contains("@big"), "single-site callee must be erased: {text}");
+        assert!(
+            !text.contains("@big"),
+            "single-site callee must be erased: {text}"
+        );
         assert_eq!(text.matches("llvm.add").count(), 149, "{text}");
     }
 
@@ -841,7 +873,11 @@ mod tests {
         make_caller(&mut ctx, module_block, "big", fn_ty, 2);
 
         tiny_budget_pass()
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -881,7 +917,11 @@ mod tests {
         make_caller(&mut ctx, module_block, "rec", fn_ty, 1);
 
         tiny_budget_pass()
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -904,7 +944,11 @@ mod tests {
         make_caller(&mut ctx, module_block, "ext", fn_ty, 1);
 
         tiny_budget_pass()
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));
@@ -926,7 +970,13 @@ mod tests {
         let fn_ty: TypedHandle<FuncType> = FuncType::get(&ctx, i64_ty, vec![i64_ty], false);
 
         // b: internal, 150 ops.
-        make_chain_callee(&mut ctx, module_block, "b", LinkageAttr::InternalLinkage, 150);
+        make_chain_callee(
+            &mut ctx,
+            module_block,
+            "b",
+            LinkageAttr::InternalLinkage,
+            150,
+        );
 
         // a: internal, calls b once.
         let a = llvm::ops::FuncOp::new(&mut ctx, "a".try_into().unwrap(), fn_ty);
@@ -950,7 +1000,11 @@ mod tests {
         make_caller(&mut ctx, module_block, "a", fn_ty, 1);
 
         tiny_budget_pass()
-            .run(module.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                module.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", module.get_operation().disp(&ctx));

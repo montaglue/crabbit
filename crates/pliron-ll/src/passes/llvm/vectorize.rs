@@ -48,9 +48,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::num::NonZero;
 
 use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _, BranchOpInterface as _};
-use pliron_llvm::op_interfaces::{
-    IntBinArithOpWithOverflowFlag as _, IsDeclaration as _,
-};
+use pliron_llvm::op_interfaces::{IntBinArithOpWithOverflowFlag as _, IsDeclaration as _};
 
 use crate::{
     context::{Context, Ptr},
@@ -64,9 +62,8 @@ use crate::{
         llvm::{
             attributes::ICmpPredicateAttr,
             ops::{
-                AShrOp, AddOp, AndOp, BrOp, CondBrOp, FAddOp, FDivOp, FMulOp, FSubOp,
-                GepIndex, GetElementPtrOp, ICmpOp, LShrOp, LoadOp, MulOp, OrOp, ShlOp,
-                StoreOp, SubOp, XorOp,
+                AShrOp, AddOp, AndOp, BrOp, CondBrOp, FAddOp, FDivOp, FMulOp, FSubOp, GepIndex,
+                GetElementPtrOp, ICmpOp, LShrOp, LoadOp, MulOp, OrOp, ShlOp, StoreOp, SubOp, XorOp,
             },
             types::{VectorType, VectorTypeKind},
         },
@@ -89,7 +86,7 @@ use crate::{
 };
 
 use super::{
-    analysis::{dominator_tree, natural_loops, NaturalLoop},
+    analysis::{NaturalLoop, dominator_tree, natural_loops},
     inline::collect_functions,
     midend_gate::midend_disabled,
     simplify::as_const_operand,
@@ -411,7 +408,9 @@ fn analyze(ctx: &Context, natural_loop: &NaturalLoop, fp_reduce: bool) -> Option
         return None;
     }
     if cond_br.deref(ctx).get_successor(0) != body_blk
-        || natural_loop.body.contains(&cond_br.deref(ctx).get_successor(1))
+        || natural_loop
+            .body
+            .contains(&cond_br.deref(ctx).get_successor(1))
     {
         return None;
     }
@@ -439,22 +438,22 @@ fn analyze(ctx: &Context, natural_loop: &NaturalLoop, fp_reduce: bool) -> Option
         (op_ref.get_operand(0), op_ref.get_operand(1))
     };
     let predicate = ICmpOp::from_operation(icmp_op).predicate(ctx);
-    let (iv_index, bound, signed_cmp) =
-        if let Some(j) = header_args.iter().position(|a| *a == lhs) {
-            match predicate {
-                ICmpPredicateAttr::ULT => (j, rhs, false),
-                ICmpPredicateAttr::SLT => (j, rhs, true),
-                _ => return None,
-            }
-        } else if let Some(j) = header_args.iter().position(|a| *a == rhs) {
-            match predicate {
-                ICmpPredicateAttr::UGT => (j, lhs, false),
-                ICmpPredicateAttr::SGT => (j, lhs, true),
-                _ => return None,
-            }
-        } else {
-            return None;
-        };
+    let (iv_index, bound, signed_cmp) = if let Some(j) = header_args.iter().position(|a| *a == lhs)
+    {
+        match predicate {
+            ICmpPredicateAttr::ULT => (j, rhs, false),
+            ICmpPredicateAttr::SLT => (j, rhs, true),
+            _ => return None,
+        }
+    } else if let Some(j) = header_args.iter().position(|a| *a == rhs) {
+        match predicate {
+            ICmpPredicateAttr::UGT => (j, lhs, false),
+            ICmpPredicateAttr::SGT => (j, lhs, true),
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
     if defined_in_loop(ctx, bound, &natural_loop.body) {
         return None;
     }
@@ -766,10 +765,8 @@ fn analyze(ctx: &Context, natural_loop: &NaturalLoop, fp_reduce: bool) -> Option
     let mut elem_slot: Option<TypeHandle> = None;
     let mut vec_defs: FxHashSet<Ptr<Operation>> = FxHashSet::default();
     let mut constants: FxHashSet<Ptr<Operation>> = FxHashSet::default();
-    let reduction_add_of: FxHashMap<Ptr<Operation>, usize> = reduction_adds
-        .iter()
-        .map(|(j, op)| (*op, *j))
-        .collect();
+    let reduction_add_of: FxHashMap<Ptr<Operation>, usize> =
+        reduction_adds.iter().map(|(j, op)| (*op, *j)).collect();
     let mut actions: Vec<Action> = Vec::new();
 
     let resolve_operand = |v: Value,
@@ -1153,9 +1150,9 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
     let mut splats: FxHashMap<Value, Value> = FxHashMap::default();
     let mut const_splats: FxHashMap<Ptr<Operation>, Value> = FxHashMap::default();
     let splat_of = |ctx: &mut Context,
-                        splats: &mut FxHashMap<Value, Value>,
-                        scalar: Value,
-                        anchor: Ptr<Operation>|
+                    splats: &mut FxHashMap<Value, Value>,
+                    scalar: Value,
+                    anchor: Ptr<Operation>|
      -> Value {
         if let Some(v) = splats.get(&scalar) {
             return *v;
@@ -1239,12 +1236,8 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
         let base = match key.form {
             AddrForm::Elem { offset: None } | AddrForm::ByteShl { .. } => raw_base,
             AddrForm::Elem { offset: Some(inv) } => {
-                let gep = GetElementPtrOp::new(
-                    ctx,
-                    raw_base,
-                    vec![GepIndex::Value(inv)],
-                    plan.elem_ty,
-                );
+                let gep =
+                    GetElementPtrOp::new(ctx, raw_base, vec![GepIndex::Value(inv)], plan.elem_ty);
                 let gep_op = gep.get_operation();
                 gep_op.insert_before(ctx, pre_term);
                 stamp_from(ctx, gep_op, anchor);
@@ -1335,11 +1328,11 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
         .collect();
 
     let operand_value = |ctx: &mut Context,
-                             splats: &mut FxHashMap<Value, Value>,
-                             const_splats: &mut FxHashMap<Ptr<Operation>, Value>,
-                             vec_values: &FxHashMap<Ptr<Operation>, Value>,
-                             operand: &Operand,
-                             anchor: Ptr<Operation>|
+                         splats: &mut FxHashMap<Value, Value>,
+                         const_splats: &mut FxHashMap<Ptr<Operation>, Value>,
+                         vec_values: &FxHashMap<Ptr<Operation>, Value>,
+                         operand: &Operand,
+                         anchor: Ptr<Operation>|
      -> Value {
         match operand {
             Operand::Vec(def) => vec_values[def],
@@ -1350,7 +1343,8 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
                 }
                 // Clone the body-local constant into the preheader; the
                 // original stays for the scalar epilogue.
-                let attr = pliron::dyn_clone::clone_box(&*ConstantOp::from_operation(*c).get_value(ctx));
+                let attr =
+                    pliron::dyn_clone::clone_box(&*ConstantOp::from_operation(*c).get_value(ctx));
                 let cloned = ConstantOp::new(ctx, attr);
                 let cloned_op = cloned.get_operation();
                 cloned_op.insert_before(ctx, pre_term);
@@ -1399,14 +1393,7 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
                 vec_values.insert(*op, vload_op.deref(ctx).get_result(0));
             }
             Action::Store { op, addr, value } => {
-                let v = operand_value(
-                    ctx,
-                    &mut splats,
-                    &mut const_splats,
-                    &vec_values,
-                    value,
-                    *op,
-                );
+                let v = operand_value(ctx, &mut splats, &mut const_splats, &vec_values, value, *op);
                 let addr_val = addr_for(ctx, addr, *op);
                 let vstore = VStoreOp::new(ctx, v, addr_val).get_operation();
                 vstore.insert_at_back(vbody, ctx);
@@ -1471,15 +1458,13 @@ fn apply(ctx: &mut Context, region: Ptr<Region>, plan: &VecPlan) {
         // zero, so `init ⊕ reduce(vacc)` is the value the scalar loop
         // would carry into its remaining iterations.
         let combined_op = match kind {
-            VReduceKindAttr::Add => {
-                AddOp::new_with_overflow_flag(
-                    ctx,
-                    plan.init_operands[*j],
-                    red_val,
-                    Default::default(),
-                )
-                .get_operation()
-            }
+            VReduceKindAttr::Add => AddOp::new_with_overflow_flag(
+                ctx,
+                plan.init_operands[*j],
+                red_val,
+                Default::default(),
+            )
+            .get_operation(),
             VReduceKindAttr::FAdd => {
                 use pliron_llvm::op_interfaces::FloatBinArithOpWithFastMathFlags as _;
                 FAddOp::new_with_fast_math_flags(
@@ -1928,21 +1913,12 @@ mod tests {
                 l.get_operation().insert_at_back(shell.body, ctx);
                 let l_v = l.get_result(ctx);
                 let acc2: Value = if fp {
-                    let s = FAddOp::new_with_fast_math_flags(
-                        ctx,
-                        carried[0],
-                        l_v,
-                        Default::default(),
-                    );
+                    let s =
+                        FAddOp::new_with_fast_math_flags(ctx, carried[0], l_v, Default::default());
                     s.get_operation().insert_at_back(shell.body, ctx);
                     s.get_result(ctx)
                 } else {
-                    let s = AddOp::new_with_overflow_flag(
-                        ctx,
-                        carried[0],
-                        l_v,
-                        Default::default(),
-                    );
+                    let s = AddOp::new_with_overflow_flag(ctx, carried[0], l_v, Default::default());
                     s.get_operation().insert_at_back(shell.body, ctx);
                     s.get_result(ctx)
                 };

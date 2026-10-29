@@ -5,7 +5,7 @@ use crate::{
     dialects::{
         aarch64::op_interfaces::{BinaryFixup, FixupKind},
         aarch64::ops::FuncOp,
-        builtin::{op_interfaces::SymbolOpInterface},
+        builtin::op_interfaces::SymbolOpInterface,
         llvm::ops::GlobalOp as LlvmGlobalOp,
         macho::ops::{ObjectOp, Relocation, Symbol},
     },
@@ -99,9 +99,15 @@ pub(super) struct ObjectParts {
 
 impl ObjectParts {
     pub fn data_sections(&self) -> impl Iterator<Item = &DataSection> {
-        [&self.rodata, &self.relro, &self.data, &self.tdata, &self.tbss]
-            .into_iter()
-            .flatten()
+        [
+            &self.rodata,
+            &self.relro,
+            &self.data,
+            &self.tdata,
+            &self.tbss,
+        ]
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -189,7 +195,11 @@ pub(super) fn collect_object_parts(
     for fixup in &mut fixups {
         fixup.symbol = os.symbol_name(&fixup.symbol);
         let symbol = fixup.symbol.clone();
-        ensure_symbol(&mut symbols, [&rodata, &relro, &data, &tdata, &tbss], &symbol);
+        ensure_symbol(
+            &mut symbols,
+            [&rodata, &relro, &data, &tdata, &tbss],
+            &symbol,
+        );
     }
     for section in [&rodata, &relro, &data, &tdata, &tbss] {
         for reloc in &section.relocs {
@@ -296,7 +306,11 @@ mod tests {
         let mut ctx = context();
         let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
-        let target = aarch64::ops::FuncOp::new(&mut ctx, "target".try_into().unwrap(), LinkageAttr::External);
+        let target = aarch64::ops::FuncOp::new(
+            &mut ctx,
+            "target".try_into().unwrap(),
+            LinkageAttr::External,
+        );
         target.get_operation().insert_at_back(body, &ctx);
         set_bytes_attr(
             target.get_operation(),
@@ -304,7 +318,8 @@ mod tests {
             ATTR_KEY_AARCH64_ENCODED.as_ref(),
             vec![0x00, 0x00, 0x00, 0x00],
         );
-        let other = aarch64::ops::FuncOp::new(&mut ctx, "other".try_into().unwrap(), LinkageAttr::External);
+        let other =
+            aarch64::ops::FuncOp::new(&mut ctx, "other".try_into().unwrap(), LinkageAttr::External);
         other.get_operation().insert_at_back(body, &ctx);
         set_bytes_attr(
             other.get_operation(),

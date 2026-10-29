@@ -14,23 +14,22 @@
 //! adapted with `llvm.bitcast` so every rewritten slot sees one type.
 
 use crate::dialects::builtin::ops::ConstantOp;
-use pliron::builtin::op_interfaces::{AtMostOneRegionInterface as _};
-use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 use crate::{
-    context::{Context, Ptr},
     builtin::given_names::{get_operation_result_name, set_operation_result_name},
+    context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::{
         builtin::{
             attributes::IntegerAttr,
-            op_interfaces::{OneResultInterface},
+            op_interfaces::OneResultInterface,
             types::{IntegerType, Signedness},
         },
         llvm::{
-            ops::GepIndex,
             op_interfaces::IsDeclaration,
+            ops::GepIndex,
             ops::{
-                AllocaOp, BitcastOp, ExtractValueOp, GetElementPtrOp, InsertValueOp,
-                LoadOp, StoreOp, UndefOp,
+                AllocaOp, BitcastOp, ExtractValueOp, GetElementPtrOp, InsertValueOp, LoadOp,
+                StoreOp, UndefOp,
             },
             types::{ArrayType, PointerType, StructType},
         },
@@ -43,10 +42,11 @@ use crate::{
         value::Value,
     },
     linked_list::{ContainsLinkedList, LinkedList as _},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     result::CrabbitResult,
     utils::apint::APInt,
 };
+use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
+use pliron_llvm::op_interfaces::{CastOpInterface as _, PointerTypeResult as _};
 
 use super::inline::collect_functions;
 
@@ -60,13 +60,23 @@ impl Pass for LLVMSroaPass {
         "llvm-sroa"
     }
 
-    fn run(&mut self, root: Ptr<Operation>, ctx: &mut Context, _analyses: &mut AnalysisManager) -> pliron::result::Result<PassResult> {
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _analyses: &mut AnalysisManager,
+    ) -> pliron::result::Result<PassResult> {
         for func in collect_functions(ctx, root) {
             if func.is_declaration(ctx) {
                 continue;
             }
             let mut allocas = Vec::new();
-            for block in func.get_region(ctx).expect("llvm.func definition must have a body").deref(ctx).iter(ctx) {
+            for block in func
+                .get_region(ctx)
+                .expect("llvm.func definition must have a body")
+                .deref(ctx)
+                .iter(ctx)
+            {
                 for op in block.deref(ctx).iter(ctx) {
                     if Operation::get_opid(op, ctx) == AllocaOp::get_opid_static() {
                         allocas.push(AllocaOp::from_operation(op));
@@ -91,7 +101,12 @@ struct Leaf {
 /// Flatten `ty` into 8-byte leaves. Returns `None` for types with leaves
 /// that are not single-register scalars (the layout would need padding
 /// bookkeeping this pass does not have).
-fn flatten_type(ctx: &Context, ty: TypeHandle, path: &mut Vec<u32>, out: &mut Vec<Leaf>) -> Option<()> {
+fn flatten_type(
+    ctx: &Context,
+    ty: TypeHandle,
+    path: &mut Vec<u32>,
+    out: &mut Vec<Leaf>,
+) -> Option<()> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
         if int_ty.width() != 64 {
@@ -202,9 +217,10 @@ fn try_split_alloca(ctx: &mut Context, alloca: AllocaOp) -> CrabbitResult<()> {
         );
         insert_after = slot_alloca.get_operation();
         if let Some(name) = &base_name
-            && let Ok(slot_name) = Identifier::try_from(format!("{name}_f{idx}")) {
-                set_operation_result_name(ctx, slot_alloca.get_operation(), 0, Some(slot_name));
-            }
+            && let Ok(slot_name) = Identifier::try_from(format!("{name}_f{idx}"))
+        {
+            set_operation_result_name(ctx, slot_alloca.get_operation(), 0, Some(slot_name));
+        }
         slot_allocas.push(slot_alloca.get_result(ctx));
     }
 
@@ -294,9 +310,11 @@ fn classify_accesses(
                         load,
                         slot: slot_idx,
                     });
-                } else if access_opid == StoreOp::get_opid_static() && gep_use.find_index(ctx) == 1 {
+                } else if access_opid == StoreOp::get_opid_static() && gep_use.find_index(ctx) == 1
+                {
                     let store = StoreOp::from_operation(access_op);
-                    if !scalar_compatible(ctx, store.get_operand_value(ctx).get_type(ctx), leaf_ty) {
+                    if !scalar_compatible(ctx, store.get_operand_value(ctx).get_type(ctx), leaf_ty)
+                    {
                         return None;
                     }
                     accesses.push(SlotAccess::ScalarStore {
@@ -404,12 +422,7 @@ fn rewrite_whole_load(
     Operation::erase(load_op, ctx);
 }
 
-fn rewrite_whole_store(
-    ctx: &mut Context,
-    store: StoreOp,
-    leaves: &[Leaf],
-    slot_allocas: &[Value],
-) {
+fn rewrite_whole_store(ctx: &mut Context, store: StoreOp, leaves: &[Leaf], slot_allocas: &[Value]) {
     let store_op = store.get_operation();
     let bracket_prev = store_op.deref(ctx).get_prev();
     let value = store.get_operand_value(ctx);
@@ -438,7 +451,10 @@ fn resolve_leaf(
 ) -> Value {
     let mut current = aggregate;
     let mut path = path.to_vec();
-    while let Some(op) = current.defining_op().filter(|_| current.find_index(ctx) == 0) {
+    while let Some(op) = current
+        .defining_op()
+        .filter(|_| current.find_index(ctx) == 0)
+    {
         let opid = Operation::get_opid(op, ctx);
         if opid == UndefOp::get_opid_static() {
             let undef = UndefOp::new(ctx, leaf_ty);
@@ -508,23 +524,23 @@ fn rewrite_scalar_store(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::{
+        conversion::pass::{AnalysisManager, Pass},
+        dialects::llvm::{
+            attributes::LinkageAttr,
+            ops::{FuncOp, ReturnOp},
+            types::FuncType,
+        },
+        ir::r#type::TypedHandle,
+        printable::Printable,
+    };
     #[allow(unused_imports)]
     use pliron::builtin::op_interfaces::{
         AtMostOneRegionInterface as _, BranchOpInterface as _, CallOpInterface as _,
     };
     #[allow(unused_imports)]
     use pliron_llvm::op_interfaces::{BinArithOp as _, CastOpInterface as _};
-    use super::*;
-    use crate::{
-        dialects::llvm::{
-                attributes::LinkageAttr,
-                ops::{FuncOp, ReturnOp},
-                types::FuncType,
-            },
-        ir::r#type::TypedHandle,
-        conversion::pass::{AnalysisManager, Pass},
-        printable::Printable,
-    };
     use std::num::NonZero;
 
     fn test_context() -> Context {
@@ -536,10 +552,15 @@ mod tests {
     fn splits_two_field_struct_alloca() {
         let mut ctx = test_context();
         let u64_ty: TypeHandle = IntegerType::get(&mut ctx, 64, Signedness::Signless).into();
-        let pair_ty: TypeHandle =
-            StructType::get_unnamed(&mut ctx, (vec![u64_ty, u64_ty], crate::dialects::llvm::types::StructLayout::Unpacked)).into();
-        let fn_ty: TypedHandle<FuncType> =
-            FuncType::get(&mut ctx, pair_ty, vec![pair_ty], false);
+        let pair_ty: TypeHandle = StructType::get_unnamed(
+            &mut ctx,
+            (
+                vec![u64_ty, u64_ty],
+                crate::dialects::llvm::types::StructLayout::Unpacked,
+            ),
+        )
+        .into();
+        let fn_ty: TypedHandle<FuncType> = FuncType::get(&mut ctx, pair_ty, vec![pair_ty], false);
         let func = FuncOp::new(&mut ctx, "split".try_into().unwrap(), fn_ty);
         func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);
         func.get_or_create_entry_block(&mut ctx);
@@ -547,7 +568,13 @@ mod tests {
         let arg = entry.deref(&ctx).get_argument(0);
 
         let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
-        let one = ConstantOp::new(&mut ctx, Box::new(IntegerAttr::new(i64_ty, APInt::from_u64(1, NonZero::new(64).unwrap()))));
+        let one = ConstantOp::new(
+            &mut ctx,
+            Box::new(IntegerAttr::new(
+                i64_ty,
+                APInt::from_u64(1, NonZero::new(64).unwrap()),
+            )),
+        );
         one.get_operation().insert_at_back(entry, &ctx);
         let one_val = one.get_result(&ctx);
         let alloca = AllocaOp::new(&mut ctx, pair_ty, one_val, 0);
@@ -564,7 +591,11 @@ mod tests {
             .insert_at_back(entry, &ctx);
 
         LLVMSroaPass
-            .run(func.get_operation(), &mut ctx, &mut AnalysisManager::default())
+            .run(
+                func.get_operation(),
+                &mut ctx,
+                &mut AnalysisManager::default(),
+            )
             .unwrap();
 
         let text = format!("{}", func.get_operation().disp(&ctx));

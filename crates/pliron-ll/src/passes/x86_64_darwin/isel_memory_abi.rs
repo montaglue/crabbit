@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use crate::{
     context::{Context, Ptr},
     dialects::{
+        llvm::ops::GepIndex,
         x86_64::{
             attributes::AbiLocation,
             ops as x86_64_ops,
             registers::{RAX, Register},
         },
-        llvm::ops::GepIndex,
     },
     input_error_noloc,
     ir::{r#type::Typed, value::Value},
@@ -210,8 +210,7 @@ pub(super) fn emit_return_value(
                 ))
             })?;
             let dst = fresh_vreg(next_vreg);
-            x86_64_ops::ldr_sp_offset(ctx, dst, sret_result_slot.offset)
-                .insert_at_back(entry, ctx);
+            x86_64_ops::ldr_sp_offset(ctx, dst, sret_result_slot.offset).insert_at_back(entry, ctx);
             store_register_address_value(
                 ctx,
                 entry,
@@ -518,14 +517,8 @@ fn merge_packed_half(
     *half = Some(match half.take() {
         Some(existing) => {
             let joined = fresh_vreg(next_vreg);
-            x86_64_ops::binary(
-                ctx,
-                x86_64_ops::OrOp::OPCODE,
-                joined,
-                existing,
-                value,
-            )
-            .insert_at_back(entry, ctx);
+            x86_64_ops::binary(ctx, x86_64_ops::OrOp::OPCODE, joined, existing, value)
+                .insert_at_back(entry, ctx);
             joined
         }
         None => value,
@@ -550,14 +543,8 @@ fn unpack_aggregate_from_reg(
             let shift = fresh_vreg(next_vreg);
             materialize_u64_immediate(ctx, entry, shift, byte_offset * 8);
             let shifted = fresh_vreg(next_vreg);
-            x86_64_ops::binary(
-                ctx,
-                x86_64_ops::LsrOp::OPCODE,
-                shifted,
-                value,
-                shift,
-            )
-            .insert_at_back(entry, ctx);
+            x86_64_ops::binary(ctx, x86_64_ops::LsrOp::OPCODE, shifted, value, shift)
+                .insert_at_back(entry, ctx);
             value = shifted;
         }
         if size < 8 {
@@ -644,14 +631,8 @@ fn pack_aggregate_to_reg(
             )?;
             acc = Some(if let Some(acc) = acc {
                 let joined = fresh_vreg(next_vreg);
-                x86_64_ops::binary(
-                    ctx,
-                    x86_64_ops::OrOp::OPCODE,
-                    joined,
-                    acc,
-                    field_reg,
-                )
-                .insert_at_back(entry, ctx);
+                x86_64_ops::binary(ctx, x86_64_ops::OrOp::OPCODE, joined, acc, field_reg)
+                    .insert_at_back(entry, ctx);
                 joined
             } else {
                 field_reg
@@ -836,13 +817,11 @@ fn store_stack_value(
         return store_stack_value(ctx, entry, offset, value, word_ty, next_vreg);
     }
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
-            format!(
-                "aggregate store requires aggregate value, got {value:?} for type {} size {}",
-                ty.deref(ctx).disp(ctx),
-                stack_size_of(ctx, ty)?
-            )
-        )));
+        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(format!(
+            "aggregate store requires aggregate value, got {value:?} for type {} size {}",
+            ty.deref(ctx).disp(ctx),
+            stack_size_of(ctx, ty)?
+        ))));
     };
     let layout = aggregate_field_layout(ctx, ty)?;
     for (index, (field_offset, field_ty)) in layout.into_iter().enumerate() {
@@ -911,14 +890,8 @@ fn load_register_address_value(
             return Ok(LoweredValue::RegPair(lo, hi));
         }
         let dst = fresh_vreg(next_vreg);
-        x86_64_ops::ldr_reg_offset_sized(
-            ctx,
-            load_reg_opcode(ctx, ty)?,
-            dst,
-            base,
-            offset,
-        )
-        .insert_at_back(entry, ctx);
+        x86_64_ops::ldr_reg_offset_sized(ctx, load_reg_opcode(ctx, ty)?, dst, base, offset)
+            .insert_at_back(entry, ctx);
         let dst = normalize_integer_reg(ctx, entry, dst, ty, next_vreg)?;
         return Ok(LoweredValue::Reg(dst));
     }
@@ -996,13 +969,11 @@ fn store_register_address_value(
         return store_register_address_value(ctx, entry, base, offset, value, word_ty, next_vreg);
     }
     let LoweredValue::Aggregate(values) = value else {
-        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
-            format!(
-                "aggregate store requires aggregate value, got {value:?} for type {} size {}",
-                ty.deref(ctx).disp(ctx),
-                stack_size_of(ctx, ty)?
-            )
-        )));
+        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(format!(
+            "aggregate store requires aggregate value, got {value:?} for type {} size {}",
+            ty.deref(ctx).disp(ctx),
+            stack_size_of(ctx, ty)?
+        ))));
     };
     let layout = aggregate_field_layout(ctx, ty)?;
     for (index, (field_offset, field_ty)) in layout.into_iter().enumerate() {
@@ -1098,10 +1069,7 @@ fn flatten_aggregate_value(value: LoweredValue) -> CrabbitResult<Vec<LoweredValu
     }
 }
 
-pub(super) fn stack_size_of(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> CrabbitResult<u64> {
+pub(super) fn stack_size_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(0);
     }
@@ -1138,10 +1106,7 @@ pub(super) fn stack_size_of(
     Ok(align_to(unpadded_size, stack_align_of(ctx, ty)?))
 }
 
-pub(super) fn stack_align_of(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> CrabbitResult<u64> {
+pub(super) fn stack_align_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     if is_zero_sized_ty(ctx, ty) {
         return Ok(1);
     }
@@ -1219,10 +1184,7 @@ pub(super) fn aggregate_field_layout(
     Ok(layout)
 }
 
-pub(super) fn scalar_size_of(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> CrabbitResult<u64> {
+pub(super) fn scalar_size_of(ctx: &Context, ty: TypeHandle) -> CrabbitResult<u64> {
     let ty_ref = ty.deref(ctx);
     if let Some(int_ty) = ty_ref.downcast_ref::<crate::dialects::builtin::types::IntegerType>() {
         let size = (int_ty.width() as u64).div_ceil(8).max(1);

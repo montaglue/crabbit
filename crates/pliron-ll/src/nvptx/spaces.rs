@@ -38,9 +38,9 @@ use crate::{
     context::{Context, Ptr},
     dialects::llvm::{
         ops::{
-            AddrSpaceCastOp, AddressOfOp, AllocaOp, AtomicCmpxchgOp, AtomicRmwOp, BitcastOp,
-            BrOp, CallOp, CondBrOp, FreezeOp, GepIndex, GetElementPtrOp, InlineAsmOp,
-            IntToPtrOp, LoadOp, PtrToIntOp, SelectOp, StoreOp,
+            AddrSpaceCastOp, AddressOfOp, AllocaOp, AtomicCmpxchgOp, AtomicRmwOp, BitcastOp, BrOp,
+            CallOp, CondBrOp, FreezeOp, GepIndex, GetElementPtrOp, InlineAsmOp, IntToPtrOp, LoadOp,
+            PtrToIntOp, SelectOp, StoreOp,
         },
         types::PointerType,
     },
@@ -90,7 +90,11 @@ pub(super) fn infer_spaces(
                 .is_some();
         spaces.insert(
             param,
-            if is_ptr { PtrSpace::Global } else { PtrSpace::Generic },
+            if is_ptr {
+                PtrSpace::Global
+            } else {
+                PtrSpace::Generic
+            },
         );
     }
     // Escaped values stay demoted across iterations.
@@ -193,7 +197,12 @@ fn transfer(
         // mir-lower's state-space casts: provenance, not a value change.
         changed |= alias(spaces, forced, cast.get_operand(ctx), cast.get_result(ctx));
     } else if let Some(freeze) = op_obj.downcast_ref::<FreezeOp>() {
-        changed |= alias(spaces, forced, freeze.get_operand(ctx), freeze.get_result(ctx));
+        changed |= alias(
+            spaces,
+            forced,
+            freeze.get_operand(ctx),
+            freeze.get_result(ctx),
+        );
     } else if op_obj.downcast_ref::<AtomicRmwOp>().is_some()
         || op_obj.downcast_ref::<AtomicCmpxchgOp>().is_some()
     {
@@ -234,7 +243,13 @@ fn transfer(
         // view (memory readers expect a generic address).
         changed |= escape(spaces, forced, store.get_operand_value(ctx));
     } else if let Some(br) = op_obj.downcast_ref::<BrOp>() {
-        changed |= branch_edge(ctx, spaces, br.get_operation(), 0, &br.successor_operands(ctx, 0));
+        changed |= branch_edge(
+            ctx,
+            spaces,
+            br.get_operation(),
+            0,
+            &br.successor_operands(ctx, 0),
+        );
     } else if let Some(cond_br) = op_obj.downcast_ref::<CondBrOp>() {
         for succ in 0..2 {
             changed |= branch_edge(
@@ -480,8 +495,7 @@ pub(super) fn readonly_values(
                         CallOpCallable::Indirect(_) => String::new(),
                     };
                     let dyn_shared = canonical == super::DYN_SHARED_INTRINSIC;
-                    let results: Vec<Value> =
-                        call.get_operation().deref(ctx).results().collect();
+                    let results: Vec<Value> = call.get_operation().deref(ctx).results().collect();
                     for result in results {
                         // The dyn-shared window base is a fresh provenance
                         // source, like `addressof` of a `.shared` global;

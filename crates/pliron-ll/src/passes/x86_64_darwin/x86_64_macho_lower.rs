@@ -1,10 +1,10 @@
 use crate::{
     context::{Context, Ptr},
     dialects::{
+        builtin::op_interfaces::SymbolOpInterface,
+        macho::ops::{ObjectOp, Relocation, Symbol},
         x86_64::op_interfaces::FixupKind,
         x86_64::ops::FuncOp,
-        builtin::{op_interfaces::SymbolOpInterface},
-        macho::ops::{ObjectOp, Relocation, Symbol},
     },
     ir::operation::Operation,
     linked_list::ContainsLinkedList,
@@ -14,7 +14,9 @@ use crate::{
 use super::{
     attrs::{ATTR_KEY_X86_64_ENCODED, ATTR_KEY_X86_64_FIXUPS, ATTR_KEY_X86_64_MODULE_LITERALS},
     frontend::module_op,
-    util::{cast_operation, darwin_symbol, get_bytes_attr, get_fixups_attr, identifier, module_body},
+    util::{
+        cast_operation, darwin_symbol, get_bytes_attr, get_fixups_attr, identifier, module_body,
+    },
 };
 use crate::ll::LinkageAttr;
 
@@ -35,8 +37,7 @@ pub fn x86_64_macho_lower(ctx: &mut Context, root: Ptr<Operation>) -> CrabbitRes
             continue;
         };
         let offset = text.len() as u64;
-        let encoded =
-            get_bytes_attr(op, ctx, ATTR_KEY_X86_64_ENCODED.as_ref()).unwrap_or_default();
+        let encoded = get_bytes_attr(op, ctx, ATTR_KEY_X86_64_ENCODED.as_ref()).unwrap_or_default();
         text.extend_from_slice(&encoded);
         if func.linkage(ctx) == LinkageAttr::External {
             symbols.push(Symbol {
@@ -99,12 +100,12 @@ mod tests {
     use crate::{
         context::Context,
         dialects::{
+            builtin::{self, op_interfaces::OneRegionInterface},
+            macho,
             x86_64::{
                 self,
                 op_interfaces::{BinaryFixup, FixupKind},
             },
-            builtin::{self, op_interfaces::OneRegionInterface},
-            macho,
         },
         ir::op::Op,
         linked_list::ContainsLinkedList,
@@ -128,7 +129,11 @@ mod tests {
         let mut ctx = context();
         let module = builtin::ops::ModuleOp::new(&mut ctx, "test".try_into().unwrap());
         let body = module.get_region(&ctx).deref(&ctx).get_head().unwrap();
-        let target = x86_64::ops::FuncOp::new(&mut ctx, "target".try_into().unwrap(), LinkageAttr::External);
+        let target = x86_64::ops::FuncOp::new(
+            &mut ctx,
+            "target".try_into().unwrap(),
+            LinkageAttr::External,
+        );
         target.get_operation().insert_at_back(body, &ctx);
         set_bytes_attr(
             target.get_operation(),
@@ -136,7 +141,8 @@ mod tests {
             ATTR_KEY_X86_64_ENCODED.as_ref(),
             vec![0x00, 0x00, 0x00, 0x00],
         );
-        let other = x86_64::ops::FuncOp::new(&mut ctx, "other".try_into().unwrap(), LinkageAttr::External);
+        let other =
+            x86_64::ops::FuncOp::new(&mut ctx, "other".try_into().unwrap(), LinkageAttr::External);
         other.get_operation().insert_at_back(body, &ctx);
         set_bytes_attr(
             other.get_operation(),

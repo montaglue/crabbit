@@ -106,8 +106,10 @@ fn build_backend(root: &Path, cargo: &str) -> PathBuf {
 }
 
 fn fixture_target_dir(root: &Path, fixture: &str, profile: FixtureProfile) -> PathBuf {
-    root.join("target")
-        .join(format!("crabbit-backend-tests-{fixture}-{}", profile.name()))
+    root.join("target").join(format!(
+        "crabbit-backend-tests-{fixture}-{}",
+        profile.name()
+    ))
 }
 
 fn clear_target_dir(target_dir: &Path, context: &str) {
@@ -711,7 +713,11 @@ fn mixed_kernel_binary_fixture(
         .expect("failed to build crabbit backend dylib");
     assert!(backend_status.success(), "crabbit backend build failed");
     let backend = backend_path(&root);
-    assert!(backend.exists(), "expected backend dylib at {}", backend.display());
+    assert!(
+        backend.exists(),
+        "expected backend dylib at {}",
+        backend.display()
+    );
 
     let manifest = fixture_manifest(&root, fixture);
     let target_dir = root.join("target").join(target_dir_name);
@@ -741,16 +747,26 @@ fn mixed_kernel_binary_fixture(
         command.arg("-Csave-temps");
     }
     let fixture_status = command.status().expect("failed to compile the fixture");
-    assert!(fixture_status.success(), "{fixture} did not compile with the crabbit dylib");
+    assert!(
+        fixture_status.success(),
+        "{fixture} did not compile with the crabbit dylib"
+    );
 
     let executable = target_dir
         .join("release")
         .join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
-    assert!(executable.exists(), "{fixture} did not produce executable {}", executable.display());
+    assert!(
+        executable.exists(),
+        "{fixture} did not produce executable {}",
+        executable.display()
+    );
     let run_output = Command::new(&executable)
         .output()
         .expect("failed to run the fixture executable");
-    assert!(run_output.status.success(), "{fixture} executable exited unsuccessfully");
+    assert!(
+        run_output.status.success(),
+        "{fixture} executable exited unsuccessfully"
+    );
     let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     assert!(
         stdout.contains("hello from crabbit"),
@@ -759,22 +775,33 @@ fn mixed_kernel_binary_fixture(
 
     let ptx = fs::read_to_string(&ptx_out).expect("CRABBIT_PTX_OUT was not written");
     for expected in expected_ptx {
-        assert!(ptx.contains(expected), "expected `{expected}` in the PTX of {fixture}:\n{ptx}");
+        assert!(
+            ptx.contains(expected),
+            "expected `{expected}` in the PTX of {fixture}:\n{ptx}"
+        );
     }
 
     let objects = object_files(&target_dir);
-    assert!(!objects.is_empty(), "{fixture} left no object file under {}", target_dir.display());
+    assert!(
+        !objects.is_empty(),
+        "{fixture} left no object file under {}",
+        target_dir.display()
+    );
     if let Ok(output) = Command::new("nm").args(&objects).output()
         && output.status.success()
     {
         let symbols = String::from_utf8_lossy(&output.stdout);
-        assert!(symbols.contains("main"), "expected main symbol in the host object, got:\n{symbols}");
+        assert!(
+            symbols.contains("main"),
+            "expected main symbol in the host object, got:\n{symbols}"
+        );
         // The kernel is never *defined* on the host. (rustc's own
         // `symbols.o` lists every exported symbol of the crate as an
         // undefined reference, the renamed `#[kernel]` included.)
         let defined_kernel = symbols.lines().any(|line| {
             let mut fields = line.split_whitespace();
-            let (Some(_addr), Some(kind), Some(name)) = (fields.next(), fields.next(), fields.next())
+            let (Some(_addr), Some(kind), Some(name)) =
+                (fields.next(), fields.next(), fields.next())
             else {
                 return false;
             };

@@ -13,6 +13,7 @@ use std::num::NonZero;
 use std::path::PathBuf;
 use std::process::Command;
 
+use pliron::printable::Printable;
 use pliron_ll::{
     context::{Context, Ptr},
     conversion::pass::{AnalysisManager, Pass},
@@ -26,9 +27,9 @@ use pliron_ll::{
         llvm::{
             attributes::{ICmpPredicateAttr, LinkageAttr},
             ops::{
-                AddOp, AddressOfOp, AndOp, AShrOp, BrOp, CondBrOp, FAddOp, FMulOp,
-                FPToSIOp, FuncOp, GepIndex, GetElementPtrOp, GlobalOp, ICmpOp, LoadOp,
-                LShrOp, MulOp, OrOp, ReturnOp, ShlOp, StoreOp, SubOp, XorOp,
+                AShrOp, AddOp, AddressOfOp, AndOp, BrOp, CondBrOp, FAddOp, FMulOp, FPToSIOp,
+                FuncOp, GepIndex, GetElementPtrOp, GlobalOp, ICmpOp, LShrOp, LoadOp, MulOp, OrOp,
+                ReturnOp, ShlOp, StoreOp, SubOp, XorOp,
             },
             types::FuncType,
         },
@@ -47,7 +48,6 @@ use pliron_llvm::op_interfaces::{
     BinArithOp as _, CastOpInterface as _, FloatBinArithOpWithFastMathFlags as _,
     IntBinArithOpWithOverflowFlag as _,
 };
-use pliron::printable::Printable;
 
 fn context() -> Context {
     let mut ctx = Context::new();
@@ -83,7 +83,13 @@ fn const_f32(ctx: &mut Context, block: Ptr<BasicBlock>, value: f32) -> Value {
     c.get_result(ctx)
 }
 
-fn data_global(ctx: &mut Context, body: Ptr<BasicBlock>, name: &str, bytes: Vec<u8>, mutable: bool) {
+fn data_global(
+    ctx: &mut Context,
+    body: Ptr<BasicBlock>,
+    name: &str,
+    bytes: Vec<u8>,
+    mutable: bool,
+) {
     let ty = i64_ty(ctx);
     let global = GlobalOp::new(ctx, name.try_into().unwrap(), ty);
     global.set_attr_llvm_global_linkage(ctx, LinkageAttr::ExternalLinkage);
@@ -154,7 +160,10 @@ fn vectorize_expecting(ctx: &mut Context, module: builtin::ops::ModuleOp, marker
         .run(module.get_operation(), ctx, &mut AnalysisManager::default())
         .unwrap();
     let text = format!("{}", module.get_operation().disp(ctx));
-    assert!(text.contains(marker), "vectorizer did not fire ({marker}):\n{text}");
+    assert!(
+        text.contains(marker),
+        "vectorizer did not fire ({marker}):\n{text}"
+    );
     text
 }
 
@@ -494,12 +503,16 @@ fn vectorized_slot_loaded_byte_gep_matches_scalar_semantics() {
 
     let i64t = i64_ty(&mut ctx);
     let i32t = i32_ty(&mut ctx);
-    let u8t: TypeHandle =
-        IntegerType::get(&mut ctx, 8, Signedness::Unsigned).into();
-    let ptr_ty: TypeHandle =
-        pliron_llvm::types::PointerType::get(&mut ctx, 0).into();
-    let fat_ty: TypeHandle =
-        pliron_llvm::types::StructType::get_unnamed(&mut ctx, (vec![ptr_ty, i64t], pliron_llvm::types::StructLayout::Unpacked)).into();
+    let u8t: TypeHandle = IntegerType::get(&mut ctx, 8, Signedness::Unsigned).into();
+    let ptr_ty: TypeHandle = pliron_llvm::types::PointerType::get(&mut ctx, 0).into();
+    let fat_ty: TypeHandle = pliron_llvm::types::StructType::get_unnamed(
+        &mut ctx,
+        (
+            vec![ptr_ty, i64t],
+            pliron_llvm::types::StructLayout::Unpacked,
+        ),
+    )
+    .into();
     let func_ty = FuncType::get(&mut ctx, i64t, vec![], false);
     let func = FuncOp::new(&mut ctx, "main".try_into().unwrap(), func_ty);
     func.set_attr_llvm_function_linkage(&ctx, LinkageAttr::ExternalLinkage);

@@ -21,17 +21,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     context::{Context, Ptr},
-    dialects::{
-        llvm::{
-            attributes::{FCmpPredicateAttr, FastmathFlags, FastmathFlagsAttr, ICmpPredicateAttr},
-            op_interfaces::IsDeclaration,
-            ops::{
-                AShrOp, AddOp, AndOp, BitcastOp, ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp,
-                FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp, FRemOp, FSubOp, GetElementPtrOp,
-                GepIndex, ICmpOp, InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp,
-                PtrToIntOp, SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp,
-                TruncOp, UDivOp, UIToFPOp, URemOp, XorOp, ZExtOp,
-            },
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
+    dialects::llvm::{
+        attributes::{FCmpPredicateAttr, FastmathFlags, FastmathFlagsAttr, ICmpPredicateAttr},
+        op_interfaces::IsDeclaration,
+        ops::{
+            AShrOp, AddOp, AndOp, BitcastOp, ExtractValueOp, FAddOp, FCmpOp, FDivOp, FMulOp,
+            FNegOp, FPExtOp, FPToSIOp, FPToUIOp, FPTruncOp, FRemOp, FSubOp, GepIndex,
+            GetElementPtrOp, ICmpOp, InsertValueOp, IntToPtrOp, LShrOp, LoadOp, MulOp, OrOp,
+            PtrToIntOp, SDivOp, SExtOp, SIToFPOp, SRemOp, SelectOp, ShlOp, StoreOp, SubOp, TruncOp,
+            UDivOp, UIToFPOp, URemOp, XorOp, ZExtOp,
         },
     },
     ir::{
@@ -43,15 +42,14 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
 };
 
-use crate::passes::aarch64::opmap;
 use super::{
     analysis::{dominator_tree, memory_benign_op_ids},
     inline::collect_functions,
     midend_gate::midend_disabled,
 };
+use crate::passes::aarch64::opmap;
 use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 
 const MAX_ITERATIONS: usize = 8;
@@ -625,8 +623,6 @@ fn forward_extracted_fields(ctx: &mut Context, load: Ptr<Operation>, stored: Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pliron::builtin::op_interfaces::{OneResultInterface as _};
-    use pliron_llvm::op_interfaces::{CastOpInterface as _, IntBinArithOpWithOverflowFlag as _};
     use crate::{
         dialects::{
             builtin::{
@@ -644,6 +640,8 @@ mod tests {
         printable::Printable,
         utils::apint::APInt,
     };
+    use pliron::builtin::op_interfaces::OneResultInterface as _;
+    use pliron_llvm::op_interfaces::{CastOpInterface as _, IntBinArithOpWithOverflowFlag as _};
     use std::num::NonZero;
 
     fn int_ty(ctx: &mut Context, width: u32) -> TypedHandle<IntegerType> {
@@ -704,7 +702,10 @@ mod tests {
 
         // nsw add dominating a plain wrapping add: MUST NOT merge (the
         // wrapping op would inherit poison-on-overflow semantics).
-        let nsw = IntegerOverflowFlagsAttr { nsw: true, nuw: false };
+        let nsw = IntegerOverflowFlagsAttr {
+            nsw: true,
+            nuw: false,
+        };
         let add_nsw = AddOp::new_with_overflow_flag(&mut ctx, a, a, nsw.clone());
         add_nsw.get_operation().insert_at_back(entry, &ctx);
         let add_plain = AddOp::new_with_overflow_flag(&mut ctx, a, a, Default::default());
@@ -929,10 +930,22 @@ mod tests {
         let i64_signed: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signed).into();
         let field1_unsigned: TypeHandle =
             IntegerType::get(ctx, store_field1_width, Signedness::Unsigned).into();
-        let slot_struct_ty: TypeHandle =
-            StructType::get_unnamed(ctx, (vec![ptr_ty, i64_signed], crate::dialects::llvm::types::StructLayout::Unpacked)).into();
-        let stored_struct_ty: TypeHandle =
-            StructType::get_unnamed(ctx, (vec![ptr_ty, field1_unsigned], crate::dialects::llvm::types::StructLayout::Unpacked)).into();
+        let slot_struct_ty: TypeHandle = StructType::get_unnamed(
+            ctx,
+            (
+                vec![ptr_ty, i64_signed],
+                crate::dialects::llvm::types::StructLayout::Unpacked,
+            ),
+        )
+        .into();
+        let stored_struct_ty: TypeHandle = StructType::get_unnamed(
+            ctx,
+            (
+                vec![ptr_ty, field1_unsigned],
+                crate::dialects::llvm::types::StructLayout::Unpacked,
+            ),
+        )
+        .into();
 
         let i64_typed = int_ty(ctx, 64);
         let one = ConstantOp::new(
@@ -990,8 +1003,7 @@ mod tests {
         let load = LoadOp::new(ctx, s.slot, s.slot_struct_ty);
         load.get_operation().insert_at_back(s.entry, ctx);
         let load_v = load.get_result(ctx);
-        let extract = ExtractValueOp::new(ctx, load_v, vec![index])
-            .expect("field index in range");
+        let extract = ExtractValueOp::new(ctx, load_v, vec![index]).expect("field index in range");
         extract.get_operation().insert_at_back(s.entry, ctx);
         let extract_v = extract.get_operation().deref(ctx).get_result(0);
         if index == 0 {
@@ -1011,7 +1023,11 @@ mod tests {
         // and the load must die.
         let mut ctx = Context::new();
         let s = agg_scaffold(&mut ctx, 64);
-        assert!(layout_compatible(&ctx, s.stored_struct_ty, s.slot_struct_ty));
+        assert!(layout_compatible(
+            &ctx,
+            s.stored_struct_ty,
+            s.slot_struct_ty
+        ));
         append_load_extract(&mut ctx, &s, 0);
         let text = run_gvn(&mut ctx, s.func);
         assert!(!text.contains("llvm.extract_value"), "{text}");
@@ -1024,7 +1040,11 @@ mod tests {
         // twins are NOT layout-compatible and nothing may forward.
         let mut ctx = Context::new();
         let s = agg_scaffold(&mut ctx, 32);
-        assert!(!layout_compatible(&ctx, s.stored_struct_ty, s.slot_struct_ty));
+        assert!(!layout_compatible(
+            &ctx,
+            s.stored_struct_ty,
+            s.slot_struct_ty
+        ));
         append_load_extract(&mut ctx, &s, 0);
         let text = run_gvn(&mut ctx, s.func);
         assert!(text.contains("llvm.extract_value"), "{text}");

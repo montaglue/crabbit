@@ -24,11 +24,11 @@ use pliron::builtin::op_interfaces::AtMostOneRegionInterface as _;
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
     dialects::builtin::op_interfaces::OneRegionInterface,
     dialects::llvm::ops::FuncOp as LlvmFuncOp,
     ir::{basic_block::BasicBlock, operation::Operation},
     linked_list::{ContainsLinkedList, LinkedList as _},
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed},
 };
 
 use super::blockmap::blockmap_enabled;
@@ -114,10 +114,7 @@ impl Pass for Aarch64OpIdPass {
 /// RA-boundary id assignment (see [Aarch64OpIdPass]). Public for tests.
 /// When no op carries a mid-end id (mid-end stamping was off — the
 /// round-1 configuration), this degrades to exactly [assign_op_ids].
-pub fn assign_boundary_ids(
-    ctx: &mut Context,
-    root: Ptr<Operation>,
-) -> pliron::result::Result<()> {
+pub fn assign_boundary_ids(ctx: &mut Context, root: Ptr<Operation>) -> pliron::result::Result<()> {
     let module = module_op(ctx, root)?;
     let body = module.get_region(ctx).deref(ctx).get_head().unwrap();
     let funcs: Vec<_> = body.deref(ctx).iter(ctx).collect();
@@ -163,8 +160,7 @@ pub fn assign_boundary_ids(
         for &block in &blocks {
             let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
             for op in ops {
-                let keep = op_id(ctx, op)
-                    .is_some_and(|_| inlined_from(ctx, op).is_none());
+                let keep = op_id(ctx, op).is_some_and(|_| inlined_from(ctx, op).is_none());
                 if keep {
                     continue;
                 }
@@ -233,9 +229,10 @@ pub fn set_derived_from_many(ctx: &Context, op: Ptr<Operation>, mut from: Vec<i6
         set_derived_from(ctx, op, from[0]);
         return;
     }
-    op.deref_mut(ctx)
-        .attributes
-        .set(ATTR_KEY_DERIVED_FROM_MANY.clone(), DerivedFromManyAttr(from));
+    op.deref_mut(ctx).attributes.set(
+        ATTR_KEY_DERIVED_FROM_MANY.clone(),
+        DerivedFromManyAttr(from),
+    );
 }
 
 /// The call-site id this op was inlined under, if any.
@@ -484,12 +481,7 @@ impl IselStamper {
 
     /// Close the previous source op's bracket and open one for the op with
     /// id `source`, whose lowering will append to `insert_block`.
-    pub fn begin(
-        &mut self,
-        ctx: &Context,
-        insert_block: Ptr<BasicBlock>,
-        source: Option<u32>,
-    ) {
+    pub fn begin(&mut self, ctx: &Context, insert_block: Ptr<BasicBlock>, source: Option<u32>) {
         if !self.enabled {
             return;
         }

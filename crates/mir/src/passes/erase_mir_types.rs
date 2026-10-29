@@ -20,12 +20,12 @@ use std::collections::HashMap;
 use dialect_mir::types::MirPtrType;
 use pliron::{
     basic_block::BasicBlock,
+    builtin::{op_interfaces::CallOpInterface as _, type_interfaces::FunctionTypeInterface as _},
     context::{Context, Ptr},
     linked_list::ContainsLinkedList as _,
     operation::Operation,
-    builtin::{op_interfaces::CallOpInterface as _, type_interfaces::FunctionTypeInterface as _},
-    r#type::{TypeHandle, Typed as _},
     result::Result,
+    r#type::{TypeHandle, Typed as _},
 };
 use pliron_ll::conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged};
 use pliron_llvm::{
@@ -51,7 +51,11 @@ impl Pass for EraseMirTypesPass {
     ) -> Result<PassResult> {
         let mut eraser = Eraser::default();
         let rewritten = eraser.visit_op(ctx, root);
-        Ok(if rewritten > 0 { changed() } else { unchanged() })
+        Ok(if rewritten > 0 {
+            changed()
+        } else {
+            unchanged()
+        })
     }
 }
 
@@ -68,7 +72,9 @@ impl Eraser {
         let mut rewritten = 0;
         let results: Vec<pliron::value::Value> = {
             let op_ref = op.deref(ctx);
-            (0..op_ref.get_num_results()).map(|i| op_ref.get_result(i)).collect()
+            (0..op_ref.get_num_results())
+                .map(|i| op_ref.get_result(i))
+                .collect()
         };
         for result in results {
             rewritten += self.retype(ctx, result);
@@ -125,7 +131,11 @@ impl Eraser {
         enum Shape {
             MirPtr,
             Array(TypeHandle, u64),
-            Struct(Option<pliron::identifier::Identifier>, Vec<TypeHandle>, pliron_llvm::types::StructLayout),
+            Struct(
+                Option<pliron::identifier::Identifier>,
+                Vec<TypeHandle>,
+                pliron_llvm::types::StructLayout,
+            ),
             Func(TypeHandle, Vec<TypeHandle>, bool),
             Other,
         }
@@ -142,7 +152,11 @@ impl Eraser {
                     Shape::Struct(st.name(), st.fields().collect(), st.layout())
                 }
             } else if let Some(func) = ty_ref.downcast_ref::<FuncType>() {
-                Shape::Func(func.result_type(), func.arg_types().to_vec(), func.is_var_arg())
+                Shape::Func(
+                    func.result_type(),
+                    func.arg_types().to_vec(),
+                    func.is_var_arg(),
+                )
             } else {
                 Shape::Other
             }
@@ -176,7 +190,8 @@ impl Eraser {
             }
             Shape::Func(result, args, variadic) => {
                 let erased_result = self.erase(ctx, result);
-                let erased_args: Vec<TypeHandle> = args.iter().map(|a| self.erase(ctx, *a)).collect();
+                let erased_args: Vec<TypeHandle> =
+                    args.iter().map(|a| self.erase(ctx, *a)).collect();
                 if erased_result == result && erased_args == args {
                     ty
                 } else {

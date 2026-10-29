@@ -24,6 +24,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     context::{Context, Ptr},
+    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
     dialects::llvm::{
         op_interfaces::IsDeclaration,
         ops::{AllocaOp, BitcastOp, GetElementPtrOp, LoadOp, StoreOp},
@@ -35,7 +36,6 @@ use crate::{
         value::Value,
     },
     linked_list::ContainsLinkedList,
-    conversion::pass::{AnalysisManager, Pass, PassResult, changed, unchanged},
 };
 
 use super::{
@@ -319,7 +319,6 @@ fn gen_reads(upward: &mut BitSet, kill: &BitSet, reads: &BitSet, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pliron::builtin::op_interfaces::OneResultInterface as _;
     use crate::{
         dialects::{
             builtin::{
@@ -333,10 +332,14 @@ mod tests {
                 types::{FuncType, PointerType},
             },
         },
-        ir::{basic_block::BasicBlock, r#type::{TypeHandle, TypedHandle}},
+        ir::{
+            basic_block::BasicBlock,
+            r#type::{TypeHandle, TypedHandle},
+        },
         printable::Printable,
         utils::apint::APInt,
     };
+    use pliron::builtin::op_interfaces::OneResultInterface as _;
     use std::num::NonZero;
 
     fn int_ty(ctx: &mut Context, width: u32) -> TypedHandle<IntegerType> {
@@ -462,9 +465,7 @@ mod tests {
         let sink_fn = FuncType::get(&mut ctx, i64_ty, vec![], false);
         let call = CallOp::new(
             &mut ctx,
-            pliron::builtin::op_interfaces::CallOpCallable::Direct(
-                "opaque".try_into().unwrap(),
-            ),
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("opaque".try_into().unwrap()),
             sink_fn,
             vec![slot],
         );
@@ -491,9 +492,7 @@ mod tests {
         let sink_fn = FuncType::get(&mut ctx, i64_ty, vec![], false);
         let call = CallOp::new(
             &mut ctx,
-            pliron::builtin::op_interfaces::CallOpCallable::Direct(
-                "opaque".try_into().unwrap(),
-            ),
+            pliron::builtin::op_interfaces::CallOpCallable::Direct("opaque".try_into().unwrap()),
             sink_fn,
             vec![],
         );

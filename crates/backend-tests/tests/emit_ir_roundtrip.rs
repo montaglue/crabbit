@@ -115,10 +115,7 @@ fn roundtrip_dir(dir: &Path) -> Vec<String> {
                     ));
                 }
             }
-            Err(e) => failures.push(format!(
-                "{}: REPRINT DOES NOT REPARSE: {e}",
-                path.display()
-            )),
+            Err(e) => failures.push(format!("{}: REPRINT DOES NOT REPARSE: {e}", path.display())),
         }
     }
     assert!(checked > 0, "no .plir emitted into {}", dir.display());
@@ -236,7 +233,11 @@ fn compile_with_emit(
         .env("CARGO_TARGET_DIR", target_dir)
         .env("CRABBIT_EMIT_IR", emit_dir);
     let status = cmd.status().expect("compile fixture");
-    assert!(status.success(), "fixture {} failed to compile", manifest.display());
+    assert!(
+        status.success(),
+        "fixture {} failed to compile",
+        manifest.display()
+    );
 }
 
 #[test]

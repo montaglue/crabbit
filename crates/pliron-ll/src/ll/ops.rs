@@ -132,11 +132,10 @@ impl FuncAddrOp {
             0,
         );
         let func_addr = FuncAddrOp { op };
-        func_addr
-            .get_operation()
-            .deref_mut(ctx)
-            .attributes
-            .set(ATTR_KEY_LL_FUNC_ADDR_SYMBOL.clone(), IdentifierAttr::new(symbol));
+        func_addr.get_operation().deref_mut(ctx).attributes.set(
+            ATTR_KEY_LL_FUNC_ADDR_SYMBOL.clone(),
+            IdentifierAttr::new(symbol),
+        );
         func_addr
     }
 
@@ -160,7 +159,12 @@ impl Printable for FuncAddrOp {
         f: &mut core::fmt::Formatter<'_>,
     ) -> core::fmt::Result {
         self.get_result(ctx).fmt(ctx, state, f)?;
-        write!(f, " = {} @{} : ", self.get_opid().disp(ctx), self.symbol(ctx))?;
+        write!(
+            f,
+            " = {} @{} : ",
+            self.get_opid().disp(ctx),
+            self.symbol(ctx)
+        )?;
         self.get_result(ctx).get_type(ctx).fmt(ctx, state, f)
     }
 }
@@ -476,8 +480,8 @@ impl VReduceOp {
     /// Panics if `vec`'s type is not a fixed vector type.
     pub fn new(ctx: &mut Context, kind: VReduceKindAttr, vec: Value) -> Self {
         let vec_ty = vec.get_type(ctx);
-        let (elem_ty, _) = vector_type_of(ctx, vec_ty)
-            .expect("ll.vreduce operand must have a fixed vector type");
+        let (elem_ty, _) =
+            vector_type_of(ctx, vec_ty).expect("ll.vreduce operand must have a fixed vector type");
         let op = Operation::new(
             ctx,
             Self::get_concrete_op_info(),
@@ -540,7 +544,7 @@ impl Parsable for VReduceOp {
 mod tests {
     use super::*;
     use pliron::{
-        builtin::types::{FP32Type, Signedness, IntegerType},
+        builtin::types::{FP32Type, IntegerType, Signedness},
         location,
         parsable::{self, state_stream_from_iterator},
     };
@@ -625,10 +629,8 @@ mod tests {
         let f32_ty: TypeHandle = FP32Type::get(&mut ctx).into();
         let i32_ty: TypeHandle = IntegerType::get(&mut ctx, 32, Signedness::Signless).into();
         let ptr_ty: TypeHandle = PointerType::get(&mut ctx, 0).into();
-        let f32x4: TypeHandle =
-            VectorType::get(&mut ctx, f32_ty, 4, VectorTypeKind::Fixed).into();
-        let i32x4: TypeHandle =
-            VectorType::get(&mut ctx, i32_ty, 4, VectorTypeKind::Fixed).into();
+        let f32x4: TypeHandle = VectorType::get(&mut ctx, f32_ty, 4, VectorTypeKind::Fixed).into();
+        let i32x4: TypeHandle = VectorType::get(&mut ctx, i32_ty, 4, VectorTypeKind::Fixed).into();
         let fn_ty = FuncType::get(&mut ctx, f32_ty, vec![ptr_ty, f32_ty, i32_ty], false);
         let func = FuncOp::new(&mut ctx, "vec".try_into().unwrap(), fn_ty);
         func.set_attr_llvm_function_linkage(&ctx, LlvmLinkageAttr::ExternalLinkage);

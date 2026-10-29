@@ -7,10 +7,19 @@ fn abi_field_collection_flattens_simple_structs() {
     let ptr_ty: TypeHandle = llvm::types::PointerType::get(&mut ctx, 0).into();
     let i32_ty: TypeHandle = IntegerType::get(&mut ctx, 32, Signedness::Signed).into();
     let i64_ty: TypeHandle = IntegerType::get(&mut ctx, 64, Signedness::Unsigned).into();
-    let nested_ty: TypeHandle =
-        llvm::types::StructType::get_unnamed(&mut ctx, (vec![i32_ty, ptr_ty], llvm::types::StructLayout::Unpacked)).into();
-    let aggregate_ty: TypeHandle =
-        llvm::types::StructType::get_unnamed(&mut ctx, (vec![ptr_ty, i64_ty, nested_ty], llvm::types::StructLayout::Unpacked)).into();
+    let nested_ty: TypeHandle = llvm::types::StructType::get_unnamed(
+        &mut ctx,
+        (vec![i32_ty, ptr_ty], llvm::types::StructLayout::Unpacked),
+    )
+    .into();
+    let aggregate_ty: TypeHandle = llvm::types::StructType::get_unnamed(
+        &mut ctx,
+        (
+            vec![ptr_ty, i64_ty, nested_ty],
+            llvm::types::StructLayout::Unpacked,
+        ),
+    )
+    .into();
 
     let mut fields = Vec::new();
     collect_simple_abi_fields(&ctx, aggregate_ty, Vec::new(), &mut fields).unwrap();

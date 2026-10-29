@@ -24,10 +24,9 @@ pub mod dialects {
 }
 // ---- compatibility re-exports over the pliron core (cleanup pending) ----
 pub use pliron::{
-    attribute, basic_block, builtin, common_traits, context, dialect,
-    graph, identifier, irbuild, irfmt, linked_list, location, op, operation, opts,
-    parsable, printable, region, storage_uniquer, symbol_table, r#type,
-    uniqued_any, utils, value,
+    attribute, basic_block, builtin, common_traits, context, dialect, graph, identifier, irbuild,
+    irfmt, linked_list, location, op, operation, opts, parsable, printable, region,
+    storage_uniquer, symbol_table, r#type, uniqued_any, utils, value,
 };
 pub mod result {
     pub use pliron::result::*;
@@ -35,14 +34,13 @@ pub mod result {
     pub type CrabbitResult<T> = pliron::result::Result<T>;
 }
 pub mod ir {
+    pub use pliron::r#type;
     pub use pliron::{
         attribute, basic_block, dialect, irfmt, location, op, operation, region, value,
     };
-    pub use pliron::r#type;
 }
 pub use pliron::{
-    arg_err, arg_err_noloc, arg_error, arg_error_noloc, create_err, create_error,
-    dict_key, input_err, input_err_noloc,
-    input_error, input_error_noloc, type_to_trait, verify_err, verify_err_noloc,
-    verify_error, verify_error_noloc,
+    arg_err, arg_err_noloc, arg_error, arg_error_noloc, create_err, create_error, dict_key,
+    input_err, input_err_noloc, input_error, input_error_noloc, type_to_trait, verify_err,
+    verify_err_noloc, verify_error, verify_error_noloc,
 };

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use crate::r#type::TypeHandle;
 use super::isel_memory_abi::adapt_value_to_type;
+use crate::r#type::TypeHandle;
+use std::collections::HashMap;
 
 use crate::{
     context::{Context, Ptr},
@@ -61,13 +61,11 @@ pub(super) fn emit_block_arg_copies(
 ) -> CrabbitResult<()> {
     let dest_args: Vec<_> = dest.deref(ctx).arguments().collect();
     if dest_args.len() != args.len() {
-        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(
-            format!(
-                "branch operand count {} does not match target block argument count {}",
-                args.len(),
-                dest_args.len()
-            )
-        )));
+        return Err(input_error_noloc!(X86_64DarwinErr::UnsupportedOp(format!(
+            "branch operand count {} does not match target block argument count {}",
+            args.len(),
+            dest_args.len()
+        ))));
     }
 
     // The copies are conceptually parallel: on a backedge, a source may be
@@ -106,9 +104,9 @@ pub(super) fn emit_block_arg_copies(
     }
 
     while !pending.is_empty() {
-        let free = pending.iter().position(|(dst, _)| {
-            !pending.iter().any(|(_, src)| *src == Some(*dst))
-        });
+        let free = pending
+            .iter()
+            .position(|(dst, _)| !pending.iter().any(|(_, src)| *src == Some(*dst)));
         if let Some(free) = free {
             let (dst, src) = pending.remove(free);
             match src {

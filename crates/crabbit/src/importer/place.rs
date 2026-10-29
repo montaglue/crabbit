@@ -356,7 +356,8 @@ pub(super) fn place_addr<'tcx>(
                         let fat_ty = addr.get_type(ctx);
                         let ptr_ty = ptr_ty(ctx);
                         let usize_ty: TypeHandle = usize_ty(ctx).into();
-                        let data = mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
+                        let data =
+                            mir_dialect::ops::ExtractValueOp::new(ctx, addr, vec![0], ptr_ty);
                         data.get_operation().insert_at_back(insert_block, ctx);
                         let mut data = data.get_result(ctx);
                         if from != 0 {
@@ -400,9 +401,7 @@ pub(super) fn place_addr<'tcx>(
                         // The place stays the same slice type.
                     }
                     other => {
-                        return Err(format!(
-                            "unsupported MIR Subslice base type: {other:?}"
-                        ));
+                        return Err(format!("unsupported MIR Subslice base type: {other:?}"));
                     }
                 }
                 current_variant = None;
@@ -485,7 +484,10 @@ pub(super) fn indexed_elem_ty<'tcx>(ty: Ty<'tcx>) -> Result<Ty<'tcx>, String> {
     }
 }
 
-pub(super) fn aggregate_is_union<'tcx>(tcx: TyCtxt<'tcx>, kind: &rustc_mir::AggregateKind<'tcx>) -> bool {
+pub(super) fn aggregate_is_union<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    kind: &rustc_mir::AggregateKind<'tcx>,
+) -> bool {
     match kind {
         rustc_mir::AggregateKind::Adt(def_id, _, _, _, _) => tcx.adt_def(*def_id).is_union(),
         _ => false,

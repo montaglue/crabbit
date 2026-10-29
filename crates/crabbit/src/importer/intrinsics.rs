@@ -34,10 +34,23 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
     {
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
-            values.push(import_operand(tcx, ctx, state, insert_block, body, &arg.node)?);
+            values.push(import_operand(
+                tcx,
+                ctx,
+                state,
+                insert_block,
+                body,
+                &arg.node,
+            )?);
         }
         let result_ty = values.first().map(|v| v.get_type(ctx));
-        let value = device_placeholder_call(ctx, insert_block, dialect_mir_placeholder(suffix), values, result_ty);
+        let value = device_placeholder_call(
+            ctx,
+            insert_block,
+            dialect_mir_placeholder(suffix),
+            values,
+            result_ty,
+        );
         if let Some(value) = value {
             store_place(tcx, ctx, state, insert_block, body, destination, value)?;
         }
@@ -53,7 +66,15 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let bool_ty = bool_immediate_ty(ctx);
             let value = integer_constant(ctx, bool_ty, 0)?;
             value.get_operation().insert_at_back(insert_block, ctx);
-            store_place(tcx, ctx, state, insert_block, body, destination, value.get_result(ctx))?;
+            store_place(
+                tcx,
+                ctx,
+                state,
+                insert_block,
+                body,
+                destination,
+                value.get_result(ctx),
+            )?;
             Ok(true)
         }
         "black_box" => {
@@ -159,8 +180,9 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                     "unsupported atomic_xchg operand size: {size} bytes"
                 ));
             }
-            let helper: crate::identifier::Identifier =
-                format!("__aarch64_swp{size}_acq_rel").try_into().expect("size digits are legal identifier characters");
+            let helper: crate::identifier::Identifier = format!("__aarch64_swp{size}_acq_rel")
+                .try_into()
+                .expect("size digits are legal identifier characters");
             let ptr_ty = ptr_ty(ctx);
             declare_external_function(
                 ctx,
@@ -215,7 +237,10 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             }
             let is_cas = name.starts_with("atomic_cxchg");
             if args.len() != if is_cas { 3 } else { 2 } {
-                return Err(format!("unsupported {name} intrinsic arity: {}", args.len()));
+                return Err(format!(
+                    "unsupported {name} intrinsic arity: {}",
+                    args.len()
+                ));
             }
             let value_ty = mono_ty(tcx, state, instance.args.type_at(0));
             let Some(storage_ty) = convert_storage_ty(tcx, ctx, value_ty)? else {
@@ -273,8 +298,12 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                 undef.get_operation().insert_at_back(insert_block, ctx);
                 let old_index = converted_field_index(tcx, pair_ty, 0)?;
                 let ok_index = converted_field_index(tcx, pair_ty, 1)?;
-                let with_old =
-                    mir_dialect::ops::InsertValueOp::new(ctx, old, undef.get_result(ctx), vec![old_index]);
+                let with_old = mir_dialect::ops::InsertValueOp::new(
+                    ctx,
+                    old,
+                    undef.get_result(ctx),
+                    vec![old_index],
+                );
                 with_old.get_operation().insert_at_back(insert_block, ctx);
                 let pair = mir_dialect::ops::InsertValueOp::new(
                     ctx,
@@ -283,7 +312,15 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                     vec![ok_index],
                 );
                 pair.get_operation().insert_at_back(insert_block, ctx);
-                store_place(tcx, ctx, state, insert_block, body, destination, pair.get_result(ctx))?;
+                store_place(
+                    tcx,
+                    ctx,
+                    state,
+                    insert_block,
+                    body,
+                    destination,
+                    pair.get_result(ctx),
+                )?;
                 return Ok(true);
             }
             let value = operand(ctx, 1)?;
@@ -342,7 +379,8 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let val_ty: TypeHandle = IntegerType::get(ctx, 32, Signedness::Signed).into();
             let val = cast_value_to_type(ctx, insert_block, val, val_ty);
 
-            let memset: crate::identifier::Identifier = "memset".try_into().expect("static identifier literal");
+            let memset: crate::identifier::Identifier =
+                "memset".try_into().expect("static identifier literal");
             let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
@@ -551,13 +589,14 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             if width == 128 {
                 // Same modular-shift construction as the u64 path below,
                 // carried out at u128 (dynamic i128 shifts exist in isel).
-                let u128_ty: TypeHandle =
-                    IntegerType::get(ctx, 128, Signedness::Unsigned).into();
+                let u128_ty: TypeHandle = IntegerType::get(ctx, 128, Signedness::Unsigned).into();
                 let x = cast_value_to_type(ctx, insert_block, input, u128_ty);
                 let shift = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
                 let shift = cast_value_to_type(ctx, insert_block, shift, u128_ty);
                 let modulus_mask = integer_constant(ctx, u128_ty, 127)?;
-                modulus_mask.get_operation().insert_at_back(insert_block, ctx);
+                modulus_mask
+                    .get_operation()
+                    .insert_at_back(insert_block, ctx);
                 let modulus_mask = modulus_mask.get_result(ctx);
                 let k = emit_op(
                     mir_dialect::ops::BitAndOp::new(ctx, shift, modulus_mask).get_operation(),
@@ -565,7 +604,9 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                     insert_block,
                 );
                 let width_value = integer_constant(ctx, u128_ty, 128)?;
-                width_value.get_operation().insert_at_back(insert_block, ctx);
+                width_value
+                    .get_operation()
+                    .insert_at_back(insert_block, ctx);
                 let complement = emit_op(
                     mir_dialect::ops::SubOp::new(ctx, width_value.get_result(ctx), k)
                         .get_operation(),
@@ -687,10 +728,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
         // `copy_nonoverlapping` does not (memcpy).
         "copy" | "copy_nonoverlapping" => {
             if args.len() != 3 {
-                return Err(format!(
-                    "unsupported copy intrinsic arity: {}",
-                    args.len()
-                ));
+                return Err(format!("unsupported copy intrinsic arity: {}", args.len()));
             }
             let src = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
             let dst = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
@@ -741,7 +779,8 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let temp = mir_dialect::ops::AllocaOp::new(ctx, temp_ty);
             temp.get_operation().insert_at_back(insert_block, ctx);
             let temp_ptr = temp.get_result(ctx);
-            let memcpy: crate::identifier::Identifier = "memcpy".try_into().expect("static identifier literal");
+            let memcpy: crate::identifier::Identifier =
+                "memcpy".try_into().expect("static identifier literal");
             let ptr_ty = ptr_ty(ctx);
             let usize_ty: TypeHandle = usize_ty(ctx).into();
             declare_external_function(
@@ -841,10 +880,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             require_8_byte_vector(tcx, "simd_extract", vector_ty)?;
             // Only the single-lane `uint64x1_t -> u64` form: the lane index
             // can only be zero, so the extract is the bit pattern itself.
-            let lane_size = layout_size_of_ty(
-                tcx,
-                mono_ty(tcx, state, instance.args.type_at(1)),
-            )?;
+            let lane_size = layout_size_of_ty(tcx, mono_ty(tcx, state, instance.args.type_at(1)))?;
             if lane_size != 8 {
                 return Err(format!(
                     "unsupported simd_extract lane size: {lane_size} bytes (expected a \
@@ -1006,13 +1042,8 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             let lhs = import_operand(tcx, ctx, state, insert_block, body, &args[0].node)?;
             let rhs = import_operand(tcx, ctx, state, insert_block, body, &args[1].node)?;
             if !is_unsigned_integer_value(ctx, lhs) {
-                let result = lower_signed_saturating(
-                    ctx,
-                    insert_block,
-                    name == "saturating_add",
-                    lhs,
-                    rhs,
-                )?;
+                let result =
+                    lower_signed_saturating(ctx, insert_block, name == "saturating_add", lhs, rhs)?;
                 store_place(tcx, ctx, state, insert_block, body, destination, result)?;
                 return Ok(true);
             }
@@ -1028,8 +1059,8 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
                 let overflow = cast_value_to_type(ctx, insert_block, overflow, int_ty);
                 let zero = integer_constant(ctx, int_ty, 0)?;
                 zero.get_operation().insert_at_back(insert_block, ctx);
-                let mask =
-                    mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), overflow).get_operation();
+                let mask = mir_dialect::ops::SubOp::new(ctx, zero.get_result(ctx), overflow)
+                    .get_operation();
                 mask.insert_at_back(insert_block, ctx);
                 let mask = mask.deref(ctx).get_result(0);
                 let saturated = mir_dialect::ops::BitOrOp::new(ctx, sum, mask).get_operation();
@@ -1070,14 +1101,7 @@ pub(super) fn lower_known_intrinsic_call<'tcx>(
             // `exact_div` is division with UB on a non-zero remainder (or
             // overflow), so plain division is a valid lowering.
             let result = if is_128_bit_integer_value(ctx, lhs) {
-                lower_i128_divrem(
-                    ctx,
-                    state.module_body,
-                    insert_block,
-                    BinOp::Div,
-                    lhs,
-                    rhs,
-                )?
+                lower_i128_divrem(ctx, state.module_body, insert_block, BinOp::Div, lhs, rhs)?
             } else {
                 emit_op(
                     mir_dialect::ops::DivOp::new(ctx, lhs, rhs).get_operation(),
@@ -1264,19 +1288,52 @@ pub(super) fn float_math_intrinsic(name: &str) -> Option<FloatMathLowering> {
         "maxnum" | "maximum_number_nsz" => Inline("maxnum"),
         "minimum" => Inline("minimum"),
         "maximum" => Inline("maximum"),
-        "exp" => Libcall { f32_symbol: "expf", f64_symbol: "exp" },
-        "exp2" => Libcall { f32_symbol: "exp2f", f64_symbol: "exp2" },
-        "log" => Libcall { f32_symbol: "logf", f64_symbol: "log" },
-        "log2" => Libcall { f32_symbol: "log2f", f64_symbol: "log2" },
-        "log10" => Libcall { f32_symbol: "log10f", f64_symbol: "log10" },
-        "sin" => Libcall { f32_symbol: "sinf", f64_symbol: "sin" },
-        "cos" => Libcall { f32_symbol: "cosf", f64_symbol: "cos" },
-        "pow" => Libcall { f32_symbol: "powf", f64_symbol: "pow" },
-        "fma" | "fmuladd" => Libcall { f32_symbol: "fmaf", f64_symbol: "fma" },
-        "copysign" => Libcall { f32_symbol: "copysignf", f64_symbol: "copysign" },
+        "exp" => Libcall {
+            f32_symbol: "expf",
+            f64_symbol: "exp",
+        },
+        "exp2" => Libcall {
+            f32_symbol: "exp2f",
+            f64_symbol: "exp2",
+        },
+        "log" => Libcall {
+            f32_symbol: "logf",
+            f64_symbol: "log",
+        },
+        "log2" => Libcall {
+            f32_symbol: "log2f",
+            f64_symbol: "log2",
+        },
+        "log10" => Libcall {
+            f32_symbol: "log10f",
+            f64_symbol: "log10",
+        },
+        "sin" => Libcall {
+            f32_symbol: "sinf",
+            f64_symbol: "sin",
+        },
+        "cos" => Libcall {
+            f32_symbol: "cosf",
+            f64_symbol: "cos",
+        },
+        "pow" => Libcall {
+            f32_symbol: "powf",
+            f64_symbol: "pow",
+        },
+        "fma" | "fmuladd" => Libcall {
+            f32_symbol: "fmaf",
+            f64_symbol: "fma",
+        },
+        "copysign" => Libcall {
+            f32_symbol: "copysignf",
+            f64_symbol: "copysign",
+        },
         // Integer power: compiler-builtins' `__powi{s,d}f2`, as LLVM
         // expands `llvm.powi`.
-        "powi" => Libcall { f32_symbol: "__powisf2", f64_symbol: "__powidf2" },
+        "powi" => Libcall {
+            f32_symbol: "__powisf2",
+            f64_symbol: "__powidf2",
+        },
         _ => return None,
     })
 }
@@ -1303,7 +1360,14 @@ pub(super) fn lower_float_math_intrinsic<'tcx>(
     }
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
-        values.push(import_operand(tcx, ctx, state, insert_block, body, &arg.node)?);
+        values.push(import_operand(
+            tcx,
+            ctx,
+            state,
+            insert_block,
+            body,
+            &arg.node,
+        )?);
     }
     let float_ty = values[0].get_type(ctx);
     let is_f32 = float_ty.deref(ctx).downcast_ref::<FP32Type>().is_some();
@@ -1322,7 +1386,13 @@ pub(super) fn lower_float_math_intrinsic<'tcx>(
     .try_into()
     .expect("libm symbol names are legal identifiers");
     let arg_tys: Vec<TypeHandle> = values.iter().map(|value| value.get_type(ctx)).collect();
-    declare_external_function(ctx, state.module_body, callee.clone(), arg_tys, Some(float_ty));
+    declare_external_function(
+        ctx,
+        state.module_body,
+        callee.clone(),
+        arg_tys,
+        Some(float_ty),
+    );
     let call = mir_dialect::ops::CallOp::new_direct(ctx, callee, values, Some(float_ty));
     call.get_operation().insert_at_back(insert_block, ctx);
     let result = call.get_result(ctx);

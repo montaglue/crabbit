@@ -14,19 +14,18 @@ extern crate rustc_target;
 #[allow(unused_extern_crates)]
 extern crate rustc_driver;
 
+mod device_artifact;
 /// The rustc-MIR importer: walks the crate's monomorphized MIR and builds
 /// a module of cuda-oxide's `mir` dialect (dialect-mir).
 pub mod importer;
 pub mod kernel_llvm_export;
-mod device_artifact;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, TargetConfig};
 use rustc_middle::dep_graph::WorkProductMap;
 use rustc_middle::ty::TyCtxt;
-use rustc_session::{IncrCompSession, Session};
 use rustc_session::config::{OutputFilenames, OutputType};
-
+use rustc_session::{IncrCompSession, Session};
 
 use crate::{
     conversion::pass::{AnalysisManager, PMConfig, Pass as _, PassList, Passes, into_passes},
@@ -114,10 +113,8 @@ impl CodegenBackend for CrabbitBackend {
             ));
         }
 
-        let objects = emit_object(sess, outputs, &mut imported).unwrap_or_else(|error| {
-            sess.dcx()
-                .fatal(format!("crabbit codegen failed: {error}"))
-        });
+        let objects = emit_object(sess, outputs, &mut imported)
+            .unwrap_or_else(|error| sess.dcx().fatal(format!("crabbit codegen failed: {error}")));
 
         let compiled = |name: &str, object| CompiledModule {
             name: name.to_string(),
@@ -168,17 +165,21 @@ pub enum EmitError {
         source: std::io::Error,
     },
     #[error("{stage} failed: {reason}")]
-    Pipeline {
-        stage: &'static str,
-        reason: String,
-    },
+    Pipeline { stage: &'static str, reason: String },
     #[error("CRABBIT_PTX_SM must be an integer SM number, got `{got}`")]
     InvalidPtxSm { got: String },
 }
 
-pub(crate) fn io_err(action: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> EmitError {
+pub(crate) fn io_err(
+    action: &'static str,
+    path: &std::path::Path,
+) -> impl FnOnce(std::io::Error) -> EmitError {
     let path = path.to_path_buf();
-    move |source| EmitError::Io { action, path, source }
+    move |source| EmitError::Io {
+        action,
+        path,
+        source,
+    }
 }
 
 /// Resolves the session's LLVM target triple against pliron-ll's backend
@@ -233,7 +234,10 @@ fn emit_lowered_ir(
 ) -> Result<(), EmitError> {
     into_passes(crabbit_config::build(Stage::MirToLlvm, side, cfg)?)
         .run(module, ctx, &mut AnalysisManager::default())
-        .map_err(|error| EmitError::Pipeline { stage: "mir stage + lower-dialect-mir (CRABBIT_EMIT_IR)", reason: error.disp(ctx).to_string() })?;
+        .map_err(|error| EmitError::Pipeline {
+            stage: "mir stage + lower-dialect-mir (CRABBIT_EMIT_IR)",
+            reason: error.disp(ctx).to_string(),
+        })?;
     std::fs::create_dir_all(dir).map_err(io_err("create CRABBIT_EMIT_IR dir", dir))?;
     let path = dir.join(format!("{stem}.plir"));
     std::fs::write(&path, module.disp(ctx).to_string()).map_err(io_err("write", &path))
@@ -272,7 +276,8 @@ fn lower_kernels(
     let mut analyses = AnalysisManager::default();
     let mut dump_dir = None;
     if tracing {
-        let dir = std::env::temp_dir().join(format!("crabbit-kernel-pass-dumps-{}", trace_version()));
+        let dir =
+            std::env::temp_dir().join(format!("crabbit-kernel-pass-dumps-{}", trace_version()));
         std::fs::create_dir_all(&dir).map_err(io_err("create kernel pass dump directory", &dir))?;
         analyses.set_config(PMConfig {
             print_after_all: true,
@@ -304,7 +309,10 @@ fn lower_kernels(
 /// Run the program stage ([Stage::Program]) over the host module and the
 /// kernel module together, both in the LLVM dialect. Nothing runs when its
 /// order is empty (crabbit's default).
-fn run_program_stage(imported: &mut importer::ImportedCrate, cfg: &CrabbitConfig) -> Result<(), EmitError> {
+fn run_program_stage(
+    imported: &mut importer::ImportedCrate,
+    cfg: &CrabbitConfig,
+) -> Result<(), EmitError> {
     if crabbit_config::order(Stage::Program, Side::Program, cfg)?.is_empty() {
         return Ok(());
     }
@@ -367,12 +375,15 @@ fn emit_kernels(
             .parse()
             .map_err(|_| EmitError::InvalidPtxSm { got: sm.clone() })?;
     }
-    let (ptx, linemap) =
-        pliron_ll::nvptx::write_ptx_and_linemap_from_ir(&imported.ctx, imported.kernel_module, &target)
-            .map_err(|error| EmitError::Pipeline {
-                stage: "NVPTX emission",
-                reason: error.to_string(),
-            })?;
+    let (ptx, linemap) = pliron_ll::nvptx::write_ptx_and_linemap_from_ir(
+        &imported.ctx,
+        imported.kernel_module,
+        &target,
+    )
+    .map_err(|error| EmitError::Pipeline {
+        stage: "NVPTX emission",
+        reason: error.to_string(),
+    })?;
 
     let sidecar = object.with_extension("ptx");
     std::fs::write(&sidecar, &ptx).map_err(io_err("write PTX sidecar", &sidecar))?;
@@ -396,11 +407,12 @@ fn emit_kernels(
     if let Ok(out) = std::env::var("CRABBIT_LL_OUT")
         && !out.is_empty()
     {
-        let ll = kernel_llvm_export::export_kernel_module(&mut imported.ctx, imported.kernel_module)
-            .map_err(|error| EmitError::Pipeline {
-                stage: "LLVM IR export of the kernel module",
-                reason: error,
-            })?;
+        let ll =
+            kernel_llvm_export::export_kernel_module(&mut imported.ctx, imported.kernel_module)
+                .map_err(|error| EmitError::Pipeline {
+                    stage: "LLVM IR export of the kernel module",
+                    reason: error,
+                })?;
         std::fs::write(&out, ll)
             .map_err(io_err("write CRABBIT_LL_OUT", std::path::Path::new(&out)))?;
     }
@@ -451,12 +463,14 @@ fn emit_object(
 ) -> Result<EmittedObjects, EmitError> {
     let backend = backend_for_session(sess)?;
     let crate_name = trace_project(sess);
-    let cfg = CrabbitConfig::new(Triple::parse(&sess.target.llvm_target)).with_crate_name(&crate_name);
+    let cfg =
+        CrabbitConfig::new(Triple::parse(&sess.target.llvm_target)).with_crate_name(&crate_name);
 
     // Per-pass IR dumps and the trace file cost O(passes × module text) in
     // formatting and I/O — gigabytes on a large crate — so tracing is
     // opt-in via CRABBIT_TRACE.
-    let tracing = std::env::var("CRABBIT_TRACE").is_ok_and(|value| !value.is_empty() && value != "0");
+    let tracing =
+        std::env::var("CRABBIT_TRACE").is_ok_and(|value| !value.is_empty() && value != "0");
 
     let mut analyses = AnalysisManager::default();
     // The trace's "initial" entry must be captured BEFORE any lowering:
@@ -482,8 +496,7 @@ fn emit_object(
         if tracing {
             // Record the stage the emit path ran outside the pipeline, so
             // the trace still shows every pass that touched the module.
-            emitted_lowering_dump =
-                Some(imported.module.disp(&imported.ctx).to_string());
+            emitted_lowering_dump = Some(imported.module.disp(&imported.ctx).to_string());
         }
     }
     let mut dump_dir = None;
@@ -518,13 +531,20 @@ fn emit_object(
             host_lowered = true;
         }
         if run_result.is_ok() {
-            kernels = Some(lower_kernels(imported, tracing, &format!("{crate_name}-crabbit_rust"), &cfg)?);
+            kernels = Some(lower_kernels(
+                imported,
+                tracing,
+                &format!("{crate_name}-crabbit_rust"),
+                &cfg,
+            )?);
             run_program_stage(imported, &cfg)?;
         }
     }
     if run_result.is_ok() {
         let mut pipeline = pipeline(&cfg, Side::Host, host_lowered)?;
-        run_result = pipeline.run(imported.module, &mut imported.ctx, &mut analyses).map(|_| ());
+        run_result = pipeline
+            .run(imported.module, &mut imported.ctx, &mut analyses)
+            .map(|_| ());
     }
 
     if let Some(dump_dir) = dump_dir {
@@ -561,10 +581,12 @@ fn emit_object(
                 reason: error.disp(&imported.ctx).to_string(),
             });
         }
-        trace.write(&trace_path).map_err(|error| EmitError::Pipeline {
-            stage: "trace write",
-            reason: error.to_string(),
-        })?;
+        trace
+            .write(&trace_path)
+            .map_err(|error| EmitError::Pipeline {
+                stage: "trace write",
+                reason: error.to_string(),
+            })?;
     }
     if let Err(error) = run_result {
         return Err(EmitError::Pipeline {
@@ -577,7 +599,8 @@ fn emit_object(
     // invocation (backend-tests inspect it after the build).
     let object = outputs.temp_path_for_cgu(OutputType::Object, "crabbit_rust");
     if let Some(parent) = object.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err("create object output directory", parent))?;
+        std::fs::create_dir_all(parent)
+            .map_err(io_err("create object output directory", parent))?;
     }
     let bytes = backend
         .write_object(&mut imported.ctx, imported.module)
@@ -587,7 +610,13 @@ fn emit_object(
         })?;
     std::fs::write(&object, bytes).map_err(io_err("write object file", &object))?;
     let device_artifact = match kernels {
-        Some(kernels) => Some(emit_kernels(imported, &object, kernels, &cfg, &sess.target.llvm_target)?),
+        Some(kernels) => Some(emit_kernels(
+            imported,
+            &object,
+            kernels,
+            &cfg,
+            &sess.target.llvm_target,
+        )?),
         None => None,
     };
     Ok(EmittedObjects {
@@ -646,7 +675,6 @@ pub fn create_backend() -> Box<dyn CodegenBackend> {
 
 pub mod trace;
 
-
 pub mod passes {
     pub use crabbit_mir::passes::lower_dialect_mir;
     pub use pliron_ll::passes::{
@@ -662,16 +690,15 @@ pub mod dialects {
     pub use crabbit_mir::dialect_mir;
     // cuda-oxide's device intrinsics as ops, dialect `nvvm`.
     pub use dialect_nvvm as nvvm;
-    pub use pliron_llvm as llvm;
     pub use pliron::builtin;
     pub use pliron_ll::{aarch64, ll, macho, x86_64};
+    pub use pliron_llvm as llvm;
 }
 // ---- compatibility re-exports over the pliron core (cleanup pending) ----
 pub use pliron::{
-    attribute, basic_block, builtin, common_traits, context, dialect,
-    graph, identifier, irbuild, irfmt, linked_list, location, op, operation, opts,
-    parsable, printable, region, storage_uniquer, symbol_table, r#type,
-    uniqued_any, utils, value,
+    attribute, basic_block, builtin, common_traits, context, dialect, graph, identifier, irbuild,
+    irfmt, linked_list, location, op, operation, opts, parsable, printable, region,
+    storage_uniquer, symbol_table, r#type, uniqued_any, utils, value,
 };
 pub mod result {
     pub use pliron::result::*;
@@ -679,14 +706,13 @@ pub mod result {
     pub type CrabbitResult<T> = pliron::result::Result<T>;
 }
 pub mod ir {
+    pub use pliron::r#type;
     pub use pliron::{
         attribute, basic_block, dialect, irfmt, location, op, operation, region, value,
     };
-    pub use pliron::r#type;
 }
 pub use pliron::{
-    arg_err, arg_err_noloc, arg_error, arg_error_noloc, create_err, create_error,
-    dict_key, input_err, input_err_noloc,
-    input_error, input_error_noloc, type_to_trait, verify_err, verify_err_noloc,
-    verify_error, verify_error_noloc,
+    arg_err, arg_err_noloc, arg_error, arg_error_noloc, create_err, create_error, dict_key,
+    input_err, input_err_noloc, input_error, input_error_noloc, type_to_trait, verify_err,
+    verify_err_noloc, verify_error, verify_error_noloc,
 };
